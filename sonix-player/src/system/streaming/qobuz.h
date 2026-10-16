@@ -161,6 +161,10 @@ int qobuz_featured_albums(const char *type, int offset, qobuz_album_t *out, int 
 // time the track is played.
 bool qobuz_track_url(long track_id, char *url, size_t url_size, char *mime, size_t mime_size, int *format_out);
 
+// Explicit quality snapshot for background downloads.
+bool qobuz_track_url_format(long track_id, int format_id, char *url, size_t url_size,
+                            char *mime, size_t mime_size, int *format_out);
+
 // ---------------------------------------------------------------------------
 // Writing to the account
 //

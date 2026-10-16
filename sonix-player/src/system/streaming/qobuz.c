@@ -716,6 +716,10 @@ static void sign_request(const char *object, const char *method, qobuz_param_t *
 // ---------------------------------------------------------------------------
 
 bool qobuz_track_url(long track_id, char *url_out, size_t url_size, char *mime, size_t mime_size, int *format_out) {
+	return qobuz_track_url_format(track_id, qobuz_get_format(), url_out, url_size, mime, mime_size, format_out);
+}
+
+bool qobuz_track_url_format(long track_id, int format_id, char *url_out, size_t url_size, char *mime, size_t mime_size, int *format_out) {
 	clear_error();
 
 	if (!url_out || url_size == 0) {

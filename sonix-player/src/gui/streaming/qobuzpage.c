@@ -23,6 +23,7 @@
 #include "src/system/core/lang.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/qobuz.h"
+#include "src/system/streaming/qobuzdownload.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/streamturn.h"
 #include "src/system/streaming/qobuzsync.h"
@@ -375,6 +376,32 @@ static void ask_playlist_delete(void *user) {
 	confirm_show("delete_the_playlist", message, "delete", do_playlist_delete, NULL);
 }
 
+static void download_result_ui(void *user) {
+    char *message = user;
+    gui_notify_popup(message);
+    free(message);
+}
+
+static void download_done(const char *error) {
+    char *message = strdup(error ? error : "Saved to Music/Qobuz. Rescan music to update library.");
+    if (message) gui_post(download_result_ui, message);
+}
+
+static void download_track(void *user) {
+    (void)user;
+    if (menu_index < 0 || menu_index >= result_count) return;
+    if (qobuzdownload_start(storage_sd_root(), &result_tracks[menu_index], download_done))
+        gui_notify_popup("Download started. Track menu has Cancel download.");
+    else
+        gui_notify_popup("Cannot start: download busy, no card, or track unavailable.");
+}
+
+static void cancel_download(void *user) {
+    (void)user;
+    qobuzdownload_cancel();
+    gui_notify_popup("Cancelling download (may wait for network timeout).");
+}
+
 static void row_menu_cb(lv_event_t *e) {
 	lv_event_stop_bubbling(e); // the tap belongs to the menu, not to the row
 	if (switcher_back_drag_active() || player_sheet_drag_active()) {
@@ -422,7 +449,15 @@ static void row_menu_cb(lv_event_t *e) {
 		return;
 	}
 
-	popover_show(lv_event_get_current_target(e), &item, 1);
+	popover_item_t items[2] = {item};
+    int count = 1;
+    row_menu_t kind = row_menu_kind(list_kind);
+    if (kind == ROW_MENU_TRACK_ADD || kind == ROW_MENU_TRACK_REMOVE) {
+        items[1].label = qobuzdownload_busy() ? "Cancel download" : "Download to music folder";
+        items[1].action = qobuzdownload_busy() ? cancel_download : download_track;
+        count = 2;
+    }
+    popover_show(lv_event_get_current_target(e), items, count);
 }
 
 // Side of a row thumbnail, in pixels.
