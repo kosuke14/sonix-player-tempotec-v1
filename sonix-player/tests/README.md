@@ -253,9 +253,16 @@ stand-in receiver and a stub audio layer, no Spotify account and no network.
 - **Service:** start/stop, the ownership latch and the DAC hand-back, a child
   that dies on its own being reported with its log tail, the idle stop needing
   a page to be shut and the receiver to have played, and the shutdown paths
-  waiting for the process to leave.
+  waiting for the process to leave. The receiver's process is checked from
+  inside itself -- the stand-in records the `oom_score_adj` and the niceness the
+  spawn gave it, so a change that stops running it below the interface, or that
+  lets it inherit the player's own protection from the OOM killer, fails here --
+  and the log it writes into the tmpfs is checked to be trimmed back to its own
+  tail.
 - **Sink:** the ring's wrap, frame alignment, largest-popped-oldest on a stall,
-  the widen-to-32 retry, and the three ways the output is released.
+  the widen-to-32 retry, and the three ways the output is released -- including
+  a release asked for while the ring is full, which has to be answered by the
+  same pass rather than by the one that finds nothing to play.
 
 The page is covered separately by the `ui` target's `test_spotify_page`, which
 links the real page, rows, scrolling labels, themes and language loader with

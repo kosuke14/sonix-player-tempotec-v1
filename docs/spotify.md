@@ -51,6 +51,15 @@ Three seconds after audio stops arriving, the player closes the DAC and hands th
 - The receiver is kept alive while the browser is on screen or a request is in flight, and Wi-Fi is kept up while a request is outstanding.
 - If the receiver dies on its own, the page says so and shows the tail of its log.
 
+### The receiver's process
+
+The receiver is a separate process, started from the player with the card's folder as its working directory. Four things about it matter if something goes wrong:
+
+- **It is below the interface.** It runs at `nice 10` and in its own session, so it can never take the core from the thread that draws the screen, and it dies with the player (`PR_SET_PDEATHSIG`) rather than being left holding the card under an unmount.
+- **The kernel kills it first.** The player asks to be the last process killed when memory runs out (`oom_score_adj -500`, see `main.c`); the receiver inherits nothing of that and sets `500` for itself before it starts. A receiver that does not fit in what the device has left is killed and reported on the page, instead of the kernel taking something the device needs.
+- **It does not inherit the player's descriptors**, and its own log is capped: `/tmp/sonix-spotify.log` lives on the tmpfs, which is RAM, and a receiver told to be verbose (`debug = true`) can write faster than anything can read. Past 256 KiB the file keeps its tail — the last thing a receiver said is what explains it stopping — and starts again.
+- **The first line of every start is in the player's log**: `spotify: receiver pid …, rss …, free …, oom_score_adj …, nice …`. That is the line a report about a slow or frozen device is read from.
+
 ## Layout on the card
 
 ```text
@@ -104,6 +113,30 @@ debug = false          ; true adds -vv to the receiver's arguments
 
 `extra` is for the receiver's other options — a proxy, normalisation, a different discovery mode — split on whitespace, at most eight words, no quoting.
 
+## If the device freezes
+
+A freeze is the one failure this device cannot report about itself, so the player writes down what it can before and during one, and the first job is to get that out of it.
+
+**Collect the log.** Turn on **Developer options → Log to microSD**, delete `.local/sonix_player.log` from the card, turn the Spotify switch on again, and wait for the freeze. The log survives it, because it is flushed to the card about once a second. If the device has to be restarted, send the log **as it is after it comes back**: the kernel's own account of the freeze — out-of-memory kills, the interface watchdog's dump, `/proc/last_kmsg` — is copied into the top of the next run's log. [`docs/collecting-logs.md`](collecting-logs.md) has the short version and the bundle script for the rest.
+
+What the log will then say, depending on the cause:
+
+| In the log | What it means |
+| --- | --- |
+| `spotify: receiver pid …: rss … kB, free … kB` with a small `free` | the device had no room for the receiver; the kernel's kill of it appears in the next start's `kernel:` lines |
+| `watchdog: … MemAvailable … Dirty/Writeback …` and a thread dump | the interface stalled: the thread it names is the one to look at — `spotify sink` is the sink, `Scheduler`/`mmc` waits are the card |
+| `spotify: the output is behind; … frames dropped` repeating | the card is not keeping up with the audio; the log flushes are part of the same load |
+| nothing after the switch, and no `receiver pid` line | the stall is in the player's own enable path — send the log, that is the bug |
+
+**Things to try, in order,** with the log from each:
+
+- `[spotify] cache_mb = 0` in `device_config.ini`: nothing is written to the card while streaming. Every other streaming feature on this player works this way on purpose (see [`docs/subsonic.md`](subsonic.md)), and a slow card filling with dirty pages is the most likely way to make this device unresponsive.
+- `[spotify] rt_priority = 0`: the sink's playback thread stops being real-time. Audio may stutter on a busy device; the interface will not.
+- `[spotify] debug = false` (the default): `-vv` makes the receiver write its own trace into the tmpfs, which is RAM.
+- **Turn the switch off and give it a minute** before pulling the card: the receiver flushes its cache and its saved login on the way out.
+
+If it freezes with the card's `.spotify` folder renamed away, the switch refuses to move and says *missing receiver* — that is the expected answer, not the bug. The freeze is in starting the receiver, and the log above is what says which part of it.
+
 ## Building the receiver
 
 The fork is built static and soft-float for the Q2, which is also a MIPS `mipsel` soft-float device, and the same instructions work for the V1:
@@ -121,7 +154,7 @@ The receiver reports a backend version (`q2-v1.4` for this branch) over the `cap
 
 ## Validation
 
-`sonix-player/tests/test_spotify.c` covers the protocol client, the status file, the control socket, the service's start/stop/idle/ownership rules and the sink's ring and DAC hand-over, against a shell stand-in receiver and a stub audio layer; `make -C tests spotify` runs it. `sonix-player/tests/ui/test_spotify_page.c` covers the page itself on both board profiles with a stubbed `spotify.h` and shell, and records every op and argument the page sends; `make -C tests ui` runs it.
+`sonix-player/tests/test_spotify.c` covers the protocol client, the status file, the control socket, the service's start/stop/idle/ownership rules and the sink's ring and DAC hand-over, against a shell stand-in receiver and a stub audio layer; `make -C tests spotify` runs it -- the stand-in receiver records the niceness and the `oom_score_adj` the spawn gave it, and the receiver's log is checked to be trimmed back to its own tail. `sonix-player/tests/ui/test_spotify_page.c` covers the page itself on both board profiles with a stubbed `spotify.h` and shell, and records every op and argument the page sends; `make -C tests ui` runs it.
 
 Both are host tests: they do not certify real-time scheduling, the receiver's audio quality or Wi-Fi behavior on the device. Before relying on it, check on a V1:
 

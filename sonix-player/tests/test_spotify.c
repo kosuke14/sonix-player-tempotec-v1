@@ -60,6 +60,15 @@ bool audio_external_begin_latency(int sample_rate, int channels, int bits, int b
 		return false;
 	}
 
+	// The player's own PCM is open and it is the only writer there is: the
+	// external route cannot have the device while it plays, exactly as
+	// external_open_locked() refuses on the device. The sink answers that by
+	// dropping what arrives until the local player lets go, so the suite waits
+	// on the sink's own state rather than on a re-open that cannot happen.
+	if (atomic_load(&local_playing)) {
+		return false;
+	}
+
 	pthread_mutex_lock(&audio_lock);
 	if (!audio_device_open) {
 		audio_device_open = true;
@@ -152,6 +161,59 @@ static bool idle_stop_reported(void) {
 
 static bool death_reported(void) {
 	return strstr(spotify_status_text(), "stopped (2)") != NULL;
+}
+
+// The receiver's own output, where spotify.c puts it: the log the page shows the
+// tail of. The stand-in records the two attributes the spawn gave it beside
+// itself on the card; the suite reads both back from here.
+#define TEST_RECEIVER_LOG "/tmp/sonix-spotify.log"
+
+static bool child_self_recorded(void) {
+	char path[600];
+	snprintf(path, sizeof(path), "%s/child_self.txt", spotify_dir());
+	struct stat st;
+	return stat(path, &st) == 0 && st.st_size > 0;
+}
+
+static void assert_child_self(void) {
+	char path[600];
+	snprintf(path, sizeof(path), "%s/child_self.txt", spotify_dir());
+	FILE *f = fopen(path, "r");
+	assert(f);
+	int oom = -1;
+	int level = -1;
+	assert(fscanf(f, "%d %d", &oom, &level) == 2);
+	fclose(f);
+
+	// The player asks to be the last process the kernel kills (oom_score_adj
+	// -500, main.c). A receiver that inherited that score is a foreign binary
+	// the kernel may not touch when memory runs out, and the device freezes
+	// around it instead of the receiver dying: it asks to go first, and it runs
+	// below the interface rather than at the same level as the screen.
+	assert(oom == 500);
+	assert(level == 10);
+}
+
+// The receiver's log is on the tmpfs, which is the device's RAM: a receiver
+// that decides to be verbose must not be able to fill it. What is kept is the
+// tail -- the last thing a receiver said is what explains it stopping -- so the
+// marker at the end is there and the first line of the bulk is not.
+static bool receiver_log_kept_its_tail(void) {
+	struct stat st;
+	if (stat(TEST_RECEIVER_LOG, &st) != 0 || st.st_size < 1024 || st.st_size > 100 * 1024) {
+		return false;
+	}
+
+	static char body[128 * 1024];
+	FILE *f = fopen(TEST_RECEIVER_LOG, "r");
+	if (!f) {
+		return false;
+	}
+	size_t n = fread(body, 1, sizeof(body) - 1, f);
+	fclose(f);
+	body[n] = '\0';
+
+	return strstr(body, "LATE-MARKER") != NULL && strstr(body, "EARLY line 0\n") == NULL;
 }
 
 static bool state_playing(void) {
@@ -506,6 +568,12 @@ static void write_receiver_script(const char *status_state, bool feed_audio) {
 	fprintf(f,
 			"#!/bin/sh\n"
 			"echo \"receiver: stand-in started\" >&2\n"
+			// What the player's spawn asked of this process, recorded for the
+			// suite to read back: see child_exec() in spotify.c.
+			// (Written aside and renamed: the suite must never read it half written.)
+			"d=$(dirname \"$0\")\n"
+			"echo \"$(cat /proc/$$/oom_score_adj) $(sed 's/.*) //' /proc/$$/stat | awk '{print $17}')\" > \"$d/child_self.tmp\"\n"
+			"mv \"$d/child_self.tmp\" \"$d/child_self.txt\"\n"
 			"uptime_ms() { awk '{printf \"%%d\\n\", $1 * 1000}' /proc/uptime; }\n"
 			"write_status() {\n"
 			"  tmp=/tmp/sonix-spotify.state.tmp\n"
@@ -522,6 +590,22 @@ static void write_receiver_script(const char *status_state, bool feed_audio) {
 	} else {
 		fprintf(f, "i=0\nwhile [ $i -lt 100 ]; do write_status; sleep 1; i=$((i+1)); done\n");
 	}
+
+	fclose(f);
+	assert(chmod(receiver_script, 0755) == 0);
+}
+
+// A receiver that does its best to fill the tmpfs: half a megabyte of log, a
+// marker under it, then a status loop that keeps it up. See log_trim().
+static void write_verbose_receiver_script(void) {
+	FILE *f = fopen(receiver_script, "w");
+	assert(f);
+
+	fprintf(f,
+			"#!/bin/sh\n"
+			"awk 'BEGIN { for (i = 0; i < 8000; i++) print \"EARLY line \" i \" 01234567890123456789012345678901234567890123456789\" }'\n"
+			"echo LATE-MARKER\n"
+			"i=0\nwhile [ $i -lt 100 ]; do printf 'state=playing\\n' > /tmp/sonix-spotify.state; sleep 1; i=$((i+1)); done\n");
 
 	fclose(f);
 	assert(chmod(receiver_script, 0755) == 0);
@@ -567,6 +651,11 @@ static void test_service(void) {
 	frames_baseline = frames_now();
 	spotify_set_enabled(true);
 	assert(wait_until(running_true, 5.0));
+
+	// The receiver's process carries the two answers the player's spawn gave it
+	// on the way in: below the interface, and first in line to be killed.
+	assert(wait_until(child_self_recorded, 5.0));
+	assert_child_self();
 
 	// The status file gets read, and the page's view of it arrives.
 	assert(wait_until(frames_advanced, 8.0) == true);
@@ -663,6 +752,16 @@ static void test_service(void) {
 	assert(!spotify_enabled() && !spotify_running());
 	assert(strstr(spotify_status_text(), "unrecognized flag") != NULL);
 
+	// The receiver's log is on the tmpfs, which is the device's RAM. A receiver
+	// that fills it is trimmed back to its own tail, once every check, and the
+	// file that is left is the one that explains it.
+	write_verbose_receiver_script();
+	spotify_set_enabled(true);
+	assert(wait_until(running_true, 5.0));
+	assert(wait_until(receiver_log_kept_its_tail, 12.0)); // one 5 s check, and slack
+	spotify_set_enabled(false);
+	assert(wait_until(running_false, 6.0));
+
 	// The settings round-trip through the real configuration store.
 	spotify_set_bitrate(320);
 	spotify_set_cache_mb(64);
@@ -702,7 +801,10 @@ static void test_sink(void) {
 		}
 		char buffer[4096];
 		memset(buffer, 0, sizeof(buffer));
-		for (int i = 0; i < 96; i++) { // 384 KiB: more than the ring, so it back-pressures
+		// More than the ring holds, written as fast as the FIFO takes it: the
+		// ring is full, or filling, at the moment of the release below -- which
+		// is the case the hand-back has to survive (see play_worker).
+		for (int i = 0; i < 512; i++) { // 2 MiB
 			if (write(fd, buffer, sizeof(buffer)) != (ssize_t)sizeof(buffer)) {
 				_exit(1);
 			}
@@ -724,6 +826,11 @@ static void test_sink(void) {
 	pthread_mutex_unlock(&audio_lock);
 	assert(open_before);
 
+	// And the player's own PCM is open from here to the end of the function:
+	// the device has a local track on it, so the sink cannot take it back, and
+	// "not holding the output" is a state the suite can look at rather than a
+	// moment it has to catch.
+	atomic_store(&local_playing, true);
 	assert(spotifysink_release_output() == true);
 	assert(sink_pause_calls == 1);
 	double end = now_secs() + 3.0;
@@ -746,6 +853,7 @@ static void test_sink(void) {
 	// the receiver is not told to pause for a device it is not holding.
 	assert(spotifysink_release_output() == true);
 	assert(sink_pause_calls == 1);
+	atomic_store(&local_playing, false);
 
 	spotifysink_stop();
 	int status = 0;

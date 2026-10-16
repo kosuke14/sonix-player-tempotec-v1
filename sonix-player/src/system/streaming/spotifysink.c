@@ -336,13 +336,34 @@ static void *play_worker(void *unused) {
 	bool widen = false;
 
 	while (!stopping) {
-		if (release_requested && device_open) {
-			// Something local is starting and the device is being handed over:
-			// what is still in the ring is a second and a half of a track that
-			// is not going to be played, and holding it would make the handover
-			// wait for the ring to drain. The request is answered below, on the
-			// pass that finds nothing to play.
+		// Something local is starting and the device is being handed over: what
+		// is still in the ring is a second and a half of a track that is not
+		// going to be played, and holding it would make the handover wait for
+		// the ring to drain.
+		//
+		// Answered here, before the pop, and not on the pass that finds nothing
+		// to play: the reader can refill the ring between those two things --
+		// it does so constantly while the receiver streams -- and the request
+		// would then be handed to audio that was about to be dropped. A local
+		// track would wait the sink's whole silence timeout for a device that
+		// nobody is using.
+		//
+		// A request is answered by this block and by nothing else. It is only
+		// ever made while the sink is holding the output (see
+		// spotifysink_release_output), so with nothing open there is nothing to
+		// hand back and the asker has already been told so.
+		if (release_requested) {
+			release_requested = false;
 			ring_reset();
+			if (device_open) {
+				printf("spotify: output handed back (asked for)\n");
+				audio_external_end();
+				device_open = false;
+				pthread_mutex_lock(&mark_lock);
+				holds_output = false;
+				pthread_mutex_unlock(&mark_lock);
+				continue;
+			}
 		}
 
 		size_t n = ring_pop(chunk, sizeof(chunk));
@@ -351,21 +372,16 @@ static void *play_worker(void *unused) {
 			int silent = spotifysink_silent_ms();
 			bool idle = silent >= SINK_IDLE_HANDBACK_MS;
 
-			if (device_open && (release_requested || idle || stopping)) {
-				printf("spotify: output handed back (%s)\n", release_requested ? "asked for" : "silent");
+			if (device_open && (idle || stopping)) {
+				printf("spotify: output handed back (%s)\n", stopping ? "stopping" : "silent");
 				audio_external_end();
 				device_open = false;
 				pthread_mutex_lock(&mark_lock);
 				holds_output = false;
 				pthread_mutex_unlock(&mark_lock);
 			}
-			release_requested = false;
 			continue;
 		}
-
-		// Audio again: whoever asked for the device has had their answer, and a
-		// request left standing would drop the stream at the next gap.
-		release_requested = false;
 
 		if (!device_open) {
 			// One PCM, one writer. The phone can start casting while a local

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -50,6 +51,24 @@
 // It has to flush its cache and its credentials, so not instant -- but it is
 // leaving either way.
 #define SPOTIFY_TERM_MS 3000
+
+// The receiver's log is on the tmpfs, which is the device's RAM: 64 MB of it,
+// with the player and a music library's worth of page cache in the rest. A
+// receiver told to be verbose can write faster than anything can read, so past
+// this size the file keeps its tail and starts again. The receiver holds it
+// O_APPEND, so it neither notices nor writes into a hole.
+#define SPOTIFY_LOG_CAP (256 * 1024)
+#define SPOTIFY_LOG_KEEP (8 * 1024)
+#define SPOTIFY_LOG_CHECK_MS 5000
+
+// Where the receiver runs relative to the interface, and to the kernel's choice
+// of what to kill. Both are the player's own answers to the same two questions
+// (see thread_be_low_priority() in utils.c and set_oom_priority() in main.c),
+// asked of a process instead of a thread: the player is the last thing that
+// should go and the first thing that should be prompt, and a foreign twenty-
+// megabyte binary is neither.
+#define SPOTIFY_CHILD_NICE 10
+#define SPOTIFY_CHILD_OOM_SCORE "500"
 
 // A line of the status file, and the whole of it. The file is nine lines of at
 // most a title's worth of text each.
@@ -597,6 +616,260 @@ static void runtime_cleanup(void) {
 	unlink(browse_path);
 }
 
+// ---------------------------------------------------------------------------
+// starting the receiver's process
+// ---------------------------------------------------------------------------
+
+// Everything the child needs, filled in while there is still one process. The
+// child only reads it: until the exec it shares this memory with the player.
+typedef struct {
+	const char *binary;
+	char *const *argv;
+	const char *log_path;
+	const char *card_dir;
+	int close_to;
+} receiver_spawn_t;
+
+#define CHILD_SAY(message) ((void)write(STDERR_FILENO, (message), sizeof(message) - 1))
+#define CHILD_PUT(fd, message) ((void)write((fd), (message), sizeof(message) - 1))
+
+// The receiver's process, from the moment vfork() returns in it until execv()
+// replaces the whole of it.
+//
+// vfork() and not fork(), and this is the reason: fork() copies the page tables
+// and every mapping of the calling process, and it does so holding the lock
+// that every other thread's page faults take. This is a twenty-five megabyte
+// player, single core, and the copy has to come out of memory that is already
+// full of the library, the artwork and the interface; when the copy needs pages
+// and there are none, the kernel reclaims them from inside the fork, with the
+// interface thread stopped and waiting for that same lock. That is the exact
+// moment the switch is flipped. See the note in cover.c, which refuses a forked
+// helper on this device for the same reason. vfork() copies none of it: the
+// child shares the player's mappings for the microseconds it takes to reach the
+// exec, and the exec discards them for its own.
+//
+// What vfork() asks for in return is the contract this function is written to:
+// the child may not write to any memory the two processes share, and it may not
+// return. So it makes libc *syscall wrappers* and nothing else -- no stdio
+// (the player's streams are mid-line and buffered), no malloc, no strerror, no
+// exit() -- and every path out of it is execv() or _exit(). Its messages are
+// string constants written straight to the log it is about to become.
+//
+// noinline, so that the child's own local variables live in a frame of their
+// own rather than in a slot the compiler chose inside its caller's frame: the
+// child may not write to anything the player will read again, and the compiler
+// cannot be expected to know that.
+static void child_exec(const receiver_spawn_t *spawn) __attribute__((noreturn, noinline));
+static void child_exec(const receiver_spawn_t *spawn) {
+	// Its own log, O_APPEND so that the player can take the head off it from
+	// the other side without the writer landing in a hole. The descriptor is
+	// the receiver's own: dup2() copies it into this process's table, which
+	// vfork() gave the child separately from the player's.
+	int log_fd = open(spawn->log_path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+	if (log_fd >= 0) {
+		if (log_fd != STDOUT_FILENO) {
+			(void)dup2(log_fd, STDOUT_FILENO);
+		}
+		if (log_fd != STDERR_FILENO) {
+			(void)dup2(log_fd, STDERR_FILENO);
+		}
+		if (log_fd > STDERR_FILENO) {
+			(void)close(log_fd);
+		}
+	} else {
+		int null_fd = open("/dev/null", O_WRONLY);
+		if (null_fd >= 0) {
+			(void)dup2(null_fd, STDOUT_FILENO);
+			(void)dup2(null_fd, STDERR_FILENO);
+			if (null_fd > STDERR_FILENO) {
+				(void)close(null_fd);
+			}
+		}
+	}
+
+	// Nothing else of the player's comes along. A descriptor of the card's left
+	// open in the receiver keeps the card busy through every unmount, and the
+	// FIFO's read end would make the receiver's own write end look as though
+	// somebody were still reading when the sink has stopped.
+	for (int fd = STDERR_FILENO + 1; fd < spawn->close_to; fd++) {
+		(void)close(fd);
+	}
+
+	// A session of its own, so a signal aimed at the player's process group
+	// does not take the receiver out through the back door -- it is stopped
+	// deliberately, and its cache is flushed on the way.
+	(void)setsid();
+
+	// And if the player dies anyway, the kernel tells the receiver to go. A
+	// librespot left holding the card while the storage layer unmounts is a
+	// filesystem that is dirty on the next boot.
+	(void)prctl(PR_SET_PDEATHSIG, SIGTERM);
+	if (getppid() == 1) {
+		// The player died in the moment between the two lines above, and the
+		// signal was aimed at a parent this process no longer has.
+		CHILD_SAY("spotify: the player is gone\n");
+		_exit(125);
+	}
+
+	// The kernel kills the most expensive process when memory runs out, and the
+	// player has asked to be the most expensive one on the device: when RAM
+	// runs out the kernel kills something else, and if that is a system service
+	// the device restarts with nothing in the log to say why (see main.c). A
+	// receiver that inherited that score is a foreign binary nobody may kill,
+	// which is the whole of a freeze; it is a helper, so it asks to be killed
+	// first.
+	int oom_fd = open("/proc/self/oom_score_adj", O_WRONLY);
+	if (oom_fd >= 0) {
+		CHILD_PUT(oom_fd, SPOTIFY_CHILD_OOM_SCORE);
+		(void)close(oom_fd);
+	}
+
+	// Below the interface, as every worker of the player's own is: the receiver
+	// decrypts, decodes and speaks TLS, and on one core a thing like that at
+	// the same level as the thread that draws the screen takes half of it.
+	(void)setpriority(PRIO_PROCESS, 0, SPOTIFY_CHILD_NICE);
+
+	// The card's own folder when it is there, and the root otherwise: a
+	// receiver that writes anything relative must land on the card or nowhere,
+	// never in the firmware's own directories, which is where the player
+	// stands. A receiver with nowhere to stand is not run at all.
+	if (chdir(spawn->card_dir) != 0 && chdir("/") != 0) {
+		CHILD_SAY("spotify: no working directory\n");
+		_exit(126);
+	}
+
+	execv(spawn->binary, spawn->argv);
+	CHILD_SAY("spotify: execv failed\n");
+	_exit(127);
+}
+
+// How far the receiver's process is swept of the player's descriptors. The
+// kernel's own limit is read here, in the parent, because sysconf() in a vfork
+// child would be libc allocation on memory the two share.
+static int spawn_close_to(void) {
+	long limit = sysconf(_SC_OPEN_MAX);
+	if (limit < 64) {
+		limit = 64;
+	}
+	if (limit > 1024) {
+		limit = 1024;
+	}
+	return (int)limit;
+}
+
+// Free memory, asked for the way audio.c and library.c ask: -1 where there is no
+// /proc/meminfo (the host build and the tests).
+static long mem_available_kb(void) {
+	FILE *f = fopen("/proc/meminfo", "r");
+	if (!f) {
+		return -1;
+	}
+	long kb = -1;
+	char line[128];
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1) {
+			break;
+		}
+	}
+	fclose(f);
+	return kb;
+}
+
+// One line about the process that was just started: the pid, how much of the
+// device's memory it is already holding, how much of it there is, the score the
+// kernel will kill it by, and the level it runs at.
+//
+// This is the line a freeze report is read from. If the switch makes the device
+// stall, the log has to be able to say what the device looked like when it did,
+// and none of it is visible from the receiver's own log.
+static void report_receiver(int pid) {
+	char path[64];
+	long rss_kb = -1;
+
+	// The second field of statm is the resident set, in pages.
+	snprintf(path, sizeof(path), "/proc/%d/statm", pid);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		long total = 0;
+		long resident = 0;
+		if (fscanf(f, "%ld %ld", &total, &resident) == 2 && resident > 0) {
+			long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+			rss_kb = resident * (page_kb > 0 ? page_kb : 4);
+		}
+		fclose(f);
+	}
+
+	long oom = -1;
+	snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", pid);
+	f = fopen(path, "r");
+	if (f) {
+		if (fscanf(f, "%ld", &oom) != 1) {
+			oom = -1;
+		}
+		fclose(f);
+	}
+
+	// getpriority() answers -1 both as a value and as an error, so errno is the
+	// only way to tell them apart.
+	errno = 0;
+	int level = getpriority(PRIO_PROCESS, (id_t)pid);
+	bool have_level = !(level == -1 && errno != 0);
+
+	printf("spotify: receiver pid %d: rss %ld kB, free %ld kB, oom_score_adj %ld, nice %s%d\n", (int)pid, rss_kb,
+			mem_available_kb(), oom, have_level ? "" : "?", have_level ? level : 0);
+}
+
+// The receiver's log is on the tmpfs, which is the device's RAM, and the
+// receiver decides for itself how much it writes there. Past the cap the file
+// keeps its tail -- what a receiver says just before it stops is what explains
+// it stopping -- and starts again. Its writer holds it O_APPEND, so it does not
+// land in a hole where the head used to be.
+static void log_trim(void) {
+	struct stat st;
+	if (stat(log_path, &st) != 0 || st.st_size <= SPOTIFY_LOG_CAP) {
+		return;
+	}
+
+	static char tail[SPOTIFY_LOG_KEEP];
+	int fd = open(log_path, O_RDONLY);
+	if (fd < 0) {
+		return;
+	}
+	if (lseek(fd, st.st_size - (off_t)sizeof(tail), SEEK_SET) < 0) {
+		close(fd);
+		return;
+	}
+	ssize_t n = read(fd, tail, sizeof(tail));
+	close(fd);
+	if (n <= 0) {
+		return;
+	}
+
+	// From a line boundary: a kept tail that opens mid-sentence reads as a
+	// corrupted file, which is the one thing it must not look like.
+	ssize_t from = 0;
+	while (from < n && tail[from] != '\n') {
+		from++;
+	}
+	if (from < n) {
+		from++;
+	}
+	if (from >= n) {
+		return;
+	}
+
+	fd = open(log_path, O_WRONLY | O_TRUNC);
+	if (fd < 0) {
+		return;
+	}
+	if (write(fd, tail + from, (size_t)(n - from)) < 0) {
+		// The file is truncated and empty: the next line the receiver writes
+		// is the first one in it, which is still better than a full tmpfs.
+	}
+	close(fd);
+	printf("spotify: the receiver's log was long; kept its last %d kB\n", (int)((n - from) / 1024));
+}
+
 static bool child_spawn(void) {
 	char argv_storage[16][128];
 	char *argv[48];
@@ -686,58 +959,29 @@ static bool child_spawn(void) {
 	// The FIFO's read end is already open (spotifysink_start opens it before
 	// the receiver is started, so that librespot's own blocking open of the
 	// write end finds its reader waiting).
-	pid_t pid = fork();
+	//
+	// vfork() rather than fork(): child_exec() carries the argument, and the
+	// player suspends for the moment the child takes to reach its exec -- the
+	// control thread, not the interface, and nothing else of the player is
+	// touched.
+	receiver_spawn_t spawn;
+	spawn.binary = binary_path;
+	spawn.argv = argv;
+	spawn.log_path = log_path;
+	spawn.card_dir = card_dir;
+	spawn.close_to = spawn_close_to();
+
+	pid_t pid = vfork();
 	if (pid < 0) {
 		set_error("could not start the receiver: %s", strerror(errno));
 		return false;
 	}
 	if (pid == 0) {
-		// A session of its own, so a signal aimed at the player's process group
-		// does not take the receiver out through the back door -- it is stopped
-		// deliberately, and its cache is flushed on the way.
-		setsid();
-
-		// And if the player dies anyway, the kernel tells the receiver to go.
-		// A librespot left holding the card while the storage layer unmounts is
-		// a filesystem that is dirty on the next boot.
-		prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-		int log_fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		if (log_fd >= 0) {
-			dup2(log_fd, STDOUT_FILENO);
-			dup2(log_fd, STDERR_FILENO);
-			if (log_fd > STDERR_FILENO) {
-				close(log_fd);
-			}
-		} else {
-			int null_fd = open("/dev/null", O_WRONLY);
-			if (null_fd >= 0) {
-				dup2(null_fd, STDOUT_FILENO);
-				dup2(null_fd, STDERR_FILENO);
-				if (null_fd > STDERR_FILENO) {
-					close(null_fd);
-				}
-			}
-		}
-
-		// The card's own folder when it is there, and the root otherwise: a
-		// receiver that writes anything relative must land on the card or
-		// nowhere, never in the firmware's own directories, which is where the
-		// player stands. A receiver with nowhere to stand is not run at all --
-		// and the message goes into the log the parent reads back, since the
-		// receiver is now writing to it.
-		if (chdir(card_dir) != 0 && chdir("/") != 0) {
-			fprintf(stderr, "spotify: no working directory: %s\n", strerror(errno));
-			_exit(126);
-		}
-
-		execv(binary_path, argv);
-		fprintf(stderr, "spotify: execv(%s): %s\n", binary_path, strerror(errno));
-		_exit(127);
+		child_exec(&spawn);
 	}
 
 	child_pid = pid;
-	printf("spotify: receiver started, pid %d\n", (int)pid);
+	report_receiver(pid);
 	return true;
 }
 
@@ -799,6 +1043,7 @@ static void service_run(void) {
 	pthread_mutex_unlock(&ctl_lock);
 
 	int64_t next_poll = now_ms();
+	int64_t next_log_check = now_ms();
 	bool failed = false;
 
 	for (;;) {
@@ -828,6 +1073,10 @@ static void service_run(void) {
 		}
 
 		int64_t now = now_ms();
+		if (now >= next_log_check) {
+			next_log_check = now + SPOTIFY_LOG_CHECK_MS;
+			log_trim();
+		}
 		if (now >= next_poll) {
 			next_poll = now + SPOTIFY_STATUS_POLL_MS;
 
