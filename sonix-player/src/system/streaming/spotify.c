@@ -702,10 +702,6 @@ static bool child_spawn(void) {
 		// a filesystem that is dirty on the next boot.
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-		if (chdir(card_dir) != 0) {
-			chdir("/");
-		}
-
 		int log_fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (log_fd >= 0) {
 			dup2(log_fd, STDOUT_FILENO);
@@ -722,6 +718,17 @@ static bool child_spawn(void) {
 					close(null_fd);
 				}
 			}
+		}
+
+		// The card's own folder when it is there, and the root otherwise: a
+		// receiver that writes anything relative must land on the card or
+		// nowhere, never in the firmware's own directories, which is where the
+		// player stands. A receiver with nowhere to stand is not run at all --
+		// and the message goes into the log the parent reads back, since the
+		// receiver is now writing to it.
+		if (chdir(card_dir) != 0 && chdir("/") != 0) {
+			fprintf(stderr, "spotify: no working directory: %s\n", strerror(errno));
+			_exit(126);
 		}
 
 		execv(binary_path, argv);
