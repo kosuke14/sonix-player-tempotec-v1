@@ -126,12 +126,15 @@ What the log will then say, depending on the cause:
 | `spotify: receiver pid …: rss … kB, free … kB` with a small `free` | the device had no room for the receiver; the kernel's kill of it appears in the next start's `kernel:` lines |
 | `watchdog: … MemAvailable … Dirty/Writeback …` and a thread dump | the interface stalled: the thread it names is the one to look at — `spotify sink` is the sink, `Scheduler`/`mmc` waits are the card |
 | `spotify: the output is behind; … frames dropped` repeating | the card is not keeping up with the audio; the log flushes are part of the same load |
-| nothing after the switch, and no `receiver pid` line | the stall is in the player's own enable path — send the log, that is the bug |
+| `sched: RT throttling activated`, a second or two after `thread: spotify sink runs at RT priority` | a real-time thread is spinning rather than waiting, and the kernel is taking the core back from the real-time class for the rest of every period — what is left is what the interface gets. Try `rt_priority = 0` first: it is the remedy for this row. |
+| nothing after the switch and no `receiver pid` line at all | the player did not get as far as starting the receiver: that is a bug in the player's own enable path, and the log is the report |
+
+The switch used to freeze the V1 with exactly the fourth line: one or two seconds after `thread: spotify sink runs at RT priority`, and with `spotify: receiver pid …` either side of it. The sink's two waits are timed waits on condvars that are statically initialized, which fixes the clock they are read against at `CLOCK_REALTIME`; that file computed its deadlines on `CLOCK_MONOTONIC`, and on a device whose wall clock is set from its battery-backed RTC every deadline was a billion seconds in the past. Every wait returned at once. The playback thread did not sleep, it spun — at real-time priority, on the one core — and the interface was left with what the kernel's RT throttling left it. Both waits come from `deadline_in_ms()` now, the helper `utils.c` keeps for this exact reason, and no file computes its own. `tests/test_spotify.c` measures the CPU an idle receiver stack costs, so a wait that stops waiting fails the suite instead of the device.
 
 **Things to try, in order,** with the log from each:
 
 - `[spotify] cache_mb = 0` in `device_config.ini`: nothing is written to the card while streaming. Every other streaming feature on this player works this way on purpose (see [`docs/subsonic.md`](subsonic.md)), and a slow card filling with dirty pages is the most likely way to make this device unresponsive.
-- `[spotify] rt_priority = 0`: the sink's playback thread stops being real-time. Audio may stutter on a busy device; the interface will not.
+- `[spotify] rt_priority = 0`: the sink's playback thread leaves the real-time class, so nothing it does can starve the interface — a spinning real-time thread is what `sched: RT throttling activated` in the log means. Audio may stutter on a busy device; the interface will not.
 - `[spotify] debug = false` (the default): `-vv` makes the receiver write its own trace into the tmpfs, which is RAM.
 - **Turn the switch off and give it a minute** before pulling the card: the receiver flushes its cache and its saved login on the way out.
 
@@ -154,7 +157,7 @@ The receiver reports a backend version (`q2-v1.4` for this branch) over the `cap
 
 ## Validation
 
-`sonix-player/tests/test_spotify.c` covers the protocol client, the status file, the control socket, the service's start/stop/idle/ownership rules and the sink's ring and DAC hand-over, against a shell stand-in receiver and a stub audio layer; `make -C tests spotify` runs it -- the stand-in receiver records the niceness and the `oom_score_adj` the spawn gave it, and the receiver's log is checked to be trimmed back to its own tail. `sonix-player/tests/ui/test_spotify_page.c` covers the page itself on both board profiles with a stubbed `spotify.h` and shell, and records every op and argument the page sends; `make -C tests ui` runs it.
+`sonix-player/tests/test_spotify.c` covers the protocol client, the status file, the control socket, the service's start/stop/idle/ownership rules and the sink's ring and DAC hand-over, against a shell stand-in receiver and a stub audio layer; `make -C tests spotify` runs it -- the stand-in receiver records the niceness and the `oom_score_adj` the spawn gave it, the receiver's log is checked to be trimmed back to its own tail, and an idle receiver stack -- service and sink up, nothing to play -- is measured against the CPU it is allowed to cost (which is what a timed wait that stops waiting does not pass: see the freezes section below). That measurement is why `core/utils.c` is linked into that suite for real rather than stubbed. `sonix-player/tests/ui/test_spotify_page.c` covers the page itself on both board profiles with a stubbed `spotify.h` and shell, and records every op and argument the page sends; `make -C tests ui` runs it.
 
 Both are host tests: they do not certify real-time scheduling, the receiver's audio quality or Wi-Fi behavior on the device. Before relying on it, check on a V1:
 

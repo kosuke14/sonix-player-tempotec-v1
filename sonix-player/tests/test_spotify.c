@@ -116,13 +116,6 @@ audio_status_t audio_get_status(void) {
 
 void audio_set_external_release_cb(bool (*cb)(void)) { registered_release_cb = cb; }
 
-void thread_be_realtime(const char *name, int priority) {
-	(void)name;
-	(void)priority;
-}
-
-void thread_be_low_priority(const char *name) { (void)name; }
-
 const char *sysinfo_device_name(void) { return "Test V1"; }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +141,29 @@ static bool wait_until(bool (*done)(void), double seconds) {
 	return done();
 }
 
+// What this process's own threads spent on the CPU over a window of wall
+// clock, in milliseconds. The receiver is a child process, so this counts the
+// player's side of the Spotify work and nothing else: the sink's two threads
+// and the service's control thread, which are all supposed to be asleep when
+// there is nothing to do.
+//
+// It is the measurement the freeze is: a timed wait whose deadline is on the
+// wrong clock returns at once, and its thread -- the playback thread, at
+// real-time priority -- spins instead of sleeping.
+static double cpu_ms_over(double seconds) {
+	struct timespec before, after;
+	assert(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &before) == 0);
+	double end = now_secs() + seconds;
+	while (now_secs() < end) {
+		usleep(1000);
+	}
+	assert(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &after) == 0);
+	return (double)(after.tv_sec - before.tv_sec) * 1000.0 +
+	       (double)(after.tv_nsec - before.tv_nsec) / 1000000.0;
+}
+
 static bool running_true(void) { return spotify_running(); }
+static bool sink_holds_output_true(void) { return spotifysink_holds_output(); }
 static bool running_false(void) { return !spotify_running(); }
 
 // The service reads the status file on a half-second poll, so a test that wants
@@ -683,6 +698,12 @@ static void test_service(void) {
 
 	// Local playback asks for the DAC: the receiver is paused over the control
 	// socket, the keys go back, and the PCM is closed within a poll.
+	// The sink has to be holding the device when it is asked for it: the
+	// stand-in's cat writes a second of audio and then comes back for more, and
+	// a gap longer than the sink's silence rule hands the output back on its
+	// own -- a release asked for then is answered "it is already free", and
+	// there is no hand-back left to wait for.
+	assert(wait_until(sink_holds_output_true, 3.0));
 	assert(registered_release_cb != NULL);
 	int pauses_before = audio_pauses;
 	int ends_before = audio_ends;
@@ -725,6 +746,21 @@ static void test_service(void) {
 
 	spotify_get_state(&state);
 	assert(state.state == SPOTIFY_PLAY_NONE && !state.session);
+
+	// A receiver that is up and sending nothing must cost the device nothing
+	// either: the sink's threads wait for audio that is not coming, and the
+	// control thread waits out its tick. Both waits are timed waits on statically
+	// initialized condvars, on the clock those condvars are read against, and
+	// this is what says so -- the playback thread asking to be real time is the
+	// reason a wrong clock here is not merely a warm device but a frozen one.
+	write_receiver_script("playing", false);
+	spotify_set_enabled(true);
+	assert(wait_until(running_true, 5.0));
+	usleep(500 * 1000); // the spawn, the log and the first status poll
+	double quiet_cpu_ms = cpu_ms_over(0.8);
+	assert(quiet_cpu_ms < 250.0);
+	spotify_set_enabled(false);
+	assert(wait_until(running_false, 6.0));
 
 	// An idling receiver stops itself when the setting says so. The stand-in
 	// writes state=playing but sends no audio, which is the case the rule is
@@ -791,6 +827,13 @@ static void test_sink(void) {
 	assert(!spotifysink_playing());
 	assert(spotifysink_silent_ms() == -1);
 
+	// Nothing on the other end of the FIFO yet: the sink has nothing to play and
+	// nothing to do, and the only thing that could make it cost anything is its
+	// own wait not waiting. Measured before the writer below is started, so the
+	// process's own CPU over this window is the playback thread's idea of idling.
+	double idle_cpu_ms = cpu_ms_over(0.6);
+	assert(idle_cpu_ms < 150.0);
+
 	// A writer on the other end of the FIFO, in this process.
 	pid_t pid = fork();
 	assert(pid >= 0);
@@ -798,6 +841,17 @@ static void test_sink(void) {
 		int fd = open(fifo, O_WRONLY);
 		if (fd < 0) {
 			_exit(1);
+		}
+		// The sink's own read end of this FIFO came across in the fork above.
+		// A writer that holds a read end of the pipe it is writing into never
+		// sees its write() fail: when the sink stops, this process would still
+		// hold the only reader, its write() would block with the pipe full, and
+		// waitpid() below would wait for it forever. The receiver's own spawn
+		// sweeps its descriptors for the same reason -- see child_exec().
+		for (int i = 3; i < 1024; i++) {
+			if (i != fd) {
+				close(i);
+			}
 		}
 		char buffer[4096];
 		memset(buffer, 0, sizeof(buffer));

@@ -74,10 +74,17 @@ $(BUILD)/test_calculator: $(CALC_SRC) $(ROOT)/src/gui/calculator/calcmodel.h
 # and the sink that carries its PCM to the DAC. The real spotify.c, spotifysink.c
 # and spotifybrowse.c, with a stand-in receiver on a temporary card and
 # audio_external_* stubbed -- no librespot, no account, no network.
+# core/utils.c is here for deadline_in_ms(), and it is here for real rather than
+# stubbed: the sink waits on statically initialized condvars, so the clock that
+# helper computes its deadlines on is the difference between threads that sleep
+# and threads that spin -- which, on the device, is the difference between a
+# device that works and a device that freezes. A stub of it in this file would
+# hide exactly the bug this suite is meant to hold. thread_be_realtime() comes
+# with it, so the playback thread really does ask to be real time.
 SPOTIFY_SRC = test_spotify.c $(ROOT)/src/system/streaming/spotify.c \
               $(ROOT)/src/system/streaming/spotifysink.c \
               $(ROOT)/src/system/streaming/spotifybrowse.c \
-              $(ROOT)/src/system/core/config.c
+              $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/utils.c
 .PHONY: spotify
 spotify: $(BUILD)/test_spotify
 	$(BUILD)/test_spotify

@@ -86,17 +86,6 @@ static int64_t sink_now_ms(void) {
 	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void deadline_in(struct timespec *out, int ms) {
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	out->tv_sec = now.tv_sec + ms / 1000;
-	out->tv_nsec = now.tv_nsec + (long)(ms % 1000) * 1000000L;
-	if (out->tv_nsec >= 1000000000L) {
-		out->tv_nsec -= 1000000000L;
-		out->tv_sec++;
-	}
-}
-
 static void mark_audio(void) {
 	pthread_mutex_lock(&mark_lock);
 	last_audio_ms = sink_now_ms();
@@ -143,6 +132,20 @@ bool spotifysink_holds_output(void) {
 static uint8_t ring[SINK_RING_BYTES];
 static size_t ring_read;
 static size_t ring_fill;
+
+// Both condvars are statically initialized, which fixes the clock their waits
+// are read against at CLOCK_REALTIME (a condvar made with pthread_cond_init()
+// and a NULL attribute gets the same one). So the deadlines below come from
+// deadline_in_ms(), which is on that clock, and not from a helper of its own on
+// CLOCK_MONOTONIC, which is what this file had: on a device whose wall clock
+// says October 2026, "now plus 200 ms" read off the monotonic clock is a
+// billion seconds in the past, every timed wait returns ETIMEDOUT on the spot,
+// and the two threads that should have been asleep spin instead. The playback
+// thread spins at real-time priority -- the kernel prints "sched: RT throttling
+// activated", the interface is left with what the throttling leaves it, and the
+// device freezes. Nothing on a development machine shows it: there the two
+// clocks differ by uptime, and an uptime of a few hours is a deadline the
+// condvar is still waiting for.
 static pthread_mutex_t ring_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ring_data = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t ring_space = PTHREAD_COND_INITIALIZER;
@@ -167,8 +170,9 @@ static void ring_push(const uint8_t *data, size_t n) {
 
 	pthread_mutex_lock(&ring_lock);
 
+	// On the condvar's own clock: see the note above ring_lock.
 	struct timespec until;
-	deadline_in(&until, SINK_RING_WAIT_MS);
+	deadline_in_ms(&until, SINK_RING_WAIT_MS);
 	while (n > SINK_RING_BYTES - ring_fill && !stopping) {
 		if (pthread_cond_timedwait(&ring_space, &ring_lock, &until) == ETIMEDOUT) {
 			break;
@@ -211,7 +215,8 @@ static size_t ring_pop(uint8_t *out, size_t max) {
 
 	if (ring_fill < SINK_FRAME_BYTES && !stopping) {
 		struct timespec until;
-		deadline_in(&until, SINK_POLL_MS);
+		// On the condvar's own clock: see the note above ring_lock.
+		deadline_in_ms(&until, SINK_POLL_MS);
 		pthread_cond_timedwait(&ring_data, &ring_lock, &until);
 	}
 
@@ -456,7 +461,13 @@ bool spotifysink_start(const char *fifo_path, void (*pause_receiver)(void)) {
 		fprintf(stderr, "spotify: mkfifo(%s): %s\n", sink_path, strerror(errno));
 		return false;
 	}
-	chmod(sink_path, 0666);
+	// The receiver runs as the player's own user, so the mode mkfifo() left is
+	// already the one that matters; widening it past the process's umask is
+	// what keeps a receiver started another way able to open it, and a
+	// filesystem that refuses is worth a line rather than a failed sink.
+	if (chmod(sink_path, 0666) != 0) {
+		fprintf(stderr, "spotify: chmod(%s): %s\n", sink_path, strerror(errno));
+	}
 
 	pthread_mutex_lock(&mark_lock);
 	last_audio_ms = 0;

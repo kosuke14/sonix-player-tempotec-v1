@@ -259,6 +259,14 @@ stand-in receiver and a stub audio layer, no Spotify account and no network.
   lets it inherit the player's own protection from the OOM killer, fails here --
   and the log it writes into the tmpfs is checked to be trimmed back to its own
   tail.
+- **Cost of waiting:** with the service up and the stand-in sending no audio,
+  this process's own CPU over a set window is measured against a ceiling. The
+  sink's playback thread asks to be real time, so a timed wait whose deadline is
+  on the wrong clock is not a warm device but a frozen one: the wait returns at
+  once, the thread spins, and the kernel throttles the whole real-time class --
+  which is what froze a V1 at the switch. `core/utils.c` is linked here for real
+  rather than stubbed for the same reason: the clock `deadline_in_ms()` computes
+  on is the thing being held.
 - **Sink:** the ring's wrap, frame alignment, largest-popped-oldest on a stall,
   the widen-to-32 retry, and the three ways the output is released -- including
   a release asked for while the ring is full, which has to be answered by the

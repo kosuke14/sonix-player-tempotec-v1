@@ -630,8 +630,20 @@ typedef struct {
 	int close_to;
 } receiver_spawn_t;
 
-#define CHILD_SAY(message) ((void)write(STDERR_FILENO, (message), sizeof(message) - 1))
-#define CHILD_PUT(fd, message) ((void)write((fd), (message), sizeof(message) - 1))
+// The child's one way of speaking, and the reason it is a function rather than
+// a cast to void around write(): a newer libc declares write() so that leaving
+// its result unread does not compile, and the result has to be *read* to
+// satisfy it, which a cast does not. There is nothing to do with it: a child
+// that is about to exec cannot repair a short write, and its own log is the
+// only place it could say so.
+static void child_write(int fd, const char *message, size_t length)
+{
+	ssize_t written = write(fd, message, length);
+	(void)written;
+}
+
+#define CHILD_SAY(message) child_write(STDERR_FILENO, (message), sizeof(message) - 1)
+#define CHILD_PUT(fd, message) child_write((fd), (message), sizeof(message) - 1)
 
 // The receiver's process, from the moment vfork() returns in it until execv()
 // replaces the whole of it.
@@ -1119,16 +1131,14 @@ static void service_run(void) {
 		}
 
 		// A short sleep that a switch-off interrupts: the condvar is the same
-		// one spotify_set_enabled() signals.
+		// one spotify_set_enabled() signals, and it is statically initialized,
+		// so its clock is CLOCK_REALTIME and the deadline has to be too --
+		// deadline_in_ms() is that deadline (see the note at ring_lock in
+		// spotifysink.c for what a monotonic one costs on this device).
 		pthread_mutex_lock(&ctl_lock);
 		if (desired) {
 			struct timespec until;
-			clock_gettime(CLOCK_MONOTONIC, &until);
-			until.tv_nsec += SPOTIFY_TICK_MS * 1000000L;
-			if (until.tv_nsec >= 1000000000L) {
-				until.tv_nsec -= 1000000000L;
-				until.tv_sec++;
-			}
+			deadline_in_ms(&until, SPOTIFY_TICK_MS);
 			pthread_cond_timedwait(&ctl_cond, &ctl_lock, &until);
 		}
 		pthread_mutex_unlock(&ctl_lock);
