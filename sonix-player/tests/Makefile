@@ -19,7 +19,7 @@ CORE = $(ROOT)/src/system/streaming/subsonic.c \
        $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/md5.c \
        $(ROOT)/src/system/core/config.c $(ROOT)/src/system/playback/playlist.c
 
-.PHONY: test sanitize clean
+.PHONY: test sanitize clean spotify
 
 test: $(BUILD)/test_subsonic
 	python3 run_subsonic_tests.py $(BUILD)/test_subsonic
@@ -69,6 +69,24 @@ calculator: $(BUILD)/test_calculator
 $(BUILD)/test_calculator: $(CALC_SRC) $(ROOT)/src/gui/calculator/calcmodel.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(CALC_SRC) $(LDFLAGS) $(LDLIBS)
+
+# Spotify: the Q2SPOT/1 protocol, the receiver's status and control sockets,
+# and the sink that carries its PCM to the DAC. The real spotify.c, spotifysink.c
+# and spotifybrowse.c, with a stand-in receiver on a temporary card and
+# audio_external_* stubbed -- no librespot, no account, no network.
+SPOTIFY_SRC = test_spotify.c $(ROOT)/src/system/streaming/spotify.c \
+              $(ROOT)/src/system/streaming/spotifysink.c \
+              $(ROOT)/src/system/streaming/spotifybrowse.c \
+              $(ROOT)/src/system/core/config.c
+.PHONY: spotify
+spotify: $(BUILD)/test_spotify
+	$(BUILD)/test_spotify
+
+$(BUILD)/test_spotify: $(SPOTIFY_SRC) $(ROOT)/src/system/streaming/spotify.h \
+                       $(ROOT)/src/system/streaming/spotifysink.h \
+                       $(ROOT)/src/system/streaming/spotifybrowse.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SPOTIFY_SRC) $(LDFLAGS) $(LDLIBS)
 
 NOTES_SRC = test_notes.c $(ROOT)/src/system/notes/notesstore.c $(ROOT)/src/system/text/textfile.c
 .PHONY: notes
