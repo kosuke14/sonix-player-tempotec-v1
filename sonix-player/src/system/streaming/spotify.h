@@ -101,6 +101,11 @@ typedef struct {
 // writes.
 void spotify_get_state(spotify_state_t *out);
 
+// Where the receiver writes the current track's artwork: a JPEG beside its
+// status file, rewritten as tracks change. Decode it off the interface thread
+// (coverloader) and re-ask whenever spotify_serial() moves.
+void spotify_cover_path(char *out, size_t size);
+
 // Bumped whenever anything above changes, so a page redraws only then.
 unsigned spotify_serial(void);
 

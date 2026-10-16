@@ -235,3 +235,40 @@ structure, with filler where the picture data would be.
   them. It avoids the picture already up while there is another, and falls
   back to it when it is the only one. Twenty `._` files beside one picture
   never make it miss.
+
+## Spotify
+
+`make -C sonix-player/tests spotify` builds and runs `test_spotify` -- the
+receiver's three interfaces as the player's code sees them, with a shell
+stand-in receiver and a stub audio layer, no Spotify account and no network.
+
+- **Protocol:** the Q2SPOT/1 client's escaping, oversized argument refusal, the
+  8 KiB request ceiling, the 64 KiB reply ceiling, the "closed without a
+  trailing newline" last row, mismatched request ids, field counts, the 50-row
+  limit, connect failure and the deadline.
+- **Status file:** every field of the `key=value` file, `at`-based position
+  advancing, `cover=0/1`, truncation and a half-written file.
+- **Control socket:** each of the five datagrams, and a socket that is not
+  there.
+- **Service:** start/stop, the ownership latch and the DAC hand-back, a child
+  that dies on its own being reported with its log tail, the idle stop needing
+  a page to be shut and the receiver to have played, and the shutdown paths
+  waiting for the process to leave.
+- **Sink:** the ring's wrap, frame alignment, largest-popped-oldest on a stall,
+  the widen-to-32 retry, and the three ways the output is released.
+
+The page is covered separately by the `ui` target's `test_spotify_page`, which
+links the real page, rows, scrolling labels, themes and language loader with
+`spotify.h`, the shell and the keyboard stubbed. It records every op and
+argument the page sends, so the checks are about the protocol the page speaks:
+the switch refusing with no receiver or no Wi-Fi, the canned status reaching
+the title/artist/album lines, each browser row's op, a track row's
+`play <context> <position> <uri>`, a queue row's `skip`, the cursor as the last
+argument of a next-page request, back walking up the lists one page at a time
+before leaving the page, the settings page's pills, sign-out's confirmation,
+and a search's category and term. Both language asset trees and both panel
+sizes are used.
+
+Neither suite is hardware certification: there is no real receiver, no ALSA
+device and no Wi-Fi in either one. See
+[the V1 checklist](../../docs/spotify.md#validation).

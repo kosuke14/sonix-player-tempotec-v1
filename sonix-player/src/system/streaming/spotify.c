@@ -211,12 +211,10 @@ void spotify_init(const char *sd_root) {
 	}
 	snprintf(cover_path, sizeof(cover_path), "%s%s", status_path, SPOTIFY_COVER_SUFFIX);
 
-	// The DAC hand-back is one function pointer for the whole player (see
-	// audio_set_external_release_cb), and AirPlay registers its own when it is
-	// switched on. Ours is registered here and again on every start, so the
-	// receiver that was switched on last is the one that gets asked -- and the
-	// two cannot both be playing: whoever is not holding the external PCM
-	// answers true and is not in the way.
+	// The DAC hand-back. Registered here, and again on every start because it
+	// costs nothing, alongside AirPlay's own -- audio_set_external_release_cb()
+	// keeps a list and asks everyone, since the two receivers can each be
+	// switched on and only one of them can be holding the PCM.
 	audio_set_external_release_cb(spotifysink_release_output);
 }
 
@@ -225,6 +223,13 @@ bool spotify_available(void) {
 }
 
 const char *spotify_dir(void) { return card_dir; }
+
+void spotify_cover_path(char *out, size_t size) {
+	if (!out || !size) {
+		return;
+	}
+	snprintf(out, size, "%s", cover_path);
+}
 
 // ---------------------------------------------------------------------------
 // the status file
@@ -460,7 +465,15 @@ bool spotify_owns_playback(void) {
 	pthread_mutex_lock(&state_lock);
 	bool owns = running && owns_playback;
 	pthread_mutex_unlock(&state_lock);
-	return owns;
+	if (!owns) {
+		return false;
+	}
+
+	// ...unless a local track has the output. A receiver that is paused holds
+	// nothing, so starting a track from the card never asks it to let go, and
+	// without this the side keys would keep going to a phone that is not
+	// playing anything while a track on the card is.
+	return audio_get_status() != AUDIO_STATUS_PLAYING;
 }
 
 void spotify_forget_active(void) {
