@@ -5,6 +5,19 @@
 
 #include "src/gui/shell/gui.h"
 
+// How far past its own height the status bar still takes the pull-down that
+// opens the control centre: an invisible band under the bar, on the compact
+// panel only.
+//
+// The leather case that fits the V1 carries a lip over the very top of the
+// glass, and the bar's 24 px strip is exactly the part of the screen that lip
+// covers best -- the pull had to start in whatever sliver it left showing.
+// Growing the bar itself would push every page's content down, so the reach
+// grows around it instead: still the same gesture, starting lower. The
+// player's stand-in strip (panel_edge in player.c) carries the same band for
+// the same reason.
+#define TOPBAR_PULL_GRAB_EXT_PX 16
+
 void topbar_init(gui_config_t *cfg);
 
 // Repaints the clock. Called by the timer, and by the time setter the moment

@@ -8,6 +8,9 @@
 #include <time.h>
 
 #include "lvgl/lvgl.h"
+// lv_hit_test_info_t, the parameter of LV_EVENT_HIT_TEST (player.c includes
+// this too for the same reason).
+#include "lvgl/src/core/lv_obj_event_private.h"
 
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/icons.h"
@@ -935,6 +938,29 @@ static void topbar_refresh_theme(void) {
 	topbar_refresh_playback();
 }
 
+// The band under the bar that joins the pull on the compact panel, and the
+// condition for the two of them to claim a press at all -- see also
+// TOPBAR_PULL_GRAB_EXT_PX in the header.
+static void topbar_hit_test_cb(lv_event_t *e) {
+	lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
+	if (!info || !info->res || !top_bar) {
+		return;
+	}
+	// A press on the bar's own height is the bar's, always -- the band is
+	// everything below that, and only its first few pixels overlap anything.
+	if (info->point->y < lv_obj_get_height(top_bar)) {
+		return;
+	}
+	// In the band the claim is conditional, so nothing behaves differently
+	// from before the band existed wherever it reaches over a live surface:
+	// while the control centre is up the sheet keeps the screen it already
+	// had (the veil behind it answers a press here, as it did at this height
+	// before), and a page that has blocked the panel keeps the top edge of
+	// its own controls. Only a shut, unblocked control centre pulls from
+	// down here.
+	info->res = !quickpanel_is_open() && !quickpanel_blocked();
+}
+
 // A downward drag starting on the status bar pulls the control panel in, and the
 // panel follows the finger the whole way instead of snapping open the moment the
 // gesture is recognised. A short drag released early falls back out.
@@ -1041,6 +1067,17 @@ void topbar_init(gui_config_t *cfg) {
 	lv_obj_add_event_cb(top_bar, topbar_drag_cb, LV_EVENT_PRESSING, NULL);
 	lv_obj_add_event_cb(top_bar, topbar_drag_cb, LV_EVENT_RELEASED, NULL);
 	lv_obj_add_event_cb(top_bar, topbar_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+
+	// The band under the bar (TOPBAR_PULL_GRAB_EXT_PX), for the case lip over
+	// the top of the glass: the pull starts on the bar's own 24 px or on the
+	// invisible strip below it, whichever the finger can reach. The advanced
+	// hit test is what makes claiming the strip conditional -- without it the
+	// bar would simply take a press anywhere in the band from the page underneath.
+	if (topbar_compact) {
+		lv_obj_set_adv_hittest(top_bar, true);
+		lv_obj_set_ext_click_area(top_bar, TOPBAR_PULL_GRAB_EXT_PX);
+		lv_obj_add_event_cb(top_bar, topbar_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
+	}
 
 	// The default container padding would inset the bar's contents, so it goes.
 	lv_obj_set_style_pad_left(top_bar, 0, 0);

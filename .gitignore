@@ -51,5 +51,7 @@ sonix-packer/boot-script-report.txt
 subsonic-credentials.json
 subsonic-credentials.json.tmp
 sonix-player/tests/.build/
+sonix-player/tests/hitband/build/
+sonix-player/tests/hitband/test_hitband
 sonix-player/tests/__pycache__/
 sonix-player/tools/__pycache__/

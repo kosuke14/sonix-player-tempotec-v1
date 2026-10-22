@@ -1934,7 +1934,11 @@ void quickpanel_init(gui_config_t *cfg) {
 	card_gap = qp_compact ? 6 : CARD_GAP;
 	card_row_gap = qp_compact ? 4 : CARD_ROW_GAP;
 	handle_room = qp_compact ? 6 : HANDLE_ROOM;
-	bright_row_h = qp_compact ? 24 : BRIGHT_ROW_H;
+	// The brightness row is the slider's grab band, not just its frame: the
+	// compact card has the room (the two button lines use 92 of the 98 px
+	// left for them), and the line is hard enough to land on without the
+	// band being narrower than a fingertip. See the slider below.
+	bright_row_h = qp_compact ? 40 : BRIGHT_ROW_H;
 	panel_pad_top = cfg->padding + (qp_compact ? 2 : 8);
 	panel_pad_bottom = qp_compact ? 4 : PANEL_PAD_BOTTOM;
 
@@ -2152,7 +2156,15 @@ void quickpanel_init(gui_config_t *cfg) {
 	lv_obj_set_style_shadow_width(brightness_slider, 8, LV_PART_KNOB);
 	lv_obj_set_style_shadow_opa(brightness_slider, LV_OPA_30, LV_PART_KNOB);
 	lv_obj_set_style_shadow_color(brightness_slider, lv_color_black(), LV_PART_KNOB);
-	lv_obj_set_ext_click_area(brightness_slider, 18);
+	// The reach runs past the 10 px line in every direction, so a press
+	// anywhere in the row finds the slider instead of falling to the card,
+	// where the same movement would start dragging the sheet. LVGL only
+	// searches for a child inside its parent's rectangle, so the row is the
+	// hard limit on what this can claim: 72 px covers the whole row, sun
+	// icon and padding included, on both panel sizes, and nothing beyond it.
+	// That is what makes the target as tall as the row -- 40 px on the V1 --
+	// rather than the line's own thickness.
+	lv_obj_set_ext_click_area(brightness_slider, 72);
 	lv_obj_add_event_cb(brightness_slider, brightness_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 	lv_obj_add_event_cb(brightness_slider, brightness_released_cb, LV_EVENT_RELEASED, NULL);
 

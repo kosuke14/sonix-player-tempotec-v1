@@ -7337,9 +7337,13 @@ void player_init(gui_config_t *cfg) {
 
 	// Last, so it is above the artwork: an invisible strip exactly where the
 	// status bar would be, owning the pull-down that opens the control centre.
+	// On the V1 it reaches past the bar's height like the bar itself does
+	// (TOPBAR_PULL_GRAB_EXT_PX): the leather case's lip covers the top of
+	// the glass, and the pull needs somewhere below it to start from.
 	lv_obj_t *panel_edge = lv_obj_create(player_screen);
 	lv_obj_remove_style_all(panel_edge);
-	lv_obj_set_size(panel_edge, cfg->screen_width, cfg->top_bar_height);
+	lv_obj_set_size(panel_edge, cfg->screen_width,
+				cfg->top_bar_height + (compact ? TOPBAR_PULL_GRAB_EXT_PX : 0));
 	lv_obj_set_pos(panel_edge, 0, 0);
 	lv_obj_set_scrollable(panel_edge, false);
 	lv_obj_set_clickable(panel_edge, true);
