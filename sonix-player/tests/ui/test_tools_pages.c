@@ -35,6 +35,7 @@
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/input/kblayout.h"
+#include "src/system/input/romaji.h"
 #include "src/system/notes/notesstore.h"
 #include "src/system/text/textfile.h"
 
@@ -376,9 +377,9 @@ static void check_strings(const char *language_dir) {
 		languages++;
 	}
 	closedir(dir);
-	// The nine this firmware ships. A tenth added to the folder is meant to
+	// The ten this firmware ships. An eleventh added to the folder is meant to
 	// make this fail, so its texts get checked the same way.
-	assert(languages == 9);
+	assert(languages == 10);
 	assert(lang_set("English"));
 }
 
@@ -833,6 +834,46 @@ static void check_notes_page(gui_config_t *cfg, const char *dir, const char *tag
 	keyboard_refresh_type();
 	kblayout_move_in_use(KB_LAYOUT_ENGLISH, 0);
 	kblayout_move_others(KB_LAYOUT_UKRAINIAN, 0);
+	keyboard_refresh_layout();
+
+	// The Japanese kana keypad shares the gojūon over the nine keys, hiragana
+	// below and katakana above, and its letter rows are the romaji rows
+	// English types with. The conversion is plain C, so it is checked here
+	// alongside the table: syllables complete, ん waits for a consonant, and
+	// a doubled consonant types the っ first.
+	assert(strcmp(kblayout_name(KB_LAYOUT_JAPANESE), "日本語") == 0);
+	assert(kblayout_row_len(KB_LAYOUT_JAPANESE, 0) == 10);
+	assert(kblayout_row_len(KB_LAYOUT_JAPANESE, 1) == 9);
+	assert(kblayout_row_len(KB_LAYOUT_JAPANESE, 2) == 7);
+	assert(strcmp(kblayout_t9_letter(KB_LAYOUT_JAPANESE, 0, 0, false), "わ") == 0);
+	assert(strcmp(kblayout_t9_letter(KB_LAYOUT_JAPANESE, 0, 3, false), "ー") == 0);
+	assert(strcmp(kblayout_t9_letter(KB_LAYOUT_JAPANESE, 0, 5, false), "。") == 0);
+	assert(strcmp(kblayout_t9_letter(KB_LAYOUT_JAPANESE, 1, 0, true), "カ") == 0);
+	assert(kblayout_t9_len(KB_LAYOUT_JAPANESE, 3) == 6);
+	assert(strcmp(kblayout_t9_letter(KB_LAYOUT_JAPANESE, 3, 5, false), "っ") == 0);
+	char kana[24];
+	assert(romaji_feed("", 'k', false, kana, sizeof(kana)) == 0);
+	assert(romaji_feed("k", 'a', false, kana, sizeof(kana)) == 2 && strcmp(kana, "か") == 0);
+	assert(romaji_feed("k", 'a', true, kana, sizeof(kana)) == 2 && strcmp(kana, "カ") == 0);
+	assert(romaji_feed("sh", 'a', false, kana, sizeof(kana)) == 3 && strcmp(kana, "しゃ") == 0);
+	assert(romaji_feed("n", 'k', false, kana, sizeof(kana)) == 1 && strcmp(kana, "ん") == 0);
+	assert(romaji_feed("n", 'y', false, kana, sizeof(kana)) == 0); // ゃ waits for its vowel
+	assert(romaji_feed("t", 't', false, kana, sizeof(kana)) == 1 && strcmp(kana, "っ") == 0);
+	assert(romaji_feed("xt", 'u', false, kana, sizeof(kana)) == 3 && strcmp(kana, "っ") == 0);
+	assert(romaji_flush("n", false, kana, sizeof(kana)) == 1 && strcmp(kana, "ん") == 0);
+	assert(romaji_flush("ka", false, kana, sizeof(kana)) == 0);
+	kblayout_move_in_use(KB_LAYOUT_JAPANESE, 0);
+	keyboard_refresh_layout();
+	lv_obj_update_layout(noteeditor_screen);
+	check_within_panel(noteeditor_screen, cfg, "Note editor (Japanese keyboard)");
+	config_set_int("other", "keyboard_t9", 1);
+	keyboard_refresh_type();
+	lv_obj_update_layout(noteeditor_screen);
+	check_within_panel(noteeditor_screen, cfg, "Note editor (Japanese T9)");
+	config_set_int("other", "keyboard_t9", 0);
+	keyboard_refresh_type();
+	kblayout_move_in_use(KB_LAYOUT_ENGLISH, 0);
+	kblayout_move_others(KB_LAYOUT_JAPANESE, 0);
 	keyboard_refresh_layout();
 
 	// Typing, then leaving the page: the writing reaches the card even though

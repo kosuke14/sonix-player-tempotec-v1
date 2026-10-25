@@ -270,15 +270,22 @@ a self-signed certificate), and HLS.
   connection, and daylight-saving rules) or lets you set it by hand; the clock
   is written through to the RTC, with a 24-hour clock option.
 - **Language** - English, Italiano, Deutsch, Español, Français, Nederlands,
-  Polski, Português BR, Українська. The nine language files are read from the
+  Polski, Português BR, Українська, 日本語. The ten language files are read from the
   resource folder, so dropping another `.ini` in beside them adds a language.
   Titles and tags come out in whatever script the interface font covers too -
   Cyrillic, Greek, kana, kanji, Hangul, Thai and Arabic, Arabic right to left -
   so a Russian, Ukrainian or Japanese album title still reads.
 - **Remap buttons** - the three media buttons and the two volume buttons, each
   assignable to nothing, play/pause, previous, next, volume up or volume down.
-- **Keyboard layout** - ten layouts: English, Italian, German, Spanish, French,
-  Russian, Dutch, Polish, Portuguese and Ukrainian.
+- **Keyboard layout** - eleven layouts: English, Italian, German, Spanish,
+  French, Russian, Dutch, Polish, Portuguese, Ukrainian and Japanese. The
+  Japanese one types romaji on the letter rows and turns it into kana as it is
+  spelled, the way an IME does -- shift writes the kana in katakana instead of
+  hiragana (a double tap keeps katakana on, a space finishes a trailing "n" as
+  ん) -- and its nine-key keypad shares the gojūon out one row per key, with
+  katakana where the other layouts keep their capitals. There is no kanji
+  conversion: what comes out of the keyboard is kana, and the digits and
+  punctuation of the symbol pages go in as they are written.
 - **Screenshots** - under More: volume up and the power key save the screen to
   the card.
 - **System** - device, DAC, serial number, card space, OS version, firmware

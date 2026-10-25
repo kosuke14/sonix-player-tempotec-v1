@@ -62,6 +62,7 @@ static const char *interface_language_code(void) {
 		{"Polski", "pl"},
 		{"Portugu\xC3\xAAs BR", "pt,pt-br"},
 		{"Ukrainian", "uk"},
+		{"Japanese", "ja"},
 	};
 	const char *current = lang_current();
 	for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {

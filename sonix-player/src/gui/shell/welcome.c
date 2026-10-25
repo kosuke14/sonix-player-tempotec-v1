@@ -35,6 +35,7 @@ static const char *const WELCOME_WORDS[] = {
 	"Witamy",	  // Polish
 	"Bem-vindo",  // Portuguese
 	"\xd0\x92\xd1\x96\xd1\x82\xd0\xb0\xd1\x94\xd0\xbc\xd0\xbe", // Ukrainian
+	"\xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf", // Japanese: こんにちは
 };
 
 #define WELCOME_COUNT ((int)(sizeof(WELCOME_WORDS) / sizeof(WELCOME_WORDS[0])))

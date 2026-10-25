@@ -2,6 +2,7 @@
 
 #include "src/gui/shell/popover.h"
 #include "src/system/input/kblayout.h"
+#include "src/system/input/romaji.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -72,6 +73,13 @@ static const char *const KB_SYM2_ROWS[KB_LAYOUT_ROWS] = {
 // ---------------------------------------------------------------------------
 #define KB_T9_KEYS KB_LAYOUT_T9_KEYS
 #define KB_T9_COMMIT_MS 800
+
+// A kana cap is a run of full-width glyphs, each one a whole em wide, where a
+// Latin cap at the same point size is half that per letter. The Japanese
+// keypad therefore draws at most this many of its cycle on a key -- the rest
+// is still under it -- and sets the smallest UI font to keep even those five
+// inside a key's width.
+#define KB_T9_CAP_KANA_SHOWN 5
 
 // The shortest key row that still carries the number-mode caps on two lines
 // (the digit over its share of symbols): two lines of the T9 label font and a
@@ -382,11 +390,15 @@ static void kb_refresh_caps(keyboard_t *kb) {
 
 	// The T9 caps, from the current mode's table: in letter mode the case
 	// follows shift, in number mode the digit sits above its share of symbols.
+	// The Japanese kana caps run in the small font to keep their wider glyphs
+	// inside the key (see KB_T9_CAP_KANA_SHOWN).
+	bool kana_caps = kb->layout == KB_LAYOUT_JAPANESE && !kb->t9_numbers;
 	for (int i = 0; i < KB_T9_KEYS; i++) {
 		if (!kb->t9_label[i]) {
 			continue;
 		}
-		char cap[16];
+		lv_obj_set_style_text_font(kb->t9_label[i], kana_caps ? &font_ui_14 : &font_ui_20, 0);
+		char cap[24];
 		if (kb->t9_numbers) {
 			const char *cycle = (kb->symbols2 ? KB_T9_NUM2 : KB_T9_NUM)[i];
 			if (cycle[1] == '\0') {
@@ -401,7 +413,11 @@ static void kb_refresh_caps(keyboard_t *kb) {
 		} else {
 			cap[0] = '\0';
 			int steps = kb_t9_len(kb, i);
-			for (int c = 0; c < steps; c++) {
+			int shown = steps;
+			if (kana_caps && shown > KB_T9_CAP_KANA_SHOWN) {
+				shown = KB_T9_CAP_KANA_SHOWN; // the rest of the cycle stays under the key
+			}
+			for (int c = 0; c < shown; c++) {
 				size_t at = strlen(cap);
 				snprintf(cap + at, sizeof(cap) - at, "%s", kb_t9_step(kb, i, c));
 			}
@@ -547,8 +563,61 @@ static void kb_t9_shift_cb(lv_event_t *e) {
 // keys
 // ---------------------------------------------------------------------------
 
+// Types one romaji letter through the live kana conversion. The letter goes
+// into the field first -- an unconverted tail sits there in plain ASCII, the
+// way an IME shows its composition string -- and the run of romaji at the end
+// of the field is then rewritten: whatever the conversion can finish comes out
+// as kana, and the part still waiting goes back after it, unchanged. A
+// trailing "n" stays until the next consonant turns it into ん or the space
+// key flushes it.
+//
+// Shift means katakana here (caps lock: katakana until it is pressed again),
+// so a one-shot shift is spent on the syllable it armed -- "k" keeps it armed,
+// because nothing has come out yet.
+static void kb_type_romaji(keyboard_t *kb, char c) {
+	char letter[2] = {c, '\0'};
+	lv_textarea_add_text(kb->field, letter);
+
+	const char *text = lv_textarea_get_text(kb->field);
+	char tail[ROMAJI_TAIL_MAX + 1];
+	size_t len = strlen(text);
+	int n = 0;
+	while (len > 0 && n < ROMAJI_TAIL_MAX && text[len - 1] >= 'a' && text[len - 1] <= 'z') {
+		len--;
+		n++;
+	}
+	memcpy(tail, text + len, (size_t)n);
+	tail[n] = '\0';
+
+	char emit[24];
+	int consumed = romaji_tail(tail, kb->shift || kb->caps, emit, sizeof(emit));
+	if (consumed > 0 && emit[0]) {
+		// The tail comes out whole and goes back in three pieces: the kana
+		// the conversion finished, then whatever it left waiting -- ASCII
+		// again, one byte one character, so the delete above was exact.
+		for (int i = 0; i < n; i++) {
+			lv_textarea_delete_char(kb->field);
+		}
+		lv_textarea_add_text(kb->field, emit);
+		if (tail[consumed]) {
+			lv_textarea_add_text(kb->field, tail + consumed);
+		}
+		if (kb->shift && !kb->caps) {
+			kb->shift = false;
+			kb_refresh_caps(kb);
+		}
+	}
+}
+
 // Writes one letter and consumes a one-shot shift.
 static void kb_type(keyboard_t *kb, const char *text) {
+	// The Japanese letter rows type romaji, and romaji becomes kana on the
+	// way into the field (see the layout table); everything else -- the
+	// symbol pages, every other alphabet -- goes in as it is written.
+	if (!kb->symbols && kb->layout == KB_LAYOUT_JAPANESE && !text[1] && text[0] >= 'a' && text[0] <= 'z') {
+		kb_type_romaji(kb, text[0]);
+		return;
+	}
 	lv_textarea_add_text(kb->field, text);
 	if (kb->symbols) {
 		return; // on the symbol pages shift picks the page and stays
@@ -647,6 +716,24 @@ static void kb_mode_cb(lv_event_t *e) {
 static void kb_space_cb(lv_event_t *e) {
 	keyboard_t *kb = lv_event_get_user_data(e);
 	if (kb && kb->field) {
+		// A word that ends in "n" leaves the ん unconverted behind it, and
+		// the space is the boundary that completes it, the way an IME does.
+		if (!kb->symbols && kb->layout == KB_LAYOUT_JAPANESE) {
+			const char *text = lv_textarea_get_text(kb->field);
+			// A UTF-8 continuation byte is never 'n', so one byte's look is
+			// enough to find the ASCII letter.
+			if (text[0] && text[strlen(text) - 1] == 'n') {
+				char emit[24];
+				if (romaji_flush("n", kb->shift || kb->caps, emit, sizeof(emit)) > 0) {
+					lv_textarea_delete_char(kb->field);
+					lv_textarea_add_text(kb->field, emit);
+					if (kb->shift && !kb->caps) {
+						kb->shift = false;
+						kb_refresh_caps(kb);
+					}
+				}
+			}
+		}
 		lv_textarea_add_text(kb->field, " ");
 	}
 }
@@ -841,7 +928,9 @@ static void kb_variants_cb(lv_event_t *e) {
 		return;
 	}
 	if (code == LV_EVENT_LONG_PRESSED) {
-		if (kb->symbols || ref->index < 0 || ref->index >= kb->key_count) {
+		// The Japanese letter rows have nothing to offer on a hold: their
+		// dakuten and small kana are spelled, not held.
+		if (kb->symbols || kb->layout == KB_LAYOUT_JAPANESE || ref->index < 0 || ref->index >= kb->key_count) {
 			return;
 		}
 		kb_variants_open(kb, kb->letter_btn[ref->index], lv_label_get_text(kb->letter_label[ref->index]));
