@@ -4,6 +4,7 @@
 #include "src/system/decode/decode.h"
 #include "src/system/decode/growfile.h"
 #include "src/system/streaming/subsonicstream.h"
+#include "src/system/streaming/ampstream.h"
 #include "src/system/decode/sndfile.h"
 #include "src/system/audio/replaygain.h"
 #include "src/system/audio/speed.h"
@@ -3072,7 +3073,7 @@ static bool playback_reader_should_abort(void);
 
 static void play_decoded_file(const char *filepath, decode_format_t format) {
 	decoder_t *dec = decoder_open(filepath, format);
-	if (!dec && !subsonicstream_owns(filepath)) {
+	if (!dec && !subsonicstream_owns(filepath) && !ampstream_owns(filepath)) {
 		// A busy card (a cover decoding, the library scanning) can make the
 		// first open fail transiently; one more try costs nothing and saves
 		// the track.
@@ -4085,8 +4086,9 @@ int audio_init(void) {
 }
 
 int audio_play(const char *filepath) {
-	if (!subsonicstream_owns(filepath)) {
+	if (!subsonicstream_owns(filepath) && !ampstream_owns(filepath)) {
 		subsonicstream_cancel();
+		ampstream_cancel();
 	}
 	fprintf(stderr, "audio[%ld]: play requested '%s'\n", log_ms(), filepath);
 

@@ -4,6 +4,7 @@
 
 #include "src/system/decode/growfile.h"
 #include "src/system/streaming/subsonicstream.h"
+#include "src/system/streaming/ampstream.h"
 
 #include "src/system/core/utils.h"
 
@@ -152,6 +153,29 @@ typedef struct {
 // The rates the ADTS index can name.
 static const int ADTS_RATES[16] = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
 								   16000, 12000, 11025, 8000,  7350,  0,	 0,	    0};
+
+// The ADTS half off a streaming bridge -- the Apple Music producer emits plain
+// ADTS AAC into the RAM ring. The same decoder as the file path, fed from the
+// bridge; no index and no seek (a live service is not rewound), the duration
+// arriving with the lease instead.
+typedef struct {
+	streambridge_t *source;
+	aacdec_t *aac;
+	unsigned char in[ADTS_IN_CHUNK];
+	int in_have, in_used;
+	short *pcm;
+	int pcm_frames, pcm_read;
+	int duration; // seconds, from the lease; backs the total once it speaks
+} adtsb_state_t;
+
+static void adtsb_state_free(adtsb_state_t *s) {
+	if (!s) {
+		return;
+	}
+	aacdec_close(s->aac);
+	free(s->pcm);
+	free(s);
+}
 
 // Returns the frame's total length (header included) if the header is valid,
 // otherwise 0.
@@ -447,6 +471,7 @@ struct decoder {
 		wavpackdec_t *wv;
 		apedec_t *ape;
 		adts_state_t *adts;
+		adtsb_state_t *adtsb;
 	} impl;
 
 	// Non-NULL when the file was still being written at open. Closed after the
@@ -625,7 +650,7 @@ decode_format_t decode_detect_format(const char *filepath) {
 	// extension rule; a real path gets checked against its magic so an .m4a
 	// renamed .mp3 or an Opus inside .ogg goes to the decoder that can play it.
 	if (named == DECODE_FORMAT_UNKNOWN || named == DECODE_FORMAT_SNDFILE || has_extension(filepath, ".alac") ||
-		!strchr(filepath, '/') || subsonicstream_owns(filepath)) {
+		!strchr(filepath, '/') || subsonicstream_owns(filepath) || ampstream_owns(filepath)) {
 		return named;
 	}
 	decode_format_t sniffed = sniff_format(filepath);
@@ -682,6 +707,41 @@ static bool adts_fill(decoder_t *dec) {
 		int taken = aacdec_fill(s->aac, s->in + s->in_used, s->in_have - s->in_used);
 		if (taken <= 0) {
 			return false; // the decoder refused: no way forward
+		}
+		s->in_used += taken;
+	}
+}
+
+static bool adtsb_fill(decoder_t *dec) {
+	adtsb_state_t *s = dec->impl.adtsb;
+
+	for (;;) {
+		int frames = aacdec_pull(s->aac, s->pcm, ADTS_PCM_CAPACITY);
+		if (frames > 0) {
+			if (dec->channels <= 0) {
+				dec->channels = aacdec_channels(s->aac);
+				dec->sample_rate = aacdec_sample_rate(s->aac);
+			}
+			// The lease's duration is the only clock the stream carries;
+			// settle the total once the decoder has named its rate.
+			if (!dec->total_pcm_frames && s->duration > 0 && dec->sample_rate > 0) {
+				dec->total_pcm_frames = (uint64_t)s->duration * (uint64_t)dec->sample_rate;
+			}
+			s->pcm_frames = frames;
+			s->pcm_read = 0;
+			return true;
+		}
+		if (s->in_used >= s->in_have) {
+			size_t got = streambridge_read(s->source, s->in, sizeof(s->in));
+			if (got == 0) {
+				return false; // the stream ended
+			}
+			s->in_have = (int)got;
+			s->in_used = 0;
+		}
+		int taken = aacdec_fill(s->aac, s->in + s->in_used, s->in_have - s->in_used);
+		if (taken <= 0) {
+			return false;
 		}
 		s->in_used += taken;
 	}
@@ -1740,14 +1800,25 @@ static int bridge_read_opus(void *source, unsigned char *out, int bytes) {
 	return bytes > 0 ? (int)streambridge_read(source, out, (size_t)bytes) : 0;
 }
 
+// The buffered sources have two owners: the subsonic bridge and the Apple
+// Music one. The lease returns to whichever issued it.
+static void release_buffered(streambridge_t *source, const char *path) {
+	if (ampstream_owns(path)) {
+		ampstream_release(source);
+	} else {
+		release_buffered(source, path);
+	}
+}
+
 static decoder_t *decoder_open_buffered(const char *path, decode_format_t format) {
 	int duration = 0;
-	streambridge_t *source = subsonicstream_acquire(path, &duration, NULL);
+	streambridge_t *source = ampstream_owns(path) ? ampstream_acquire(path, &duration, NULL)
+												  : subsonicstream_acquire(path, &duration, NULL);
 	if (!source) {
 		return NULL;
 	}
 	if (!streambridge_prime(source)) {
-		subsonicstream_release(source);
+		release_buffered(source, path);
 		return NULL;
 	}
 	// Fail fast if a server ignored the requested codec, returned an API error
@@ -1769,16 +1840,19 @@ static decoder_t *decoder_open_buffered(const char *path, decode_format_t format
 				break;
 			}
 		}
+	} else if (format == DECODE_FORMAT_AAC_ADTS) {
+		// The sync word alone: the rate and channels sit in every frame.
+		signature = bytes >= 2 && head[0] == 0xff && (head[1] & 0xf0) == 0xf0;
 	}
 	if (!signature) {
 		streambridge_fail(source, "subsonic_codec_mismatch");
-		subsonicstream_release(source);
+		release_buffered(source, path);
 		return NULL;
 	}
 	decoder_t *dec = calloc(1, sizeof(*dec));
 	if (!dec) {
 		streambridge_fail(source, "subsonic_out_of_memory");
-		subsonicstream_release(source);
+		release_buffered(source, path);
 		return NULL;
 	}
 	dec->buffered = source;
@@ -1794,7 +1868,7 @@ static decoder_t *decoder_open_buffered(const char *path, decode_format_t format
 		if (!drmp3_init(&dec->impl.mp3, bridge_read, bridge_seek_mp3, NULL, NULL, source, NULL)) {
 			free(dec);
 			streambridge_fail(source, "subsonic_codec_mismatch");
-			subsonicstream_release(source);
+			release_buffered(source, path);
 			return NULL;
 		}
 		dec->channels = (int)dec->impl.mp3.channels;
@@ -1808,7 +1882,7 @@ static decoder_t *decoder_open_buffered(const char *path, decode_format_t format
 		if (!dec->impl.flac) {
 			free(dec);
 			streambridge_fail(source, "subsonic_codec_mismatch");
-			subsonicstream_release(source);
+			release_buffered(source, path);
 			return NULL;
 		}
 		dec->channels = (int)dec->impl.flac->channels;
@@ -1820,16 +1894,39 @@ static decoder_t *decoder_open_buffered(const char *path, decode_format_t format
 		if (!dec->impl.opus) {
 			free(dec);
 			streambridge_fail(source, "subsonic_codec_mismatch");
-			subsonicstream_release(source);
+			release_buffered(source, path);
 			return NULL;
 		}
 		dec->channels = opusdec_channels(dec->impl.opus);
 		dec->sample_rate = opusdec_sample_rate(dec->impl.opus);
 		dec->total_pcm_frames = opusdec_total_frames(dec->impl.opus);
 		break;
+	case DECODE_FORMAT_AAC_ADTS:
+		// Apple Music: ADTS frames off the bridge. The same decoder as the
+		// file path, without an index and without seeks; the duration rides
+		// on the lease and settles the total when the decoder speaks.
+		dec->impl.adtsb = calloc(1, sizeof(adtsb_state_t));
+		if (!dec->impl.adtsb) {
+			free(dec);
+			streambridge_fail(source, "subsonic_out_of_memory");
+			release_buffered(source, path);
+			return NULL;
+		}
+		dec->impl.adtsb->source = source;
+		dec->impl.adtsb->pcm = malloc(ADTS_PCM_CAPACITY * sizeof(short));
+		dec->impl.adtsb->aac = dec->impl.adtsb->pcm ? aacdec_open_adts() : NULL;
+		if (!dec->impl.adtsb->aac) {
+			adtsb_state_free(dec->impl.adtsb);
+			free(dec);
+			streambridge_fail(source, "subsonic_out_of_memory");
+			release_buffered(source, path);
+			return NULL;
+		}
+		dec->impl.adtsb->duration = duration;
+		break;
 	default:
 		free(dec);
-		subsonicstream_release(source);
+		release_buffered(source, path);
 		return NULL;
 	}
 	if (!dec->total_pcm_frames && duration > 0 && dec->sample_rate > 0) {
@@ -1849,7 +1946,7 @@ bool decoder_buffered_failed(const decoder_t *dec) {
 }
 
 decoder_t *decoder_open(const char *filepath, decode_format_t format) {
-	if (subsonicstream_owns(filepath)) {
+	if (subsonicstream_owns(filepath) || ampstream_owns(filepath)) {
 		return decoder_open_buffered(filepath, format);
 	}
 	char sheet[512];
@@ -2399,8 +2496,25 @@ static uint64_t decoder_read_s16_inner(decoder_t *dec, uint64_t frame_count, sho
 	}
 
 	case DECODE_FORMAT_AAC_ADTS: {
-		adts_state_t *s = dec->impl.adts;
 		uint64_t written = 0;
+		if (dec->buffered) {
+			adtsb_state_t *s = dec->impl.adtsb;
+			while (written < frame_count) {
+				if (s->pcm_read >= s->pcm_frames && !adtsb_fill(dec))
+					break;
+				uint64_t available = (uint64_t)(s->pcm_frames - s->pcm_read);
+				uint64_t take = frame_count - written;
+				if (take > available)
+					take = available;
+				memcpy(pBuffer + written * (uint64_t)dec->channels,
+					   s->pcm + (size_t)s->pcm_read * dec->channels,
+					   (size_t)take * dec->channels * sizeof(short));
+				s->pcm_read += (int)take;
+				written += take;
+			}
+			return written;
+		}
+		adts_state_t *s = dec->impl.adts;
 		while (written < frame_count) {
 			if (s->pcm_read >= s->pcm_frames && !adts_fill(dec))
 				break;
@@ -2665,6 +2779,9 @@ int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index) {
 	}
 
 	case DECODE_FORMAT_AAC_ADTS: {
+		if (dec->buffered) {
+			return 0; // the ring has no index to seek by, and no rewind
+		}
 		adts_state_t *s = dec->impl.adts;
 		if (dec->sample_rate <= 0 || s->mark_count == 0) {
 			return 0;
@@ -2763,7 +2880,11 @@ void decoder_close(decoder_t *dec) {
 		aac_state_free(dec->impl.aac);
 		break;
 	case DECODE_FORMAT_AAC_ADTS:
-		adts_state_free(dec->impl.adts);
+		if (dec->buffered) {
+			adtsb_state_free(dec->impl.adtsb);
+		} else {
+			adts_state_free(dec->impl.adts);
+		}
 		break;
 	case DECODE_FORMAT_ALAC_MP4:
 		alac_state_free(dec->impl.alac);
@@ -2789,7 +2910,7 @@ void decoder_close(decoder_t *dec) {
 
 	growfile_close(growing);
 	if (dec->buffered) {
-		subsonicstream_release(dec->buffered);
+		release_buffered(dec->buffered, dec->path);
 	}
 	free(dec);
 }

@@ -29,6 +29,11 @@ struct streambridge {
 	int fd; // published/retired under lock; only the worker ever closes it
 	char url[URL_CAP];
 	char error[192];
+	// The non-HTTP source, when the start was streambridge_start_source().
+	// The HTTP path leaves ops NULL and goes by url.
+	const streambridge_source_ops_t *ops;
+	void *ops_user;
+	uint64_t src_length;
 };
 
 static streambridge_abort_fn reader_abort;
@@ -100,6 +105,137 @@ static bool observe_socket(void *user, int fd) {
 	return keep;
 }
 
+// The stale check a non-HTTP source polls between network steps. Takes the
+// ring lock briefly; callers invoke it only outside their own network calls.
+static bool source_stale(streambridge_source_t *src) {
+	opening_t *opening = src->impl;
+	streambridge_t *b = opening->bridge;
+	pthread_mutex_lock(&b->lock);
+	bool keep = current(b, opening->generation) && !b->failed;
+	pthread_mutex_unlock(&b->lock);
+	return !keep;
+}
+
+// The non-HTTP source: the same ring, watermarks and abort machinery as the
+// HTTP loop, with the fill handed to the implementation. EOF is the content
+// length, when the start knew one, or the source returning zero. Every exit
+// path clears `fetching` and closes the source.
+static void run_source(streambridge_t *b, unsigned generation, const streambridge_source_ops_t *ops,
+					   void *ops_user, uint64_t src_length) {
+	opening_t opening = {b, generation};
+	streambridge_source_t src = {
+		.ops = ops,
+		.user = ops_user,
+		.stale = source_stale,
+		.sock_cb = observe_socket,
+		.sock_user = &opening,
+		.impl = &opening,
+	};
+	char error[192] = "";
+	bool opened = src.ops->open(&src, error, sizeof(error));
+	pthread_mutex_lock(&b->lock);
+	if (!current(b, generation)) {
+		pthread_mutex_unlock(&b->lock);
+		src.ops->close(&src); // the contract: always, open or not
+		return;
+	}
+	if (!opened) {
+		fail_locked(b, error[0] ? error : "stream_source_failed");
+		b->fetching = false;
+		pthread_cond_broadcast(&b->changed);
+		pthread_mutex_unlock(&b->lock);
+		src.ops->close(&src);
+		return;
+	}
+	b->opened = true;
+	pthread_cond_broadcast(&b->changed);
+	pthread_mutex_unlock(&b->lock);
+
+	bool burst = true;
+	for (;;) {
+		pthread_mutex_lock(&b->lock);
+		while (current(b, generation) && !b->failed) {
+			size_t used = buffered(b);
+			if (used >= b->quota) {
+				burst = false;
+			}
+			if (!burst && used <= b->quota / 2) {
+				burst = true;
+			}
+			bool probe_guard = b->read_pos <= b->probe_window && b->write_pos >= b->capacity;
+			if (burst && used < b->quota && !probe_guard) {
+				break;
+			}
+			b->fetching = false;
+			pthread_cond_wait(&b->changed, &b->lock);
+		}
+		if (!current(b, generation) || b->failed) {
+			pthread_mutex_unlock(&b->lock);
+			break;
+		}
+		size_t tail = (size_t)b->write_pos & b->mask;
+		size_t want = b->quota - buffered(b);
+		if (b->read_pos <= b->probe_window && (uint64_t)want > b->capacity - b->write_pos) {
+			want = (size_t)(b->capacity - b->write_pos);
+		}
+		if (src_length && (uint64_t)want > src_length - b->write_pos) {
+			want = (size_t)(src_length - b->write_pos);
+		}
+		if (want > b->capacity - tail) {
+			want = b->capacity - tail;
+		}
+		if (want > FETCH_CHUNK) {
+			want = FETCH_CHUNK;
+		}
+		if (want == 0) {
+			b->fetching = false;
+			struct timespec tick = after_ms(100);
+			pthread_cond_timedwait(&b->changed, &b->lock, &tick);
+			pthread_mutex_unlock(&b->lock);
+			continue;
+		}
+		// Protect a retained rewind span from an in-flight source write,
+		// before exposing that write's destination outside the mutex.
+		uint64_t end = b->write_pos + want;
+		b->floor = end > b->capacity ? end - b->capacity : 0;
+		b->fetching = true;
+		pthread_mutex_unlock(&b->lock);
+
+		long got = src.ops->read(&src, b->data + tail, want, error, sizeof(error));
+		pthread_mutex_lock(&b->lock);
+		if (!current(b, generation) || b->failed) {
+			pthread_mutex_unlock(&b->lock);
+			break; // no stale bytes published into a replacement source
+		}
+		if (got > 0) {
+			b->write_pos += (unsigned)got;
+			bool complete = src_length > 0 && b->write_pos >= src_length;
+			if (complete) {
+				b->eof = true;
+			}
+			pthread_cond_broadcast(&b->changed);
+			pthread_mutex_unlock(&b->lock);
+			if (complete) {
+				break;
+			}
+		} else if (got == 0) {
+			b->eof = true;
+			pthread_cond_broadcast(&b->changed);
+			pthread_mutex_unlock(&b->lock);
+			break;
+		} else {
+			fail_locked(b, error[0] ? error : "stream_source_failed");
+			pthread_mutex_unlock(&b->lock);
+			break;
+		}
+	}
+	pthread_mutex_lock(&b->lock);
+	b->fetching = false;
+	pthread_cond_broadcast(&b->changed);
+	pthread_mutex_unlock(&b->lock);
+	src.ops->close(&src);
+}
+
 static void *producer(void *arg) {
 	streambridge_t *b = arg;
 	// SCHED_IDLE can starve on the V1's single core while the UI redraws. Nice
@@ -115,9 +251,15 @@ static void *producer(void *arg) {
 			break;
 		}
 		unsigned generation = b->generation;
+		const streambridge_source_ops_t *ops = b->ops;
+		void *ops_user = b->ops_user;
+		uint64_t src_length = b->src_length;
 		char url[URL_CAP];
-		memcpy(url, b->url, sizeof(url));
-		memset(b->url, 0, sizeof(b->url));
+		bool have_url = ops == NULL;
+		if (have_url) {
+			memcpy(url, b->url, sizeof(url));
+			memset(b->url, 0, sizeof(b->url));
+		}
 		b->pending = false;
 		b->live_generation = generation;
 		b->read_pos = b->write_pos = b->floor = 0;
@@ -125,6 +267,11 @@ static void *producer(void *arg) {
 		b->error[0] = '\0';
 		b->fetching = true;
 		pthread_mutex_unlock(&b->lock);
+
+		if (!have_url) {
+			run_source(b, generation, ops, ops_user, src_length);
+			continue;
+		}
 
 		http_stream_t stream;
 		opening_t opening = {b, generation};
@@ -356,7 +503,33 @@ bool streambridge_start(streambridge_t *b, const char *url, bool prefetch) {
 	if (b->fd >= 0) {
 		shutdown(b->fd, SHUT_RDWR);
 	}
+	b->ops = NULL;
+	b->ops_user = NULL;
+	b->src_length = 0;
 	snprintf(b->url, sizeof(b->url), "%s", url);
+	b->quota = prefetch && b->capacity > STREAMBRIDGE_PRECACHE ? STREAMBRIDGE_PRECACHE : b->capacity;
+	b->canceled = b->opened = b->eof = b->failed = false;
+	b->error[0] = '\0';
+	b->pending = true;
+	pthread_cond_broadcast(&b->changed);
+	pthread_mutex_unlock(&b->lock);
+	return true;
+}
+
+bool streambridge_start_source(streambridge_t *b, const streambridge_source_ops_t *ops, void *user,
+							   uint64_t content_length, bool prefetch) {
+	if (!b || !ops || !ops->open || !ops->read || !ops->close) {
+		return false;
+	}
+	pthread_mutex_lock(&b->lock);
+	b->generation++;
+	if (b->fd >= 0) {
+		shutdown(b->fd, SHUT_RDWR);
+	}
+	b->ops = ops;
+	b->ops_user = user;
+	b->src_length = content_length;
+	b->url[0] = '\0';
 	b->quota = prefetch && b->capacity > STREAMBRIDGE_PRECACHE ? STREAMBRIDGE_PRECACHE : b->capacity;
 	b->canceled = b->opened = b->eof = b->failed = false;
 	b->error[0] = '\0';

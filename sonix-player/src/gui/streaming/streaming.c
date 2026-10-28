@@ -14,6 +14,7 @@
 #include "src/gui/streaming/radiopage.h"
 #include "src/gui/streaming/tidalpage.h"
 #include "src/gui/streaming/subsonicpage.h"
+#include "src/gui/streaming/amppage.h"
 
 lv_obj_t *streaming_screen;
 
@@ -33,6 +34,7 @@ static const streaming_item_t tokyo_items[] = {
 	{"tidal", &icon_tidal_mark, THEME_SEMANTIC_CYAN, &tidal_screen},
 	{"qobuz", &icon_qobuz_mark, THEME_SEMANTIC_PURPLE, &qobuz_screen},
 	{"subsonic", &icon_music_note, THEME_SEMANTIC_BLUE, &subsonic_screen},
+	{"applemusic", &icon_audio_waveform, THEME_SEMANTIC_RED, &amp_screen},
 };
 
 static void streaming_list_build(gui_config_t *cfg) {
@@ -61,6 +63,7 @@ void streaming_init(gui_config_t *cfg) {
 	tidalpage_init(cfg);
 	podcastpage_init(cfg);
 	subsonicpage_init(cfg);
+	amppage_init(cfg);
 
 	const grid_entry_t entries[] = {
 		{"tidal", &icon_menu_tidal, &tidal_screen, NULL},
@@ -68,6 +71,7 @@ void streaming_init(gui_config_t *cfg) {
 		{"radio", &icon_menu_radio, &radiopage_screen, NULL},
 		{"podcasts", &icon_menu_podcast, &podcast_screen, NULL},
 		{"subsonic", &icon_menu_streaming, &subsonic_screen, NULL},
+		{"applemusic", &icon_menu_streaming, &amp_screen, NULL},
 	};
 
 	// Dark and Light keep their established two-column grid. Tokyo Night on the

@@ -36,6 +36,12 @@ $(BUILD)/test_subsonic: test_subsonic.c support.c $(CORE) $(shell find $(ROOT)/s
 sanitize:
 	$(MAKE) BUILD=.build/sanitize CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' test
 
+# The same for the ampstream suite: the pipeline allocates through every step
+# (fragments, batches, plaintexts), which is exactly where a slip hides.
+.PHONY: sanitize-ampstream
+sanitize-ampstream:
+	$(MAKE) BUILD=.build/sanitize-ampstream CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' ampstream
+
 # The battery guard: when the player warns at five percent, when it switches
 # itself off at one, and which readings leave standby alone. The rule is its own
 # small module with no LVGL, no sysfs and no clock, which is exactly what makes
@@ -113,6 +119,40 @@ $(BUILD)/test_wifi: $(WIFI_SRC) $(ROOT)/src/system/net/wifi.h \
                     $(ROOT)/src/system/device/sysserver.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_wifi.c $(ROOT)/src/system/net/wifi.c $(LDFLAGS) $(LDLIBS)
+
+# The wrapper-v2 client: the /me and /playback parsing against a canned HTTP
+# daemon, and the WV2D decrypt framing against a local peer that speaks it
+# back. Plain C, no LVGL, no Apple anything.
+AMPW_SRC = test_ampwrapper.c support.c $(ROOT)/src/system/streaming/ampwrapper.c \
+           $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
+           $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c
+.PHONY: ampwrapper
+ampwrapper: $(BUILD)/test_ampwrapper
+	$(BUILD)/test_ampwrapper
+
+$(BUILD)/test_ampwrapper: $(AMPW_SRC) $(ROOT)/src/system/streaming/ampwrapper.h \
+                          $(ROOT)/src/system/net/http.h $(ROOT)/src/system/core/json.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(AMPW_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The Apple Music source: the whole producer pipeline -- the playback dispatch,
+# the playlist walk, the fMP4 slicing, the wrapper batches and the ADTS
+# re-emission -- against the same local fakes, plus the queue's pseudo-path
+# rules. Plain C, no LVGL, no Apple anything.
+AMPS_SRC = test_ampstream.c support.c $(ROOT)/src/system/streaming/ampstream.c \
+           $(ROOT)/src/system/streaming/ampwrapper.c $(ROOT)/src/system/streaming/ampapi.c \
+           $(ROOT)/src/system/streaming/amphls.c $(ROOT)/src/system/streaming/ampfp4.c \
+           $(ROOT)/src/system/streaming/streambridge.c \
+           $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
+           $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c
+.PHONY: ampstream
+ampstream: $(BUILD)/test_ampstream
+	$(BUILD)/test_ampstream
+
+$(BUILD)/test_ampstream: $(AMPS_SRC) $(ROOT)/src/system/streaming/ampstream.h \
+                         $(ROOT)/src/system/streaming/ampfp4.h $(ROOT)/src/system/streaming/amphls.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(AMPS_SRC) $(LDFLAGS) $(LDLIBS)
 
 # The Calculator page's arithmetic and the notes folder's rules: the two new
 # pages' plain-C halves, with no LVGL and no screen. The calculator model and
@@ -204,7 +244,14 @@ TAGS_DECODE_SRC = $(ROOT)/src/system/decode/decode.c \
                   $(ROOT)/src/system/decode/aacdec.c \
                   $(ROOT)/src/system/decode/dsd.c \
                   $(ROOT)/src/system/decode/growfile.c \
-                  $(ROOT)/src/system/streaming/streambridge.c
+                  $(ROOT)/src/system/streaming/streambridge.c \
+                  $(ROOT)/src/system/streaming/ampstream.c \
+                  $(ROOT)/src/system/streaming/ampwrapper.c \
+                  $(ROOT)/src/system/streaming/ampapi.c \
+                  $(ROOT)/src/system/streaming/amphls.c \
+                  $(ROOT)/src/system/streaming/ampfp4.c \
+                  $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
+                  $(ROOT)/src/system/core/json.c
 TAGS_SRC = test_tags.c \
            $(ROOT)/src/system/library/metadata.c \
            $(ROOT)/src/system/library/oggtags.c \
@@ -332,7 +379,9 @@ UI_LVGL_SRC = $(shell find $(ROOT)/lvgl/src -name '*.c' 2>/dev/null)
 UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_SRC)) \
          $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 UI_CPPFLAGS = $(CPPFLAGS) -I$(ROOT)/lvgl -DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"'
-UI_CFLAGS = $(CFLAGS) -MMD -MP
+# The stock-firmware tag copies format their names with generous room; GCC
+# diagnoses the bounded copies at -O1/O2, so they stay nonfatal here.
+UI_CFLAGS = $(CFLAGS) -Wno-error=format-truncation -MMD -MP
 
 # The screensaver's Framed style on the same renderer; shares the objects above.
 # The Wi-Fi page and its manual-entry page for hidden networks, on the same

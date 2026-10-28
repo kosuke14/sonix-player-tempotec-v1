@@ -1465,3 +1465,49 @@ podcast and Subsonic signatures), the track-menu actions, path-backed media-list
 subtitles, dynamic-title realignment, the shared row-duration formatter, cache
 cleanup at startup and card removal, and the new translation keys in every
 language file. It also adds the `lang.h` include `streamkeep.c` needs for `tr()`.
+
+## Apple Music streaming through a wrapper daemon
+
+Apple Music is the one service the device cannot talk to alone: FairPlay lives
+in arm64 Android libraries, the player is a MIPS device, and nothing Apple-signed
+belongs in this firmware. The split this feature implements is therefore a
+deliberate one — a [wrapper-v2](https://github.com/…/wrapper-v2) daemon runs
+where the libraries can (Docker on a PC or NAS) and the player does everything
+else:
+
+- **`ampwrapper.c`** - the daemon's two doors: the HTTP side (`/me`,
+  `/playback`, the login pair) and the raw TCP decrypt side, a 16-byte framed
+  batch protocol (`WV2D`): adam id, one FairPlay key URI, up to 128 aligned
+  ciphertext runs in, one length table plus concatenated plaintexts out.
+- **`ampapi.c`** - the catalog: MusicKit search with the developer token in
+  `Authorization` and the account token in the `media-user-token` cookie, both
+  read fresh from `/me` on every use since they rotate.
+- **`amphls.c`** - the enhanced-HLS walk: master playlist → the AAC variant
+  (`audio-stereo-*`, HE-AAC as fallback), the variant's `EXT-X-MAP` init
+  segment, its `EXT-X-KEY` set and its segments.
+- **`ampfp4.c`** - the fMP4 slicing: the init segment's `esds`/`sinf`/
+  `tenc` chain (codec, channels, the AudioSpecificConfig the ADTS headers are
+  built from, the 1:9 cbcs pattern), each media segment's `moof`/`trun`/`senc`
+  into individual samples, subsample reassembly, and a small AES-128 (CBC,
+  cbcs-pattern, CTR) for the samples Apple guards with the public prefetch
+  key — description 0 — so the first frames need no daemon round trip.
+- **`ampstream.c`** - the producer, in the shape the Subsonic bridge
+  established: two 1 MiB slots, `amp://<generation>/<index>.aac` pseudo-paths,
+  a `device_state` prepare callback, 90%-progress prefetch, leases and the
+  one-error-to-the-GUI rule. The source ops behind the bridge fetch
+  `/playback`, walk the playlists, slice each segment, batch the wrapper
+  samples (flushing on a key change, the sample ceiling, or the emit bound)
+  and re-emit plain ADTS AAC into the ring, where the existing ADTS decoder
+  plays it. A stream with a keyless segment is refused up front.
+- **`decode.c`** - `adtsb`, the ADTS decoder off the bridge: the same
+  libfdk-aac decoder the file path uses, fed from the ring, no index and no
+  seek, the duration arriving with the lease.
+- **`amppage.c`** - the page: wrapper settings (URL, decrypt port, storefront)
+  with a connection test, and a catalog search whose results play as a queue.
+  The usual 90%-progress prefetch drives the next track's slot.
+
+Tests live in `tests/test_ampstream.c` (the whole pipeline against local fakes:
+a canned HTTP daemon for the dispatch and the playlists, a WV2D peer that
+flips bytes, a real fMP4 fixture in both plain and cbcs descriptions — with the
+queue's pseudo-path rules and metadata) and `tests/test_ampwrapper.c` (the
+framing against its own fakes). Both pass under ASan/UBSan.
