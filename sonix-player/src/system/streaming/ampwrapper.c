@@ -189,6 +189,36 @@ ampw_login_result_t ampw_login_2fa(const char *base_url, const char *code, char 
 	return post_json(base_url, "/login/2fa", body, error, error_size);
 }
 
+bool ampw_logout(const char *base_url, char *error, size_t error_size) {
+	if (error && error_size) {
+		error[0] = '\0';
+	}
+	char base[256];
+	base_url_of(base_url, base, sizeof(base));
+	char url[288];
+	snprintf(url, sizeof(url), "%s/login", base);
+
+	char *body = NULL;
+	size_t len = 0;
+	int status = 0;
+	http_req_t req = {
+		.method = "DELETE",
+		.want_error_body = true,
+		.allow_empty_body = true, // the answer is a bare status
+		.no_https_downgrade = true,
+	};
+	if (!http_request(url, &req, &body, &len, AMP_HTTP_LIMIT, AMP_HTTP_TIMEOUT, &status)) {
+		snprintf(error, error_size, "%s", http_last_error() ? http_last_error() : "ampw_unreachable");
+		return false;
+	}
+	free(body);
+	if (status >= 200 && status < 300) {
+		return true;
+	}
+	snprintf(error, error_size, "ampw_logout_http_%d", status);
+	return false;
+}
+
 // ---------------------------------------------------------------------------
 // the TCP decrypt side (WV2D)
 // ---------------------------------------------------------------------------

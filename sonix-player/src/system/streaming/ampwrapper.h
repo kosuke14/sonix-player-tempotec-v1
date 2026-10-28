@@ -51,11 +51,18 @@ typedef enum {
 
 // Sign-in is the daemon's business (it drives Apple's own credential flow);
 // this player only carries the fields and reports which kind of answer came
-// back, so the settings page can put up its 2FA box.
+// back, so the settings page can put up its 2FA box. The player supplies the
+// Apple ID, the password and the 2FA code from its own keyboard -- the
+// daemon is just the network peer that runs the flow.
 ampw_login_result_t ampw_login(const char *base_url, const char *username, const char *password,
 							   char *error, size_t error_size);
 ampw_login_result_t ampw_login_2fa(const char *base_url, const char *code, char *error,
 								   size_t error_size);
+
+// DELETE /login: aborts an in-flight login or clears the daemon's in-memory
+// tokens. The player's Sign out row calls this; the Apple-side caches on the
+// daemon's disk are untouched, so a later sign-in reuses the device trust.
+bool ampw_logout(const char *base_url, char *error, size_t error_size);
 
 // ---------------------------------------------------------------------------
 // the TCP decrypt side (the WV2D protocol)

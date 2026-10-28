@@ -76,10 +76,15 @@ static void *http_serve(void *arg) {
 		} else if (strstr(req, "POST /login ")) {
 			if (strstr(req, "\"bad\"")) {
 				status = 401;
+			} else if (strstr(req, "\"good\"")) {
+				status = 200; // the flow completes without a second factor
 			} else {
 				status = 202;
 			}
 		} else if (strstr(req, "POST /login/2fa ")) {
+			json = "";
+		} else if (strstr(req, "DELETE /login ")) {
+			status = 204;
 			json = "";
 		} else {
 			status = 404;
@@ -255,9 +260,11 @@ int main(void) {
 	assert(!ampw_playback(base, "404", &body, &body_len, error, sizeof(error)));
 	assert(strstr(error, "401"));
 
+	assert(ampw_login(base, "user", "good", error, sizeof(error)) == AMPW_LOGIN_OK);
 	assert(ampw_login(base, "user", "pass", error, sizeof(error)) == AMPW_LOGIN_2FA);
 	assert(ampw_login(base, "bad", "bad", error, sizeof(error)) == AMPW_LOGIN_FAILED);
 	assert(ampw_login_2fa(base, "123456", error, sizeof(error)) == AMPW_LOGIN_OK);
+	assert(ampw_logout(base, error, sizeof(error))); // the session is cleared
 
 	// ---- the TCP decrypt side ----
 	int dec_port = 0;

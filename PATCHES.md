@@ -1476,9 +1476,20 @@ where the libraries can (Docker on a PC or NAS) and the player does everything
 else:
 
 - **`ampwrapper.c`** - the daemon's two doors: the HTTP side (`/me`,
-  `/playback`, the login pair) and the raw TCP decrypt side, a 16-byte framed
-  batch protocol (`WV2D`): adam id, one FairPlay key URI, up to 128 aligned
-  ciphertext runs in, one length table plus concatenated plaintexts out.
+  `/playback`, the sign-in pair, `DELETE /login` for sign-out) and the raw TCP
+  decrypt side, a 16-byte framed batch protocol (`WV2D`): adam id, one
+  FairPlay key URI, up to 128 aligned ciphertext runs in, one length table
+  plus concatenated plaintexts out.
+- **`amppage.c`** - the page, and the one place the account exists for the
+  user: wrapper settings (URL, decrypt port, storefront) with a connection
+  test, a catalog search whose results play as a queue, and the sign-in flow
+  driven entirely from the device — Apple ID and password on its keyboard,
+  the six-digit 2FA code on its keyboard when Apple asks (digits only, wiped
+  after the job), sign-out as one row. The password is never written
+  anywhere: it lives in the sign-in job and is wiped the moment the job
+  holds it. The account row reads a fresh `/me` with every job, so a session
+  that lapses (or is restored by the daemon) shows up the next time the page
+  is opened. The usual 90%-progress prefetch drives the next track's slot.
 - **`ampapi.c`** - the catalog: MusicKit search with the developer token in
   `Authorization` and the account token in the `media-user-token` cookie, both
   read fresh from `/me` on every use since they rotate.
@@ -1502,12 +1513,10 @@ else:
 - **`decode.c`** - `adtsb`, the ADTS decoder off the bridge: the same
   libfdk-aac decoder the file path uses, fed from the ring, no index and no
   seek, the duration arriving with the lease.
-- **`amppage.c`** - the page: wrapper settings (URL, decrypt port, storefront)
-  with a connection test, and a catalog search whose results play as a queue.
-  The usual 90%-progress prefetch drives the next track's slot.
 
 Tests live in `tests/test_ampstream.c` (the whole pipeline against local fakes:
 a canned HTTP daemon for the dispatch and the playlists, a WV2D peer that
 flips bytes, a real fMP4 fixture in both plain and cbcs descriptions — with the
 queue's pseudo-path rules and metadata) and `tests/test_ampwrapper.c` (the
-framing against its own fakes). Both pass under ASan/UBSan.
+framing against its own fakes, the sign-in pair and the sign-out included).
+Both pass under ASan/UBSan.
