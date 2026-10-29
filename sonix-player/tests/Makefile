@@ -140,6 +140,7 @@ $(BUILD)/test_ampwrapper: $(AMPW_SRC) $(ROOT)/src/system/streaming/ampwrapper.h 
 # re-emission -- against the same local fakes, plus the queue's pseudo-path
 # rules. Plain C, no LVGL, no Apple anything.
 AMPS_SRC = test_ampstream.c support.c $(ROOT)/src/system/streaming/ampstream.c \
+           $(ROOT)/src/system/streaming/amplocal.c \
            $(ROOT)/src/system/streaming/ampwrapper.c $(ROOT)/src/system/streaming/ampapi.c \
            $(ROOT)/src/system/streaming/amphls.c $(ROOT)/src/system/streaming/ampfp4.c \
            $(ROOT)/src/system/streaming/streambridge.c \
@@ -246,6 +247,7 @@ TAGS_DECODE_SRC = $(ROOT)/src/system/decode/decode.c \
                   $(ROOT)/src/system/decode/growfile.c \
                   $(ROOT)/src/system/streaming/streambridge.c \
                   $(ROOT)/src/system/streaming/ampstream.c \
+                  $(ROOT)/src/system/streaming/amplocal.c \
                   $(ROOT)/src/system/streaming/ampwrapper.c \
                   $(ROOT)/src/system/streaming/ampapi.c \
                   $(ROOT)/src/system/streaming/amphls.c \
@@ -346,14 +348,23 @@ CODEC = $(filter-out %/wavpackdec.c %/opusdec.c,$(wildcard $(ROOT)/src/system/de
         $(ROOT)/src/system/decode/opusdec.c $(ROOT)/src/system/decode/wavpackdec.c \
         $(ROOT)/src/system/decode/alac/alac.c $(ROOT)/src/system/decode/ape/apecore.c \
         $(ROOT)/src/system/library/cue.c
+# decode.c routes the amp:// pseudo-paths through the ampstream bridge, so
+# the codec suite links it (with the full bridge closure -- under ASan the
+# --gc-sections pruning that hid these references no longer applies).
+AMPDECODE_SRC = $(ROOT)/src/system/streaming/ampstream.c \
+                $(ROOT)/src/system/streaming/amplocal.c \
+                $(ROOT)/src/system/streaming/ampfp4.c \
+                $(ROOT)/src/system/streaming/amphls.c \
+                $(ROOT)/src/system/streaming/ampwrapper.c \
+                $(ROOT)/src/system/streaming/ampapi.c
 .PHONY: codecs sanitize-codecs
 codecs: $(BUILD)/test_codecs
 	python3 run_subsonic_tests.py $(BUILD)/test_codecs
 
-$(BUILD)/test_codecs: test_codecs.c support.c $(CORE) $(CODEC)
+$(BUILD)/test_codecs: test_codecs.c support.c $(CORE) $(CODEC) $(AMPDECODE_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DTEST_REAL_CODECS=1 $(shell $(PKG_CONFIG) --cflags opusfile wavpack) \
-		-o $@ test_codecs.c support.c $(CORE) $(CODEC) $(LDFLAGS) $(LDLIBS) $(shell $(PKG_CONFIG) --static --libs opusfile wavpack)
+		-o $@ test_codecs.c support.c $(CORE) $(CODEC) $(AMPDECODE_SRC) $(LDFLAGS) $(LDLIBS) $(shell $(PKG_CONFIG) --static --libs opusfile wavpack)
 
 # Existing MP4 tag copies intentionally truncate display strings; GCC -O1
 # diagnoses those inlined bounded copies. Keep all other warnings fatal.

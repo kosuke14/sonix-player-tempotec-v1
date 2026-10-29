@@ -1806,7 +1806,7 @@ static void release_buffered(streambridge_t *source, const char *path) {
 	if (ampstream_owns(path)) {
 		ampstream_release(source);
 	} else {
-		release_buffered(source, path);
+		subsonicstream_release(source);
 	}
 }
 

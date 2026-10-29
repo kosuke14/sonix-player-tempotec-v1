@@ -161,10 +161,18 @@ static void daemon_kill_locked(void) {
 //   sys/bin/ampdaemon    our daemon
 //   sys/lib/             bionic + Apple arm/i386 libs
 static bool daemon_spawn_locked(void) {
+	// translate_root caps at 300 bytes; three %s plus the literals fit well
+	// inside 768, but gcc cannot prove it across the unbounded %s — the
+	// bounded %.150s keeps both the compiler and the command honest.
 	char mount_cmd[768], probe[400];
 	snprintf(probe, sizeof(probe), "%s/sys/bin/ampdaemon", s_local.translate_root);
 	if (access(probe, X_OK) != 0) {
-		snprintf(mount_cmd, sizeof(mount_cmd), "mkdir -p %s/sys && mount -t squashfs -o loop,ro %s/guest.squashfs %s/sys",
+		if (strnlen(s_local.translate_root, sizeof(s_local.translate_root)) > 150) {
+			snprintf(s_local.last_error, sizeof(s_local.last_error), "amp_guest_path_too_long");
+			return false;
+		}
+		snprintf(mount_cmd, sizeof(mount_cmd),
+				 "mkdir -p %.150s/sys && mount -t squashfs -o loop,ro %.150s/guest.squashfs %.150s/sys",
 				 s_local.translate_root, s_local.translate_root, s_local.translate_root);
 		if (system(mount_cmd) != 0) {
 			snprintf(s_local.last_error, sizeof(s_local.last_error), "amp_guest_mount_failed");
