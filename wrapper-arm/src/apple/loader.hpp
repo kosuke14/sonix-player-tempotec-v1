@@ -63,6 +63,13 @@ public:
     // dlopen the Apple decrypt set from `libs_dir`. False on failure, with
     // the reason in last_error().
     bool open(const std::string& libs_dir);
+
+    // Loads the 3.6.0 auth generation (lib36/: AuthenticateFlow, the token
+    // harvest, anisette -- surfaces the 6.5.3 build only exposes through
+    // JNI) and resolves its symbols into auth_symbols(). False with a
+    // reason in auth_last_error(). Independent of open(): the auth set may
+    // be probed even when only the decrypt generation is resident.
+    bool open_auth(const std::string& libs_dir);
     void close();
 
     bool ok() const { return ok_; }
@@ -70,6 +77,8 @@ public:
     bool decrypt_available() const { return decrypt_available_; }
     const Symbols& sym() const { return symbols_; }
     const std::string& last_error() const { return last_error_; }
+    const Symbols& auth_sym() const { return auth_symbols_; }
+    const std::string& auth_last_error() const { return auth_last_error_; }
 
 private:
     void* h_libmediaplatform_ = nullptr;
@@ -77,6 +86,8 @@ private:
     void* h_libstoreapi_ = nullptr;
 
     Symbols symbols_;
+    Symbols auth_symbols_;
+    std::string auth_last_error_;
     bool ok_{false};
     bool decrypt_available_{false};
     std::string last_error_;

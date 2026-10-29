@@ -37,8 +37,18 @@ bool guest_load(const char *path, char *error, size_t error_size);
 void *guest_dlsym(const char *name);
 
 // Same, but restricted to one library (needed when several export the same
-// C symbol, e.g. every JNI library's JNI_OnLoad).
+// C symbol, e.g. every JNI library's JNI_OnLoad, or when the 3.6.0 (auth)
+// and 6.5.3 (decrypt) generations share a soname).
 void *guest_dlsym_in(const char *soname, const char *name);
+
+// Where DT_NEEDED names resolve when the loading library's own directory
+// does not carry them (the second generation's directory).
+void guest_set_fallback_dir(const char *dir);
+
+// Skip (rather than die on) constructors that fault -- the 3.6.0 auth set's
+// inits touch resources a bare qemu guest does not carry. Clear it back for
+// sets whose inits must be strict.
+void guest_set_tolerant_inits(bool tolerant);
 
 // True when `name` was already loaded.
 bool guest_is_loaded(const char *soname);

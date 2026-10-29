@@ -32,11 +32,16 @@ extern "C" int __android_log_vprint(int, const char*, const char*, void*) { retu
 // every crash a stackful answer instead of a guessing game.
 extern "C" void amp_fault_handler(int sig, siginfo_t* info, void* uctx_v) {
     ucontext_t* uc = (ucontext_t*)uctx_v;
-    // i386 mcontext: gregs[REG_ESP] is the stack pointer at fault time.
+    // Stack pointer at fault time, per guest ABI: i386 keeps the register
+    // set in gregs[], armv7 names the registers arm_sp / arm_pc directly.
+#if defined(__i386__)
     const void* esp = (const void*)uc->uc_mcontext.gregs[REG_ESP];
-    const void* eip = (const void*)uc->uc_mcontext.gregs[REG_EIP];
+#elif defined(__arm__)
+    const void* esp = (const void*)uc->uc_mcontext.arm_sp;
+#else
+    const void* esp = nullptr;
+#endif
     wrapper::apple::guest_report_fault(info->si_addr, esp, 96);
-    (void)eip;
     // Restore the default action and re-raise so qemu reports the signal.
     std::signal(sig, SIG_DFL);
     std::raise(sig);
@@ -73,6 +78,15 @@ int main(int argc, char** argv) {
     }
 
     fprintf(stderr, "boot: loader.ok=%d\n", loader.ok());
+    if (loader.ok() && std::getenv("AMP_AUTH_PROBE")) {
+        // The 3.6.0 auth generation: load + resolve its surface. The account
+        // module (next milestone) drives sign-in/tokens through these.
+        if (loader.open_auth(libs_dir)) {
+            fprintf(stderr, "boot: auth set loaded\n");
+        } else {
+            fprintf(stderr, "boot: auth set failed: %s\n", loader.auth_last_error().c_str());
+        }
+    }
     wrapper::apple::Runtime rt;
     if (loader.ok()) {
         rt.initialize(loader);

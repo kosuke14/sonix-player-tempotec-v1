@@ -10,20 +10,40 @@ import subprocess, re, os, glob, sys
 # C++ runtime) are intentionally left out: they are resolved at guest-load
 # time across the manually loaded Apple libs, not linked into the daemon.
 undef = set()
+# Both Apple generations feed the force list: the decrypt surface (6.5.3)
+# and the auth surface (3.6.0, whose broader stack -- ctype, fork, signal --
+# pulls more of libc in). A -u for a symbol only one of them needs is
+# harmless for the other.
 base = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     '..', 'sonix-player', 'build', 'ampguest', 'apk', 'x86')
+extra_base = os.environ.get('AMP_AUTH_LIBS', '')  # e.g. the extracted 3.6.0 armv7 set
 sysroot = sys.argv[2] if len(sys.argv) > 2 else None
 libs = ['libandroidappmusic.so','libmediaplatform.so','libCoreFP.so','libCoreLSKD.so',
         'libCoreADI.so','libCoreFoundation.so','libdispatch.so','libBlocksRuntime.so',
         'libdaapkit.so','libmedialibrarycore.so','libicui18n_sv_apple.so',
         'libicuuc_sv_apple.so','libicudata_sv_apple.so','libxml2.so','libc++_shared.so']
+libs36 = ['libandroidappmusic.so','libstoreservicescore.so','libmediaplatform.so',
+          'libCoreADI.so','libCoreFP.so','libCoreFoundation.so','libcurl.so',
+          'libmedialibrarycore.so','libicudata_sv_apple.so','libicuuc_sv_apple.so',
+          'libicui18n_sv_apple.so','libxml2.so','libc++_shared.so','libdispatch.so',
+          'libBlocksRuntime.so','libdaapkit.so']
 for so in libs:
     r = subprocess.run(['readelf','-W','--dyn-syms', os.path.join(base, so)], capture_output=True, text=True)
     for line in r.stdout.splitlines():
         p = line.split()
         if len(p) >= 8 and 'UND' in line and not line.strip().startswith('Num'):
             undef.add(p[7].split('@')[0])
+if extra_base and os.path.isdir(extra_base):
+    for so in libs36:
+        p = os.path.join(extra_base, so)
+        if not os.path.exists(p):
+            continue
+        r = subprocess.run(['readelf','-W','--dyn-syms', p], capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            q = line.split()
+            if len(q) >= 8 and 'UND' in line and not line.strip().startswith('Num'):
+                undef.add(q[7].split('@')[0])
 
 # Scan every static archive the static link uses (libc/libm/libz/libdl).
 if sysroot is None:

@@ -10,6 +10,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <csignal>
+#include <setjmp.h>
+
+extern "C" void amp_fault_handler(int, siginfo_t*, void*);
+
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,9 +44,13 @@ struct Loaded {
 };
 
 std::unordered_map<std::string, Loaded *> g_loaded;
-std::string g_search_dir; // where DT_NEEDED names resolve (set by guest_load)
+std::string g_search_dir;  // where DT_NEEDED names resolve first (set by guest_load)
+std::string g_fallback_dir; // ...and where they fall back (the second generation)
 uintptr_t g_next_base = kLoadBase;
 std::vector<Loaded *> g_load_order;
+// The ELF machine of the set being served (EM_386 or EM_ARM); the relocation
+// type codes differ between the two.
+int g_machine = EM_386;
 
 // Global symbol scope: name -> address, filled as libraries load (insert
 // order = load order, so the first definition wins, like the linker's
@@ -334,9 +343,16 @@ bool apply_dynamic(Loaded *lib, uint8_t *file, size_t file_len, char *error,
                 break;
             }
             const char *redirected = strcmp(needed, "libc++.so") == 0 ? "libc++_shared.so" : needed;
-            if (!guest_is_loaded(redirected)) {
-                char dep_path[512];
-                snprintf(dep_path, sizeof(dep_path), "%s/%s", g_search_dir.c_str(), redirected);
+            // Deps resolve in the loading library's own directory first, so
+            // the 3.6.0 (auth) and 6.5.3 (decrypt) generations -- which share
+            // sonames -- never cross their sets.
+            char dep_path[512];
+            snprintf(dep_path, sizeof(dep_path), "%s/%s", g_search_dir.c_str(), redirected);
+            if (access(dep_path, R_OK) != 0) {
+                snprintf(dep_path, sizeof(dep_path), "%s/%s", g_fallback_dir.c_str(),
+                         redirected);
+            }
+            if (!guest_is_loaded(dep_path) && !guest_is_loaded(redirected)) {
                 if (!load_one(dep_path, error, error_size)) {
                     return false;
                 }
@@ -409,18 +425,24 @@ bool apply_dynamic(Loaded *lib, uint8_t *file, size_t file_len, char *error,
                 }
                 return lib->dynstr + noff;
             };
+            // The two guest ABIs this loader serves: i386 and armv7. Both use
+            // REL with implicit addends; only the type codes differ.
+            const uint32_t rel_relative = (g_machine == EM_386) ? R_386_RELATIVE : R_ARM_RELATIVE;
             if (g_trace) {
-                const char *nm = (type == R_386_RELATIVE) ? "" :
+                const char *nm = (type == rel_relative) ? "" :
                     (sym_name() ? sym_name() : "<sym-oob>");
                 fprintf(stderr, "guestelf: %s rel[%zu/%zu] type=%u sym=%u %s where=%p\n",
                         lib->soname.c_str(), i, n, type, sym_idx, nm, where);
             }
             switch (type) {
             case R_386_RELATIVE:
+            case R_ARM_RELATIVE:
                 *(uint32_t *)where += lib->base;
                 break;
             case R_386_JMP_SLOT:
-            case R_386_GLOB_DAT: {
+            case R_386_GLOB_DAT:
+            case R_ARM_JUMP_SLOT:
+            case R_ARM_GLOB_DAT: {
                 const char *name = sym_name();
                 if (!name) {
                     snprintf(error, error_size, "%s: bad symbol index %u (type %u)",
@@ -435,7 +457,8 @@ bool apply_dynamic(Loaded *lib, uint8_t *file, size_t file_len, char *error,
                 *(uint32_t *)where = (uint32_t)(uintptr_t)addr;
                 break;
             }
-            case R_386_32: {
+            case R_386_32:
+            case R_ARM_ABS32: {
                 const char *name = sym_name();
                 if (!name) {
                     snprintf(error, error_size, "%s: bad symbol index %u (type %u)",
@@ -450,12 +473,6 @@ bool apply_dynamic(Loaded *lib, uint8_t *file, size_t file_len, char *error,
                 *(uint32_t *)where += (uint32_t)(uintptr_t)addr;
                 break;
             }
-            case R_386_TLS_TPOFF:
-            case R_386_TLS_DTPMOD32:
-            case R_386_TLS_DTPOFF32:
-                snprintf(error, error_size, "%s: TLS relocations unsupported",
-                         lib->soname.c_str());
-                return false;
             default:
                 snprintf(error, error_size, "%s: relocation type %u unsupported",
                          lib->soname.c_str(), type);
@@ -492,20 +509,20 @@ Loaded *load_one(const char *path, char *error, size_t error_size) {
         return nullptr;
     }
     Elf32_Ehdr *eh = (Elf32_Ehdr *)file;
-    if (memcmp(eh->e_ident, ELFMAG, 4) != 0 || eh->e_machine != EM_386) {
+    if (memcmp(eh->e_ident, ELFMAG, 4) != 0 ||
+        (eh->e_machine != EM_386 && eh->e_machine != EM_ARM)) {
         munmap(file, file_len);
-        snprintf(error, error_size, "%s: not an i386 ELF", path);
+        snprintf(error, error_size, "%s: not an i386/ARM ELF", path);
         return nullptr;
     }
+    g_machine = (int)eh->e_machine;
 
     fprintf(stderr, "guestelf: mapped %s span=%zu\n", path, (size_t)eh->e_shoff);
-    // Soname from the file name; DT_SONAME is optional and these libraries
-    // carry it inconsistently.
-    const char *slash = strrchr(path, '/');
-    const char *soname = slash ? slash + 1 : path;
-    if (guest_is_loaded(soname)) {
+    // Key the loaded set by full path: the 3.6.0 (auth) and 6.5.3 (decrypt)
+    // generations share sonames, and both must stay resident.
+    if (guest_is_loaded(path)) {
         munmap(file, file_len);
-        return g_loaded[soname];
+        return g_loaded[path];
     }
 
     // Reserve a contiguous region large enough for all PT_LOADs.
@@ -535,7 +552,7 @@ Loaded *load_one(const char *path, char *error, size_t error_size) {
     g_next_base = (uintptr_t)region + span;
 
     Loaded *lib = new Loaded();
-    lib->soname = soname;
+    lib->soname = path; // the map key is the full path (generations share sonames)
     lib->base = (uintptr_t)region;
     lib->vaddr_base = 0;
     for (int i = 0; i < eh->e_phnum; i++) {
@@ -544,7 +561,7 @@ Loaded *load_one(const char *path, char *error, size_t error_size) {
             break;
         }
     }
-    g_loaded[soname] = lib;
+    g_loaded[path] = lib;
     g_load_order.push_back(lib);
 
     // Copy each PT_LOAD in. Protections are narrowed only after the
@@ -592,20 +609,93 @@ Loaded *load_one(const char *path, char *error, size_t error_size) {
     return lib;
 }
 
+// The auth generation's constructors touch resources the bare guest does
+// not have (system properties, /proc, the Android runtime); a crashing init
+// is skipped rather than taking the daemon down. Enabled per set via
+// guest_set_tolerant_inits(); the decrypt generation keeps strict inits.
+static bool g_tolerant_inits = false;
+static sigjmp_buf g_init_jmp;
+static volatile sig_atomic_t g_init_active = 0;
+
+extern "C" void amp_init_fault_handler(int, siginfo_t *, void *) {
+    if (g_init_active) {
+        g_init_active = 0;
+        siglongjmp(g_init_jmp, 1);
+    }
+    // Not ours: restore the default action and re-raise.
+    std::signal(SIGSEGV, SIG_DFL);
+    std::signal(SIGBUS, SIG_DFL);
+    std::raise(SIGSEGV);
+}
+
+struct InitGuard {
+    InitGuard() {
+        if (!g_tolerant_inits) {
+            return;
+        }
+        struct sigaction sa;
+        sa.sa_sigaction = amp_init_fault_handler;
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+    }
+    static bool begin() {
+        if (!g_tolerant_inits) {
+            return true;
+        }
+        if (sigsetjmp(g_init_jmp, 1) != 0) {
+            return false; // faulted: skip this entry
+        }
+        g_init_active = 1;
+        return true;
+    }
+    static void end() { g_init_active = 0; }
+};
+
 void run_inits(void) {
+    InitGuard guard;
+    (void)guard;
     for (Loaded *lib : g_load_order) {
         fprintf(stderr, "guestelf: init %s\n", lib->soname.c_str());
         fflush(stderr);
         if (lib->init && !lib->init_ran) {
             lib->init_ran = true;
-            lib->init();
+            if (InitGuard::begin()) {
+                lib->init();
+            } else {
+                fprintf(stderr, "guestelf: init %s faulted; skipped\n",
+                        lib->soname.c_str());
+                fflush(stderr);
+            }
+            InitGuard::end();
         }
         if (lib->init_array && !lib->init_ran) {
             lib->init_ran = true;
             for (size_t i = 0; i < lib->init_array_count; i++) {
-                ((void (*)(void))(lib->init_array[i]))();
+                if (g_tolerant_inits) {
+                    fprintf(stderr, "guestelf: %s init_array[%zu]\n", lib->soname.c_str(), i);
+                    fflush(stderr);
+                }
+                if (InitGuard::begin()) {
+                    ((void (*)(void))(lib->init_array[i]))();
+                    InitGuard::end();
+                } else {
+                    fprintf(stderr, "guestelf: init_array[%zu] of %s faulted; skipped\n", i,
+                            lib->soname.c_str());
+                    fflush(stderr);
+                }
             }
         }
+    }
+    if (g_tolerant_inits) {
+        // Hand faults back to the daemon-wide handler.
+        struct sigaction sa;
+        sa.sa_sigaction = amp_fault_handler;
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
     }
 }
 
@@ -615,10 +705,14 @@ bool guest_load(const char *path, char *error, size_t error_size) {
     init_self_symbols();
     {
         // Remember the directory of the first load; DT_NEEDED names are
-        // bare sonames and resolve against it.
+        // bare sonames and resolve against it, falling back to the second
+        // generation's directory when the file is not here.
         const char *slash = strrchr(path, '/');
         if (slash) {
             g_search_dir.assign(path, (size_t)(slash - path));
+        }
+        if (g_fallback_dir.empty() && slash) {
+            g_fallback_dir = g_search_dir;
         }
     }
     Loaded *lib = load_one(path, error, error_size);
@@ -627,6 +721,16 @@ bool guest_load(const char *path, char *error, size_t error_size) {
     }
     run_inits();
     return true;
+}
+
+void guest_set_fallback_dir(const char *dir) {
+    if (dir && dir[0]) {
+        g_fallback_dir = dir;
+    }
+}
+
+void guest_set_tolerant_inits(bool tolerant) {
+    g_tolerant_inits = tolerant;
 }
 
 void *guest_dlsym(const char *name) {

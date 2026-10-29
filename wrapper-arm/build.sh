@@ -31,7 +31,7 @@ fi
 FLAGS="--target=$TRIPLE --sysroot=$SYSROOT -march=$ARCH -O2 -Wall -Wextra -Werror -std=c++17 -Isrc"
 mkdir -p build
 OBJS=""
-for f in main ipc apple/loader apple/decrypt apple/runtime apple/guestelf; do
+for f in main ipc apple/loader apple/decrypt apple/runtime apple/guestelf apple/cxa_type_match; do
     obj="build/$(basename "$f").o"
     clang++ $FLAGS -c "src/$f.cpp" -o "$obj"
     OBJS="$OBJS $obj"
@@ -68,5 +68,5 @@ clang++ --target="$TRIPLE" --sysroot="$SYSROOT" -march="$ARCH" -O2 -std=c++17 -I
     -static -nodefaultlibs $OBJS $FORCE_SYMBOLS -o build/ampdaemon-static \
     -L"$SYSROOT/usr/lib/${TRIPLE%%-*}-linux-android/30" \
     -lc++_static -lc++abi -lm -lc -ldl \
-    "$SYSROOT/usr/lib/i686-linux-android/libz.a" "$UNWIND_PATH" "$BUILTINS"
+    "$SYSROOT/usr/lib/arm-linux-androideabi/libz.a" "$UNWIND_PATH" "$BUILTINS"
 echo "built: build/ampdaemon-static ($(stat -c%s build/ampdaemon-static) bytes)"
