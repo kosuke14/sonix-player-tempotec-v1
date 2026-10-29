@@ -17,10 +17,16 @@ typedef struct {
 	int duration_ms;
 } ampapi_song_t;
 
+// The storefront the catalog defaults to when the user has not set one: the
+// player's language mapped onto Apple's storefront codes ("Japanese" ->
+// "jp", English -> "us", ...).
+const char *ampapi_default_storefront(void);
+
 // Searches the catalog for songs. `token` is the developer (JWT) token,
 // `music_user_token` the per-account one, both from ampw_me(). Results go to
 // `out` (at most `max`); the count is returned, -1 on transport failure and
-// -2 on an API error body. `error` carries the message either way.
+// -2 on an API error body. `error` carries the message either way. A NULL or
+// empty `storefront` falls back to ampapi_default_storefront().
 int ampapi_search_songs(const char *dev_token, const char *music_user_token,
 						const char *storefront, const char *term, ampapi_song_t *out, int max,
 						char *error, size_t error_size);

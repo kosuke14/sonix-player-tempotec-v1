@@ -141,7 +141,7 @@ static void *worker_main(void *arg) {
 					} else {
 						char storefront[32];
 						snprintf(storefront, sizeof(storefront), "%.20s",
-								 config_get("applemusic", "storefront", "jp"));
+								 config_get("applemusic", "storefront", ampapi_default_storefront()));
 						result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
 						result->count = result->songs
 							? ampapi_search_songs(me.dev_token, me.music_user_token, storefront,

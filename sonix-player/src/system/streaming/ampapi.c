@@ -1,6 +1,7 @@
 #include "ampapi.h"
 
 #include "src/system/core/json.h"
+#include "src/system/core/lang.h"
 #include "src/system/net/http.h"
 
 #include <stdio.h>
@@ -14,6 +15,30 @@
 
 #define AMP_API_LIMIT (512 * 1024)
 #define AMP_API_TIMEOUT 20
+
+// With no storefront configured the catalog follows the player's language:
+// the mapping is the device's eleven languages onto Apple's storefront codes.
+const char *ampapi_default_storefront(void) {
+	static const struct {
+		const char *lang;
+		const char *store;
+	} by_lang[] = {
+		{"Japanese", "jp"},	 {"Deutsch", "de"},		{"Español", "es"},
+		{"Français", "fr"},	 {"Italiano", "it"},	{"Nederlands", "nl"},
+		{"Polski", "pl"},	 {"Português BR", "br"}, {"Russian", "ru"},
+		{"Ukrainian", "ua"},
+	};
+	const char *lang = lang_current();
+	if (!lang || !lang[0] || strcmp(lang, "English") == 0) {
+		return "us";
+	}
+	for (size_t i = 0; i < sizeof(by_lang) / sizeof(by_lang[0]); i++) {
+		if (strcmp(lang, by_lang[i].lang) == 0) {
+			return by_lang[i].store;
+		}
+	}
+	return "us";
+}
 
 void ampapi_artwork_url(const char *template, int side, char *out, size_t size) {
 	if (!template) {
@@ -75,7 +100,8 @@ int ampapi_search_songs(const char *dev_token, const char *music_user_token,
 	char term_enc[512];
 	http_url_encode(term, term_enc, sizeof(term_enc));
 	char store[32];
-	snprintf(store, sizeof(store), "%.20s", storefront && storefront[0] ? storefront : "jp");
+	snprintf(store, sizeof(store), "%.20s",
+			 storefront && storefront[0] ? storefront : ampapi_default_storefront());
 	char url[640];
 	snprintf(url, sizeof(url),
 			 "https://amp-api.music.apple.com/v1/catalog/%s/search?term=%s&types=songs&limit=%d",
