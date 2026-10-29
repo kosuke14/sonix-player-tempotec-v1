@@ -1,5 +1,7 @@
 #include "ampstream.h"
 
+#include "amplocal.h"
+
 #include "amphls.h"
 #include "ampfp4.h"
 #include "ampwrapper.h"
@@ -471,12 +473,18 @@ static bool amp_source_open(streambridge_source_t *src, char *error, size_t erro
 		}
 	}
 
+	// Translate mode decrypts on this device: the local listener (amplocal)
+	// owns the decrypt port on loopback and drives the guest daemon. The
+	// remote wrapper keeps serving /me, /login and /playback either way.
 	char host[128];
-	if (!host_of(st->base_url, host, sizeof(host))) {
+	int port = st->decrypt_port;
+	if (config_get_int("applemusic", "translate", 0) != 0) {
+		snprintf(host, sizeof(host), "127.0.0.1");
+	} else if (!host_of(st->base_url, host, sizeof(host))) {
 		snprintf(error, error_size, "amp_not_configured");
 		return false;
 	}
-	st->dec = ampw_decrypt_open(host, st->decrypt_port, decrypt_stale, src);
+	st->dec = ampw_decrypt_open(host, port, decrypt_stale, src);
 	if (!st->dec) {
 		snprintf(error, error_size, "amp_decrypt_connect");
 		return false;
@@ -690,6 +698,7 @@ static int choose_slot(const char *path, bool prefetch) {
 
 bool ampstream_prepare(char *path, size_t path_size) {
 	(void)path_size; // the stream is written under the name the queue already holds
+	amplocal_init(); // no-op unless [applemusic] translate=1
 	if (!ampstream_owns(path)) {
 		ampstream_cancel();
 		return true;
