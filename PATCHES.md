@@ -1468,12 +1468,14 @@ language file. It also adds the `lang.h` include `streamkeep.c` needs for `tr()`
 
 ## Apple Music streaming through a wrapper daemon
 
-Apple Music is the one service the device cannot talk to alone: FairPlay lives
-in arm64 Android libraries, the player is a MIPS device, and nothing Apple-signed
-belongs in this firmware. The split this feature implements is therefore a
-deliberate one — a [wrapper-v2](https://github.com/…/wrapper-v2) daemon runs
-where the libraries can (Docker on a PC or NAS) and the player does everything
-else:
+FairPlay ships as Android libraries the MIPS player cannot run, and nothing
+Apple-signed belongs in this firmware — but the APK carries the set in every
+Android ABI, including 32-bit x86 with the complete decrypt path. The original
+split (this section) kept the libraries off the device anyway: a
+[wrapper-v2](https://github.com/…/wrapper-v2) daemon runs where they can
+(Docker on a PC or NAS) and the player does everything else. The next section
+moves the decrypt leg onto the device itself; the wrapper keeps serving the
+account, the catalog and the playback dispatch in both modes:
 
 - **`ampwrapper.c`** - the daemon's two doors: the HTTP side (`/me`,
   `/playback`, the sign-in pair, `DELETE /login` for sign-out) and the raw TCP
@@ -1506,10 +1508,11 @@ else:
   established: two 1 MiB slots, `amp://<generation>/<index>.aac` pseudo-paths,
   a `device_state` prepare callback, 90%-progress prefetch, leases and the
   one-error-to-the-GUI rule. The source ops behind the bridge fetch
-  `/playback`, walk the playlists, slice each segment, batch the wrapper
-  samples (flushing on a key change, the sample ceiling, or the emit bound)
-  and re-emit plain ADTS AAC into the ring, where the existing ADTS decoder
-  plays it. A stream with a keyless segment is refused up front.
+  `/playback`, walk the playlists, slice each segment, batch the samples to
+  the decrypt daemon — the remote wrapper, or the on-device guest daemon when
+  `translate=1` — (flushing on a key change, the sample ceiling, or the emit
+  bound) and re-emit plain ADTS AAC into the ring, where the existing ADTS
+  decoder plays it. A stream with a keyless segment is refused up front.
 - **`decode.c`** - `adtsb`, the ADTS decoder off the bridge: the same
   libfdk-aac decoder the file path uses, fed from the ring, no index and no
   seek, the duration arriving with the lease.
