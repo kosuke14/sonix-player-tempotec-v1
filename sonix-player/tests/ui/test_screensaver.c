@@ -28,6 +28,8 @@
 #include "src/gui/nowplaying/coverloader.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/screensaver.h"
+#include "src/system/audio/visualizer.h"
+#include <math.h>
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/core/config.h"
@@ -949,6 +951,28 @@ int main(int argc, char **argv) {
 	assert(frame_job.requests == requests);
 	hide_now();
 	screensaver_set_source(SCREENSAVER_SOURCE_ALBUM);
+
+	/* Visualizer replaces the album, not the clock, and responds to PCM. */
+	screensaver_set_visualizer(true);
+	assert(config_init(config) && config_get_bool("screen", "screensaver_visualizer", false));
+	go_dark();
+	wake();
+	lv_obj_t *spectrum = lv_obj_get_child(saver_obj(), 3);
+	assert(!lv_obj_is_hidden(spectrum));
+	assert(lv_obj_is_hidden(cover_box()));
+	assert(!lv_obj_is_hidden(info_strip()));
+	int16_t pcm[4096 * 2];
+	for (int i = 0; i < 4096; i++) pcm[2*i] = pcm[2*i+1] = (int16_t)(24000 * sin(2 * 3.14159265 * 850 * i / 44100));
+	visualizer_feed(pcm, 4096, 2, 16, 44100);
+	uint8_t levels[VISUALIZER_BANDS];
+	visualizer_levels(levels);
+	assert(levels[4] > levels[0]);
+	pump(150);
+	assert(!lv_obj_is_hidden(lv_obj_get_child(spectrum, 1 + 4 * 24)));
+	screensaver_set_visualizer(false);
+	assert(lv_obj_is_hidden(spectrum));
+	assert(!lv_obj_is_hidden(cover_box()));
+	hide_now();
 
 	/* Switched off with the screensaver up: everything goes with it. */
 	go_dark();
