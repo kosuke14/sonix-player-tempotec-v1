@@ -41,6 +41,13 @@
 // The name the device announces over DHCP, same as wifi_on.sh's default.
 #define WIFI_HOSTNAME "HiBy_Music"
 
+// wpa_supplicant is started with -c/data/wpa_supplicant.conf by wifi_on.sh.
+// When that file is missing, wifi_on.sh tries to copy
+// /etc/wpa_supplicant_default.conf, which does not exist on the V1 image,
+// so wpa_supplicant exits immediately and no control socket ever appears.
+// Create the config with minimal contents before the radio is turned on.
+#define WPA_SUPPLICANT_CONF "/data/wpa_supplicant.conf"
+
 // How long a scan is given before its results are read back. wpa_supplicant
 // needs a good two seconds to walk the channels; asking sooner returns the
 // previous sweep.
@@ -545,9 +552,42 @@ static void run_script(const char *path) {
 	run_argv(argv, NULL, 0);
 }
 
+// /data/wpa_supplicant.conf is what wpa_supplicant is started with
+// (wifi_on.sh passes -c/data/wpa_supplicant.conf). When it is missing,
+// wifi_on.sh tries to copy /etc/wpa_supplicant_default.conf, which does
+// not exist on the V1 image, so wpa_supplicant exits immediately and no
+// control socket appears. Create it with the minimal contents before the
+// radio is turned on.
+static void ensure_wpa_supplicant_conf(void) {
+#ifndef HOST_BUILD
+	if (access(WPA_SUPPLICANT_CONF, F_OK) == 0) {
+		return; // already there
+	}
+
+	FILE *f = fopen(WPA_SUPPLICANT_CONF, "wb");
+	if (!f) {
+		fprintf(stderr, "wifi: cannot create %s\n", WPA_SUPPLICANT_CONF);
+		return;
+	}
+	fputs("ctrl_interface=/var/run/wpa_supplicant\n", f);
+	fputs("update_config=1\n", f);
+	fputs("country=US\n", f);
+	fclose(f);
+	chmod(WPA_SUPPLICANT_CONF, 0644);
+	sync();
+	fprintf(stderr, "wifi: created %s\n", WPA_SUPPLICANT_CONF);
+#else
+	(void)0;
+#endif
+}
+
 static void do_power(bool on) {
 	char command[64];
 	char reply[128];
+
+	if (on) {
+		ensure_wpa_supplicant_conf();
+	}
 
 	if (have_sysserver()) {
 		snprintf(command, sizeof(command), on ? "WIFI:ON:%s" : "WIFI:OFF:%s", WIFI_IFACE);

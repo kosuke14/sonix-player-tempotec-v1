@@ -65,6 +65,7 @@ static lv_obj_t *screen_off_value;
 static lv_obj_t *screen_off_slider;
 static lv_obj_t *doubletap_switch;
 static lv_obj_t *screensaver_switch;
+static lv_obj_t *screensaver_visualizer_switch;
 static lv_obj_t *screensaver_pills;
 static lv_obj_t *screensaver_album_pill;
 static lv_obj_t *screensaver_images_pill;
@@ -104,10 +105,16 @@ static void screensaver_refresh(void) {
 	// How the album is drawn, under its pill: only while the album is what
 	// the screensaver shows. A folder picture is made for the screen and is
 	// always drawn the one way.
-	lv_obj_set_hidden(screensaver_style_group, !on || source != SCREENSAVER_SOURCE_ALBUM);
+	lv_obj_set_hidden(screensaver_style_group, !on || source != SCREENSAVER_SOURCE_ALBUM || screensaver_get_visualizer());
 	screensaver_style_t style = screensaver_style();
 	settingsrow_pill_active(screensaver_fill_pill, style == SCREENSAVER_STYLE_FILL);
 	settingsrow_pill_active(screensaver_framed_pill, style == SCREENSAVER_STYLE_FRAMED);
+}
+
+static void screensaver_visualizer_cb(lv_event_t *e) {
+    (void)e;
+    screensaver_set_visualizer(lv_obj_has_state(screensaver_visualizer_switch, LV_STATE_CHECKED));
+    screensaver_refresh();
 }
 
 static void screensaver_toggle_cb(lv_event_t *e) {
@@ -378,6 +385,8 @@ static void build_screen_page(gui_config_t *cfg) {
 	screensaver_framed_pill =
 		settingsrow_pill(style_pills, "screensaver_style_framed", SCREENSAVER_STYLE_FRAMED, screensaver_style_cb);
 	screensaver_refresh();
+	settingsrow_toggle(container, "screensaver_visualizer", &screensaver_visualizer_switch, screensaver_visualizer_cb);
+	if (screensaver_get_visualizer()) lv_obj_add_state(screensaver_visualizer_switch, LV_STATE_CHECKED);
 
 	// Upside down, for holding the player the other way up.
 	settingsrow_toggle(container, "settings_rotate_screen", &rotate_switch, rotate_toggle_cb);

@@ -5,6 +5,8 @@
 #include "src/system/device/bootpic.h"
 
 #include <stdio.h>
+#include <ctype.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -104,6 +106,79 @@ static theme_palette_t palette_oled = {
 	.dark = true,
 };
 
+// A fixed filename keeps the card interface simple and avoids user-supplied
+// paths. Parsing is transactional: a partial or malformed edit is never shown.
+static char custom_root[512];
+static theme_palette_t palette_custom;
+static lv_color_t custom_accent;
+
+void theme_set_card_root(const char *root) {
+	if (!root || strlen(root) >= sizeof(custom_root)) {
+		custom_root[0] = '\0';
+	} else {
+		snprintf(custom_root, sizeof(custom_root), "%s", root);
+	}
+}
+
+static char *trim(char *s) {
+	while (isspace((unsigned char)*s)) s++;
+	char *end = s + strlen(s);
+	while (end > s && isspace((unsigned char)end[-1])) *--end = '\0';
+	return s;
+}
+
+static bool hex_color(const char *s, lv_color_t *out) {
+	if (strlen(s) != 7 || s[0] != '#') return false;
+	unsigned value = 0;
+	for (int i = 1; i < 7; i++) {
+		char c = s[i];
+		unsigned digit = c >= '0' && c <= '9' ? (unsigned)(c - '0') :
+			 c >= 'a' && c <= 'f' ? (unsigned)(c - 'a' + 10) :
+			 c >= 'A' && c <= 'F' ? (unsigned)(c - 'A' + 10) : 16;
+		if (digit == 16) return false;
+		value = (value << 4) | digit;
+	}
+	*out = lv_color_make((value >> 16) & 255, (value >> 8) & 255, value & 255);
+	return true;
+}
+
+static bool load_custom(theme_palette_t *result) {
+	char path[600];
+	if (!custom_root[0] || snprintf(path, sizeof(path), "%s/Themes/custom.ini", custom_root) >= (int)sizeof(path))
+		return false;
+	struct stat st;
+	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 4096) return false;
+	FILE *f = fopen(path, "r");
+	if (!f) return false;
+	static const char *keys[] = {"screen_bg", "surface", "surface_pressed", "panel", "cover_bg",
+		"text_primary", "text_secondary", "accent"};
+	lv_color_t colors[8];
+	unsigned seen = 0;
+	bool section = false, valid = true;
+	char line[256];
+	while (fgets(line, sizeof(line), f)) {
+		if (!strchr(line, '\n') && !feof(f)) { valid = false; break; }
+		char *key = trim(line);
+		if (!*key || *key == ';' || *key == '#') continue;
+		if (strcmp(key, "[theme]") == 0 && !section) { section = true; continue; }
+		char *eq = strchr(key, '=');
+		if (!section || !eq) { valid = false; break; }
+		*eq++ = '\0';
+		key = trim(key);
+		int i = 0;
+		for (; i < 8 && strcmp(key, keys[i]) != 0; i++);
+		if (i == 8 || (seen & (1u << i)) || !hex_color(trim(eq), &colors[i])) { valid = false; break; }
+		seen |= 1u << i;
+	}
+	if (ferror(f)) valid = false;
+	fclose(f);
+	if (!valid || seen != 0xff) return false;
+	*result = (theme_palette_t){.screen_bg = colors[0], .surface = colors[1],
+		.surface_pressed = colors[2], .panel = colors[3], .cover_bg = colors[4],
+		.text_primary = colors[5], .text_secondary = colors[6], .accent = colors[7], .dark = true};
+	return true;
+}
+
 // With no fill to darken, OLED still has to show a press: a row or a button
 // under a finger flashes this grey, the only grey that is ever a fill. A quiet
 // control that would vanish on the black -- an off switch's track, a dialog's
@@ -135,6 +210,8 @@ static theme_palette_t *selected_palette(void) {
 		return &palette_amber;
 	case THEME_KIND_OLED:
 		return &palette_oled;
+	case THEME_KIND_CUSTOM:
+		return &palette_custom;
 	case THEME_KIND_DARK:
 	default:
 		return &palette_dark;
@@ -181,6 +258,8 @@ static lv_color_t default_accent(theme_kind_t kind) {
 		return lv_color_make(255, 173, 46); // Amber on Black signal
 	case THEME_KIND_OLED:
 		return lv_color_make(255, 255, 255); // OLED white
+	case THEME_KIND_CUSTOM:
+		return custom_accent;
 	case THEME_KIND_DARK:
 	case THEME_KIND_LIGHT:
 	default:
@@ -441,6 +520,9 @@ void theme_init(void) {
 		selected_kind = THEME_KIND_AMBER_ON_BLACK;
 	} else if (saved_theme && strcmp(saved_theme, "oled") == 0) {
 		selected_kind = THEME_KIND_OLED;
+	} else if (saved_theme && strcmp(saved_theme, "custom") == 0) {
+		selected_kind = load_custom(&palette_custom) ? THEME_KIND_CUSTOM : THEME_KIND_DARK;
+		if (selected_kind == THEME_KIND_CUSTOM) custom_accent = palette_custom.accent;
 	} else if (saved_theme && strcmp(saved_theme, "dark") == 0) {
 		selected_kind = THEME_KIND_DARK;
 	} else {
@@ -479,6 +561,7 @@ void theme_init(void) {
 	palette_tokyo.accent = accent_index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[accent_index];
 	palette_amber.accent = accent_index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[accent_index];
 	palette_oled.accent = accent_index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[accent_index];
+	palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
 
 	dynamic_tint = config_get_bool("ui", "dynamic_tint", false);
 
@@ -796,14 +879,36 @@ static const char *theme_config_value(theme_kind_t kind) {
 		return "amber-on-black";
 	case THEME_KIND_OLED:
 		return "oled";
+	case THEME_KIND_CUSTOM:
+		return "custom";
 	case THEME_KIND_DARK:
 	default:
 		return "dark";
 	}
 }
 
+bool theme_reload_custom(void) {
+	theme_palette_t next;
+	if (!load_custom(&next)) return false;
+	custom_accent = next.accent;
+	palette_custom = next;
+	palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
+	if (selected_kind == THEME_KIND_CUSTOM) {
+		rebuild_active();
+		apply_palette();
+		refresh_all();
+	}
+	return true;
+}
+
 void theme_set_kind(theme_kind_t kind) {
-	if (kind < THEME_KIND_DARK || kind >= THEME_KIND_COUNT || selected_kind == kind) {
+	if (kind < THEME_KIND_DARK || kind > THEME_KIND_CUSTOM) {
+		return;
+	}
+	if (kind == THEME_KIND_CUSTOM && !theme_reload_custom()) {
+		return;
+	}
+	if (selected_kind == kind) {
 		return;
 	}
 
@@ -811,6 +916,7 @@ void theme_set_kind(theme_kind_t kind) {
 	palette_tokyo.accent = accent_index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[accent_index];
 	palette_amber.accent = accent_index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[accent_index];
 	palette_oled.accent = accent_index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[accent_index];
+	palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
 	rebuild_active();
 	apply_palette();
 

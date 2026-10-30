@@ -1770,6 +1770,14 @@ void power_screen_on(void) {
 	fade_up_quickly(g_cfg.brightness);
 	lv_display_trigger_activity(g_disp);
 
+	// The panel blank/unblank cycle can disturb shared clock or power
+	// domains and leave the CS43198's volume register stale, which is
+	// heard as distortion when the screen comes back on while music is
+	// playing. Rewrite the DAC volume so the codec output is certain to
+	// match the level the user chose. Harmless if nothing changed: the
+	// write is idempotent.
+	set_volume_percent(get_volume_percent());
+
 	led_set_standby(false);
 
 	fprintf(stderr, "power: screen on (brightness=%ld, wake %ums)\n", g_cfg.brightness,

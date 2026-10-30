@@ -15,6 +15,7 @@
 #include "src/gui/shell/scrolltext.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/device/clock.h"
+#include "src/system/audio/visualizer.h"
 #include "src/system/core/config.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/device/power.h"
@@ -40,6 +41,14 @@ static lv_obj_t *chevron_icon;
 static lv_timer_t *clock_timer;
 
 static bool enabled;
+static bool visualizer_selected;
+static lv_obj_t *spectrum, *spectrum_segments[VISUALIZER_BANDS][24];
+static lv_timer_t *spectrum_timer;
+// Fixed-point bar heights, and the last rendered segment count.
+static int spectrum_level[VISUALIZER_BANDS], spectrum_height[VISUALIZER_BANDS];
+static uint8_t spectrum_target[VISUALIZER_BANDS];
+static unsigned spectrum_frame;
+
 static int screen_w, screen_h;
 static int strip_h;
 
@@ -97,6 +106,7 @@ static int strip_h;
 // ---------------------------------------------------------------------------
 
 static screensaver_source_t source;
+static bool spectrum_now(void) { return visualizer_selected && source == SCREENSAVER_SOURCE_ALBUM; }
 
 // The largest picture the folder is read for. Elsewhere that is the panel
 // itself, so a picture is drawn as it was made and never shrunk (see
@@ -206,7 +216,20 @@ static void set_strip_height(int height) {
 bool screensaver_is_visible(void) { return saver && !lv_obj_is_hidden(saver); }
 bool screensaver_get_enabled(void) { return enabled; }
 
+static void refresh_content(void);
+static void spectrum_reset(void);
 screensaver_source_t screensaver_source(void) { return source; }
+bool screensaver_get_visualizer(void) { return visualizer_selected; }
+void screensaver_set_visualizer(bool on) {
+	visualizer_selected = on;
+	config_set_bool("screen", "screensaver_visualizer", on);
+	config_save();
+	if (screensaver_is_visible()) {
+		visualizer_enable(on && spectrum_now() && power_screen_is_on());
+		if (spectrum_now()) lv_timer_resume(spectrum_timer); else { lv_timer_pause(spectrum_timer); spectrum_reset(); }
+		refresh_content();
+	}
+}
 
 static void request_next(void);
 static void drop_next(void);
@@ -226,6 +249,11 @@ void screensaver_set_source(screensaver_source_t chosen) {
 		request_next();
 	} else {
 		drop_next();
+	}
+	if (screensaver_is_visible()) {
+		visualizer_enable(spectrum_now() && power_screen_is_on());
+		if (spectrum_now()) lv_timer_resume(spectrum_timer); else { lv_timer_pause(spectrum_timer); spectrum_reset(); }
+		refresh_content();
 	}
 }
 
@@ -542,7 +570,7 @@ static void screensaver_refresh_theme(void) {
 	// background -- both the ground the note sits on when a track has no artwork
 	// and the colour the translucent field is read against; black otherwise,
 	// which is what the blurred strip is built to sit on.
-	lv_color_t page = field ? theme()->screen_bg : lv_color_black();
+	lv_color_t page = spectrum_now() ? lv_color_black() : (field ? theme()->screen_bg : lv_color_black());
 	lv_obj_set_style_bg_color(saver, page, 0);
 	if (cover_box) {
 		lv_obj_set_style_bg_color(cover_box, page, 0);
@@ -739,6 +767,21 @@ static void refresh_content(void) {
 	// title -- it just must not change the picture.
 	shown_cover = player_cover_image();
 
+	if (!spectrum_now()) {
+		lv_color_t page = (theme_is_monochrome() || theme_is_tokyo_night()) ? theme()->screen_bg : lv_color_black();
+		lv_obj_set_style_bg_color(saver, page, 0);
+	}
+	lv_obj_set_hidden(spectrum, !spectrum_now());
+	lv_obj_set_hidden(cover_box, spectrum_now());
+	if (spectrum_now()) {
+		set_page_backdrop(NULL);
+		lv_obj_set_style_bg_color(saver, lv_color_black(), 0);
+		set_strip_height(DEFAULT_STRIP_H);
+		lv_obj_set_style_bg_image_src(info_strip, NULL, 0);
+		lv_obj_set_style_bg_opa(info_strip, LV_OPA_TRANSP, 0);
+		refresh_clock();
+		return;
+	}
 	if (source == SCREENSAVER_SOURCE_IMAGES) {
 		draw_from_folder();
 		refresh_clock();
@@ -810,6 +853,7 @@ void screensaver_show(void) {
 	lv_obj_set_hidden(saver, false);
 	lv_obj_move_foreground(saver);
 	lv_timer_resume(clock_timer);
+	if (spectrum_now()) { visualizer_enable(power_screen_is_on()); lv_timer_resume(spectrum_timer); }
 }
 
 // Everything that has to happen once it is really gone, whether it was
@@ -818,6 +862,9 @@ static void finish_hide(void) {
 	lv_obj_set_hidden(saver, true);
 	lv_obj_set_y(saver, 0);
 	lv_timer_pause(clock_timer);
+	lv_timer_pause(spectrum_timer);
+	visualizer_enable(false);
+	spectrum_reset();
 	// Let go of the player's pixels: it frees them at the next track change,
 	// and nothing here may still be pointing at them by then. The picture owned
 	// here goes too -- about a megabyte, and the device is in use again, which
@@ -878,6 +925,8 @@ bool screensaver_prepare(void) {
 	// is waiting. Lighting up is when it is collected and swapped in -- no card,
 	// no decode, nothing between the button and the backlight.
 	bool waking = power_screen_is_on();
+	if (!waking) { visualizer_enable(false); spectrum_reset(); }
+	else if (spectrum_now()) visualizer_enable(true);
 
 	if (screensaver_is_visible()) {
 		collect_next();
@@ -988,6 +1037,39 @@ static void drag_cb(lv_event_t *e) {
 	}
 }
 
+// The visual shape stays the same: only the heights ease toward the latest
+// measurements. Analyse at 10 Hz and animate at 20 Hz, so the extra frames
+// cost just a few integer operations and only changed segments are invalidated.
+static void spectrum_tick(lv_timer_t *timer) {
+    (void)timer;
+    if (!screensaver_is_visible() || !spectrum_now() || !power_screen_is_on()) return;
+    if ((spectrum_frame++ & 1u) == 0) visualizer_levels(spectrum_target);
+    for (int b = 0; b < VISUALIZER_BANDS; b++) {
+        int target = spectrum_target[b] * 24 * 256 / 255;
+        int delta = target - spectrum_level[b];
+        // A quick attack and slower release avoid flicker while still following
+        // the music; round toward the target so the bars eventually settle.
+        int divisor = delta > 0 ? 3 : 6;
+        int step = delta / divisor;
+        if (!step && delta) step = delta > 0 ? 1 : -1;
+        spectrum_level[b] += step;
+        int height = (spectrum_level[b] + 255) / 256;
+        int old = spectrum_height[b];
+        for (int y = old; y < height; y++) lv_obj_set_hidden(spectrum_segments[b][y], false);
+        for (int y = height; y < old; y++) lv_obj_set_hidden(spectrum_segments[b][y], true);
+        spectrum_height[b] = height;
+    }
+}
+
+static void spectrum_reset(void) {
+    for (int b = 0; b < VISUALIZER_BANDS; b++) {
+        for (int y = 0; y < spectrum_height[b]; y++) lv_obj_set_hidden(spectrum_segments[b][y], true);
+        spectrum_level[b] = spectrum_height[b] = 0;
+        spectrum_target[b] = 0;
+    }
+    spectrum_frame = 0;
+}
+
 void screensaver_init(gui_config_t *cfg) {
 	screen_w = cfg->screen_width;
 	screen_h = cfg->screen_height;
@@ -997,6 +1079,7 @@ void screensaver_init(gui_config_t *cfg) {
 
 	screensaver_set_card_root(cfg->sd_root_path);
 	enabled = config_get_bool("screen", "screensaver", false);
+	visualizer_selected = config_get_bool("screen", "screensaver_visualizer", false);
 	source = config_get_int("screen", "screensaver_source", SCREENSAVER_SOURCE_ALBUM) == SCREENSAVER_SOURCE_IMAGES
 				 ? SCREENSAVER_SOURCE_IMAGES
 				 : SCREENSAVER_SOURCE_ALBUM;
@@ -1138,6 +1221,51 @@ void screensaver_init(gui_config_t *cfg) {
 	lv_obj_set_style_image_recolor_opa(chevron_icon, LV_OPA_COVER, 0);
 	lv_obj_set_style_image_opa(chevron_icon, LV_OPA_70, 0);
 	lv_obj_center(chevron_icon);
+
+	// The reference uses a black field, segmented bars and a rail. Both use
+	// the shared accent style so theme and accent changes take effect immediately.
+	// Keep it wholly above the metadata strip, so the clock is never covered.
+	spectrum = lv_obj_create(saver);
+	int spectrum_h = screen_h - DEFAULT_STRIP_H;
+	lv_obj_set_size(spectrum, screen_w, spectrum_h);
+	lv_obj_set_pos(spectrum, 0, 0);
+	lv_obj_set_style_bg_color(spectrum, lv_color_black(), 0);
+	lv_obj_set_style_bg_opa(spectrum, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(spectrum, 0, 0);
+	lv_obj_set_style_radius(spectrum, 0, 0);
+	lv_obj_set_style_pad_all(spectrum, 0, 0);
+	lv_obj_set_scrollable(spectrum, false);
+	lv_obj_set_clickable(spectrum, false);
+	lv_obj_set_hidden(spectrum, true);
+	int margin = screen_w / 40, rail_h = screen_h / 80;
+	if (rail_h < 2) rail_h = 2;
+	int rail_y = spectrum_h - screen_h / 40 - rail_h;
+	int step = (rail_y - screen_h / 12) / 24;
+	if (step < 2) step = 2;
+	int cell = (screen_w - 2 * margin) / VISUALIZER_BANDS;
+	lv_obj_t *rail = lv_obj_create(spectrum);
+	lv_obj_set_pos(rail, margin, rail_y);
+	lv_obj_set_size(rail, screen_w - 2 * margin, rail_h);
+	lv_obj_add_style(rail, &theme_style_accent_bg, 0);
+	lv_obj_set_style_bg_opa(rail, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(rail, 0, 0);
+	lv_obj_set_style_radius(rail, 0, 0);
+	lv_obj_set_clickable(rail, false);
+	for (int b = 0; b < VISUALIZER_BANDS; b++) for (int y = 0; y < 24; y++) {
+		lv_obj_t *segment = lv_obj_create(spectrum);
+		spectrum_segments[b][y] = segment;
+		lv_obj_set_pos(segment, margin + b * cell + 1, rail_y - (y + 1) * step);
+		lv_obj_set_size(segment, cell - 2, step - 1);
+		lv_obj_add_style(segment, &theme_style_accent_bg, 0);
+		lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, 0);
+		lv_obj_set_style_border_width(segment, 0, 0);
+		lv_obj_set_style_radius(segment, 0, 0);
+		lv_obj_set_clickable(segment, false);
+		lv_obj_set_hidden(segment, true);
+	}
+	spectrum_timer = lv_timer_create(spectrum_tick, 50, NULL);
+	lv_timer_pause(spectrum_timer);
+	power_pause_in_standby(spectrum_timer);
 
 	// One second, not ten: the clock only needs a minute's resolution, but the
 	// same tick is what notices a track change, and a screensaver that shows
