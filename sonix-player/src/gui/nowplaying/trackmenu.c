@@ -12,6 +12,7 @@
 #include "src/gui/library/medialist.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/library/playlistpage.h"
+#include "src/gui/streaming/amppage.h"
 #include "src/gui/streaming/qobuzpage.h"
 #include "src/gui/streaming/tidalpage.h"
 #include "src/gui/shell/confirm.h"
@@ -1239,6 +1240,22 @@ static void open_album_cb(void *user) {
 		return;
 	}
 
+	// The Apple Music streamed track, same pattern: its album is reopened on
+	// the catalog, by the album id the queue kept with the song.
+	ampapi_song_t amp_song;
+	if (ampstream_song_for(state.current_file, &amp_song) && amp_song.album_id[0]) {
+		char title[256];
+		if (!library_track_album(state.current_file, title, sizeof(title)) || !title[0]) {
+			snprintf(title, sizeof(title), "%s", amp_song.album[0] ? amp_song.album : "");
+		}
+		player_sheet_close(false);
+		if (!amppage_open_album(amp_song.album_id, title)) {
+			gui_notify_popup("amp_album_failed");
+			return;
+		}
+		return;
+	}
+
 	// Same for Tidal, for the same reason: a streamed track's album is reopened
 	// on the service it came from, not in the local database, where it is not.
 	char tidal_album[40];
@@ -1412,7 +1429,6 @@ void trackmenu_open(lv_obj_t *anchor) {
 	static const popover_item_t ITEMS_AMP[] = {
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"smartmix_start", start_genius_cb, NULL},
-		{"add_to_playlist", add_to_playlist_cb, NULL},
 		{"show_album", open_album_cb, NULL},
 		{"trackmenu_keep_on_card", amp_keep_cb, NULL},
 		{"details", open_details_cb, NULL},

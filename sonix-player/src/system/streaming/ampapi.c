@@ -78,6 +78,21 @@ static void fill_song(const json_doc_t *doc, int obj, ampapi_song_t *out) {
 	if (art >= 0) {
 		json_obj_str(doc, art, "url", out->artwork, sizeof(out->artwork));
 	}
+	// The album the track sits in: MusicKit carries it as the albums
+	// relationship; a top-level collectionId appears on some resources and
+	// is the fallback.
+	int rels = json_get(doc, obj, "relationships");
+	if (rels >= 0) {
+		int albums = json_get(doc, rels, "albums");
+		int album_data = albums >= 0 ? json_get(doc, albums, "data") : -1;
+		int first = album_data >= 0 ? json_at(doc, album_data, 0) : -1;
+		if (first >= 0) {
+			json_obj_str(doc, first, "id", out->album_id, sizeof(out->album_id));
+		}
+	}
+	if (!out->album_id[0]) {
+		json_obj_str(doc, obj, "collectionId", out->album_id, sizeof(out->album_id));
+	}
 }
 
 int ampapi_search_songs(const char *dev_token, const char *music_user_token,
@@ -140,6 +155,85 @@ int ampapi_search_songs(const char *dev_token, const char *music_user_token,
 			int item = json_at(&doc, data, i);
 			if (item >= 0) {
 				fill_song(&doc, item, &out[count]);
+				if (out[count].id[0]) {
+					count++;
+				}
+			}
+		}
+	}
+	json_free(&doc);
+	return count;
+}
+
+// The tracks of one catalog album, in the album's own order. The response
+// root carries the songs directly (no results.songs nesting like search).
+int ampapi_album_tracks(const char *dev_token, const char *music_user_token,
+						const char *storefront, const char *album_id, ampapi_song_t *out,
+						int max, char *error, size_t error_size) {
+	if (error && error_size) {
+		error[0] = '\0';
+	}
+	if (!dev_token || !dev_token[0] || !music_user_token || !music_user_token[0] ||
+		!album_id || !album_id[0] || !out || max <= 0) {
+		snprintf(error, error_size, "ampapi_bad_args");
+		return -1;
+	}
+	// The id is digits-only by construction (it came from the catalog);
+	// refusing anything else keeps the path a path.
+	for (const char *c = album_id; *c; c++) {
+		if (*c < '0' || *c > '9') {
+			snprintf(error, error_size, "ampapi_bad_args");
+			return -1;
+		}
+	}
+	char headers[2812];
+	snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\n"
+									   "Cookie: media-user-token=%s\r\n"
+									   "Origin: https://music.apple.com\r\n",
+			 dev_token, music_user_token);
+
+	char store[32];
+	snprintf(store, sizeof(store), "%.20s",
+			 storefront && storefront[0] ? storefront : ampapi_default_storefront());
+	char url[640];
+	snprintf(url, sizeof(url),
+			 "https://amp-api.music.apple.com/v1/catalog/%s/albums/%s/tracks?limit=%d", store,
+			 album_id, max > 100 ? 100 : max);
+
+	char *body = NULL;
+	size_t len = 0;
+	int status = 0;
+	http_req_t req = {
+		.extra_headers = headers, .want_error_body = true, .allow_empty_body = true};
+	if (!http_request(url, &req, &body, &len, AMP_API_LIMIT, AMP_API_TIMEOUT, &status)) {
+		snprintf(error, error_size, "%s", http_last_error() ? http_last_error() : "ampapi_failed");
+		return -1;
+	}
+	if (status != 200) {
+		snprintf(error, error_size, "ampapi_http_%d", status);
+		free(body);
+		return -2;
+	}
+
+	json_doc_t doc;
+	if (!json_parse(body, &doc)) {
+		free(body);
+		snprintf(error, error_size, "ampapi_bad_json");
+		return -2;
+	}
+	free(body);
+	int root = json_root(&doc);
+	int data = json_get(&doc, root, "data");
+	int count = 0;
+	if (data >= 0) {
+		int total = json_len(&doc, data);
+		for (int i = 0; i < total && count < max; i++) {
+			int item = json_at(&doc, data, i);
+			if (item >= 0) {
+				fill_song(&doc, item, &out[count]);
+				// An album page's rows play by adam id, so a row without one
+				// is dead weight -- but keep the album's own title rows out
+				// of the way entirely.
 				if (out[count].id[0]) {
 					count++;
 				}

@@ -11,6 +11,7 @@
 
 typedef struct {
 	char id[32];	   // the Adam ID every playback call is keyed by
+	char album_id[32]; // the album the track sits in, for the album page
 	char title[256];
 	char artist[256];
 	char album[256];
@@ -31,6 +32,12 @@ const char *ampapi_default_storefront(void);
 int ampapi_search_songs(const char *dev_token, const char *music_user_token,
 						const char *storefront, const char *term, ampapi_song_t *out, int max,
 						char *error, size_t error_size);
+
+// The tracks of one catalog album, same contract as the search: the album
+// page's list. Songs come back in the album's own order.
+int ampapi_album_tracks(const char *dev_token, const char *music_user_token,
+						const char *storefront, const char *album_id, ampapi_song_t *out,
+						int max, char *error, size_t error_size);
 
 // The artwork URL at a concrete size, written into out: the template's {w}
 // and {h} are replaced. 300x300 reads well at the player's size.

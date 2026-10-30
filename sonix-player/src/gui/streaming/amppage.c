@@ -41,11 +41,12 @@ static int editing;
 // The same single-mailbox worker shape the other streaming pages use: results
 // own their memory until the GUI takes them, and a late worker can never
 // overwrite a list the GUI is reading.
-typedef enum { JOB_SEARCH, JOB_ME, JOB_LOGIN, JOB_2FA, JOB_LOGOUT } job_kind_t;
+typedef enum { JOB_SEARCH, JOB_ALBUM, JOB_ME, JOB_LOGIN, JOB_2FA, JOB_LOGOUT } job_kind_t;
 typedef struct {
 	unsigned serial;
 	job_kind_t kind;
 	char term[64];
+	char album_id[32]; // the catalog album a JOB_ALBUM page lists
 	char username[128]; // the Apple ID, and its password for a sign-in
 	char password[128];
 	char code[8]; // the 2FA code, when the flow asks for one
@@ -139,6 +140,15 @@ static void *worker_main(void *arg) {
 					} else if (!me.authenticated) {
 						result->count = -1;
 						snprintf(result->error, sizeof(result->error), "amp_not_authenticated");
+					} else if (job.kind == JOB_ALBUM) {
+						result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
+						result->count =
+							result->songs
+								? ampapi_album_tracks(me.dev_token, me.music_user_token,
+													  storefront, job.album_id, result->songs,
+													  AMP_PAGE, result->error,
+													  sizeof(result->error))
+								: -1;
 					} else {
 						char storefront[32];
 						snprintf(storefront, sizeof(storefront), "%.20s",
@@ -209,7 +219,8 @@ static bool submit(job_t *job) {
 	pthread_cond_signal(&job_ready);
 	pthread_mutex_unlock(&job_lock);
 	busy = true;
-	job_owner = job->kind == JOB_SEARCH ? list_screen : settings_screen;
+	job_owner = (job->kind == JOB_SEARCH || job->kind == JOB_ALBUM) ? list_screen
+																   : settings_screen;
 	toast_busy("loading");
 	return true;
 }
@@ -458,6 +469,31 @@ static void run_search(const char *term) {
 	submit(&job);
 }
 
+// The album page: the catalog album's tracks in the list the search uses.
+// Called from the track menu on a playing Apple Music track.
+bool amppage_open_album(const char *album_id, const char *title) {
+	if (!album_id || !album_id[0] || busy || !configured()) {
+		return false;
+	}
+	free(shown);
+	shown = NULL;
+	shown_count = 0;
+	lv_obj_clean(list_container);
+	lv_label_set_text(list_title, tr("applemusic_searching"));
+	if (lv_screen_active() != list_screen) {
+		switch_screen(list_screen);
+	}
+	// Closing the player sheet comes back to the album list, the way the
+	// Qobuz album page does.
+	switcher_set_player_return(list_screen);
+	job_t job = {.kind = JOB_ALBUM};
+	snprintf(job.album_id, sizeof(job.album_id), "%s", album_id);
+	snprintf(job.term, sizeof(job.term), "%s",
+			 title && title[0] ? title : tr("applemusic_search"));
+	submit(&job);
+	return true;
+}
+
 static void search_cb(lv_event_t *e) {
 	(void)e;
 	if (busy || switcher_back_drag_active()) {
@@ -649,11 +685,14 @@ static void poll_cb(lv_timer_t *timer) {
 				if (entering_2fa) {
 					open_2fa_box(); // a rejected code asks to be typed again
 				}
-			} else if (result->job.kind == JOB_SEARCH) {
+			} else if (result->job.kind == JOB_SEARCH || result->job.kind == JOB_ALBUM) {
 				free(shown);
 				shown = result->songs;
 				result->songs = NULL;
 				shown_count = result->count;
+				if (result->job.kind == JOB_ALBUM) {
+					lv_label_set_text(list_title, result->job.term);
+				}
 				rebuild_list();
 			} else if (result->job.kind == JOB_LOGIN) {
 				if (result->count == 1) {
