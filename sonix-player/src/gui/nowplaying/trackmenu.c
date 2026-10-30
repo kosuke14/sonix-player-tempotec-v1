@@ -29,6 +29,8 @@
 #include "src/system/playback/device_state.h"
 #include "src/system/core/lang.h"
 #include "src/gui/streaming/podcastpage.h"
+#include "src/system/streaming/ampkeep.h"
+#include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/streamkeep.h"
@@ -1310,6 +1312,35 @@ static void keep_on_card_cb(void *user) {
 	}
 }
 
+// The Apple Music twin: there is no cache file to copy, so the download
+// assembles the track from the encrypted stream (ampkeep.c) and files it
+// under Music/Apple Music.
+static void amp_keep_cb(void *user) {
+	(void)user;
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.current_file[0]) {
+		return;
+	}
+	ampapi_song_t song;
+	if (!ampstream_song_for(state.current_file, &song)) {
+		return;
+	}
+	player_sheet_close(false);
+	if (ampkeep_busy()) {
+		gui_notify_popup("stream_keep_busy");
+		return;
+	}
+	if (!ampkeep_keep(&song, true)) {
+		char error[192] = "";
+		if (ampkeep_last_error(error, sizeof(error))) {
+			gui_notify_popup(error);
+		} else {
+			gui_notify_popup(gui_card_available() ? "amp_keep_failed" : "sd_card_missing");
+		}
+	}
+}
+
 static void open_settings_cb(void *user) {
 	(void)user;
 	player_sheet_close(false);
@@ -1376,11 +1407,23 @@ void trackmenu_open(lv_obj_t *anchor) {
 		{"details", open_details_cb, NULL},
 		{"settings", open_settings_cb, NULL},
 	};
+	// The Apple Music track's own table: its download assembles the file
+	// rather than copying one, so it gets its own action.
+	static const popover_item_t ITEMS_AMP[] = {
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"smartmix_start", start_genius_cb, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"trackmenu_keep_on_card", amp_keep_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
+	};
 
 	device_state_t state;
 	device_state_get(&state);
 	bool podcast = state.current_file[0] && podcastcache_is_episode(state.current_file);
 	bool tidal_track = tidalcache_owns(state.current_file);
+	bool amp_track = ampstream_owns(state.current_file);
 	// The Tidal Downloaded list is made of files already present on the card.
 	// Offering "Download" again is both misleading and useless offline.
 	bool keepable = !podcast && !tidal_track && streamkeep_is_stream_track(state.current_file);
@@ -1388,7 +1431,9 @@ void trackmenu_open(lv_obj_t *anchor) {
 	// Smart Mix stays available on every non-podcast menu, as upstream has it.
 	// Only the episode table omits it; the Tidal and keep-on-card tables add
 	// their own action to the upstream row set.
-	if (keepable) {
+	if (amp_track) {
+		popover_show(anchor, ITEMS_AMP, (int)(sizeof(ITEMS_AMP) / sizeof(ITEMS_AMP[0])));
+	} else if (keepable) {
 		popover_show(anchor, ITEMS_KEEP, (int)(sizeof(ITEMS_KEEP) / sizeof(ITEMS_KEEP[0])));
 	} else if (tidal_track) {
 		popover_show(anchor, ITEMS_TIDAL, (int)(sizeof(ITEMS_TIDAL) / sizeof(ITEMS_TIDAL[0])));

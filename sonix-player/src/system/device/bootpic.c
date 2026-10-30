@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,14 +126,20 @@ int bootpic_list(char names[][BOOTPIC_NAME_MAX + 1], int max) {
 
 	int count = 0;
 	struct dirent *e;
-	while ((e = readdir(d)) != NULL) {
+	// Read the whole folder before sorting: the page cut comes AFTER the
+	// sort, or a filesystem whose readdir order is hash order (ext4, not
+	// tmpfs) would hand back an arbitrary page instead of the alphabetical
+	// head the page promises. A static cap keeps the buffer sane; a folder
+	// past it is past any page the interface could show anyway.
+	enum { BOOTPIC_SCAN_MAX = 128 };
+	static char all[BOOTPIC_SCAN_MAX][BOOTPIC_NAME_MAX + 1];
+	static pthread_mutex_t scan_mu = PTHREAD_MUTEX_INITIALIZER;
+	pthread_mutex_lock(&scan_mu);
+	while ((e = readdir(d)) != NULL && count < BOOTPIC_SCAN_MAX) {
 		if (!candidate_name(e->d_name)) {
 			continue;
 		}
-		if (count == max) {
-			break; // the page scrolls; a folder of thousands is not a page
-		}
-		snprintf(names[count], BOOTPIC_NAME_MAX + 1, "%s", e->d_name);
+		snprintf(all[count], BOOTPIC_NAME_MAX + 1, "%s", e->d_name);
 		count++;
 	}
 	closedir(d);
@@ -144,14 +151,22 @@ int bootpic_list(char names[][BOOTPIC_NAME_MAX + 1], int max) {
 	// want a comparator carrying the row width.
 	for (int i = 1; i < count; i++) {
 		char held[BOOTPIC_NAME_MAX + 1];
-		memcpy(held, names[i], BOOTPIC_NAME_MAX + 1);
+		memcpy(held, all[i], BOOTPIC_NAME_MAX + 1);
 		int j = i - 1;
-		while (j >= 0 && strcasecmp(names[j], held) > 0) {
-			memcpy(names[j + 1], names[j], BOOTPIC_NAME_MAX + 1);
+		while (j >= 0 && strcasecmp(all[j], held) > 0) {
+			memcpy(all[j + 1], all[j], BOOTPIC_NAME_MAX + 1);
 			j--;
 		}
-		memcpy(names[j + 1], held, BOOTPIC_NAME_MAX + 1);
+		memcpy(all[j + 1], held, BOOTPIC_NAME_MAX + 1);
 	}
+	// The page cut, after the sort.
+	if (count > max) {
+		count = max;
+	}
+	for (int i = 0; i < count; i++) {
+		memcpy(names[i], all[i], BOOTPIC_NAME_MAX + 1);
+	}
+	pthread_mutex_unlock(&scan_mu);
 	return count;
 }
 

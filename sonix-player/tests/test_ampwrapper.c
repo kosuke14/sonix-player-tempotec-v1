@@ -1,7 +1,7 @@
-// The wrapper-v2 client against local fakes: a canned HTTP daemon for /me,
-// /playback and the login endpoints, and a TCP decrypt peer that speaks the
-// WV2D framing back. No network beyond loopback, no Apple anything -- what is
-// under test is the client's framing, parsing and error mapping.
+// The WV2D decrypt client against a local fake: a TCP peer that speaks the
+// framing back (plaintext = ciphertext + 1, which the test knows to expect).
+// No network beyond loopback, no Apple anything -- what is under test is the
+// client's framing, table handling and error mapping.
 #include "src/system/streaming/ampwrapper.h"
 
 #include <assert.h>
@@ -30,80 +30,6 @@ static int listen_port(int *out) {
 	getsockname(fd, (struct sockaddr *)&addr, &len);
 	*out = ntohs(addr.sin_port);
 	return fd;
-}
-
-// Reads one HTTP request off the socket and answers from the table. The
-// player's client opens a fresh connection per call, so one request per
-// accept is the whole job.
-static void *http_serve(void *arg) {
-	int lfd = (int)(intptr_t)arg;
-	for (;;) {
-		int fd = accept(lfd, NULL, NULL);
-		if (fd < 0) {
-			return NULL;
-		}
-		char req[4096];
-		size_t got = 0;
-		bool whole = false;
-		while (!whole && got < sizeof(req) - 1) {
-			ssize_t r = read(fd, req + got, sizeof(req) - 1 - got);
-			if (r <= 0) {
-				break;
-			}
-			got += (size_t)r;
-			req[got] = '\0'; // terminated before any scan below
-			char *end = strstr(req, "\r\n\r\n");
-			if (end) {
-				char *cl = strcasestr(req, "content-length:");
-				size_t want = cl ? (size_t)atoi(cl + 15) : 0;
-				size_t head_end = (size_t)(end - req) + 4;
-				if (got >= head_end + want) {
-					whole = true;
-				}
-			}
-		}
-		const char *json = NULL;
-		int status = 200;
-		if (strstr(req, "GET /me ")) {
-			json = "{\"status\":\"ok\",\"version\":\"0.0.2\",\"auth\":{\"state\":\"authenticated\","
-				   "\"dev_token\":\"dev.jwt.value\",\"music_user_token\":\"mut.value\","
-				   "\"apple_id\":\"user@example.com\"}}";
-		} else if (strstr(req, "GET /playback?adam_id=12345 ")) {
-			json = "{\"songList\":[{\"songId\":\"12345\","
-				   "\"hls-playlist-url\":\"https://a/p1_x.m3u8\"}]}";
-		} else if (strstr(req, "GET /playback?adam_id=404 ")) {
-			status = 401;
-		} else if (strstr(req, "POST /login ")) {
-			if (strstr(req, "\"bad\"")) {
-				status = 401;
-			} else if (strstr(req, "\"good\"")) {
-				status = 200; // the flow completes without a second factor
-			} else {
-				status = 202;
-			}
-		} else if (strstr(req, "POST /login/2fa ")) {
-			json = "";
-		} else if (strstr(req, "DELETE /login ")) {
-			status = 204;
-			json = "";
-		} else {
-			status = 404;
-		}
-		char reply[2048];
-		if (!json) {
-			json = "";
-		}
-		int n = snprintf(reply, sizeof(reply),
-						 "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n"
-						 "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
-						 status, status == 200 ? "OK" : status == 202 ? "Accepted" :
-						 status == 401				 ? "Unauthorized" :
-														 "Not Found",
-						 strlen(json), json);
-		(void)!write(fd, reply, (size_t)n);
-		close(fd);
-	}
-	return NULL;
 }
 
 // The WV2D peer: reads one batch frame, answers plaintexts that are the
@@ -228,44 +154,6 @@ static void *decrypt_serve(void *arg) {
 int main(void) {
 	char error[192] = "";
 
-	// ---- HTTP side ----
-	int http_port = 0;
-	int http_fd = listen_port(&http_port);
-	{
-		struct sockaddr_in a;
-		socklen_t l = sizeof(a);
-		getsockname(http_fd, (struct sockaddr *)&a, &l);
-		http_port = ntohs(a.sin_port);
-	}
-	pthread_t http_thread;
-	pthread_create(&http_thread, NULL, http_serve, (void *)(intptr_t)http_fd);
-
-	char base[64];
-	snprintf(base, sizeof(base), "127.0.0.1:%d", http_port); // no scheme: the client adds one
-
-	ampw_me_t me;
-	assert(ampw_me(base, &me, error, sizeof(error)));
-	assert(me.authenticated);
-	assert(strcmp(me.version, "0.0.2") == 0);
-	assert(strcmp(me.dev_token, "dev.jwt.value") == 0);
-	assert(strcmp(me.music_user_token, "mut.value") == 0);
-	assert(strcmp(me.apple_id, "user@example.com") == 0);
-
-	char *body = NULL;
-	size_t body_len = 0;
-	assert(ampw_playback(base, "12345", &body, &body_len, error, sizeof(error)));
-	assert(strstr(body, "hls-playlist-url") && strstr(body, "p1_x.m3u8"));
-	free(body);
-
-	assert(!ampw_playback(base, "404", &body, &body_len, error, sizeof(error)));
-	assert(strstr(error, "401"));
-
-	assert(ampw_login(base, "user", "good", error, sizeof(error)) == AMPW_LOGIN_OK);
-	assert(ampw_login(base, "user", "pass", error, sizeof(error)) == AMPW_LOGIN_2FA);
-	assert(ampw_login(base, "bad", "bad", error, sizeof(error)) == AMPW_LOGIN_FAILED);
-	assert(ampw_login_2fa(base, "123456", error, sizeof(error)) == AMPW_LOGIN_OK);
-	assert(ampw_logout(base, error, sizeof(error))); // the session is cleared
-
 	// ---- the TCP decrypt side ----
 	int dec_port = 0;
 	int dec_fd = listen_port(&dec_port);
@@ -310,11 +198,6 @@ int main(void) {
 	pthread_join(dec_thread, NULL);
 	fprintf(stderr, "JOINED\n");
 
-	// A listening socket's close() does not wake a blocked accept(); the
-	// shutdown does. Without it the join below can wait forever.
-	shutdown(http_fd, SHUT_RDWR);
-	close(http_fd);
-	pthread_join(http_thread, NULL);
 	printf("ampwrapper tests passed\n");
 	return 0;
 }

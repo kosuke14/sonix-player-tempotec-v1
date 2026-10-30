@@ -5,8 +5,9 @@
 #include <stddef.h>
 
 // The Apple Music catalog, reached directly (https://amp-api.music.apple.com)
-// with the tokens the wrapper's /me carries. Search and metadata only -- the
-// audio always comes through the wrapper, and nothing here can play anything.
+// with the tokens the guest daemon's account snapshot carries. Search and
+// metadata only -- the audio comes through the on-device guest daemons, and
+// nothing here can play anything.
 
 typedef struct {
 	char id[32];	   // the Adam ID every playback call is keyed by
@@ -23,7 +24,7 @@ typedef struct {
 const char *ampapi_default_storefront(void);
 
 // Searches the catalog for songs. `token` is the developer (JWT) token,
-// `music_user_token` the per-account one, both from ampw_me(). Results go to
+// `music_user_token` the per-account one, both from amplocal_me(). Results go to
 // `out` (at most `max`); the count is returned, -1 on transport failure and
 // -2 on an API error body. `error` carries the message either way. A NULL or
 // empty `storefront` falls back to ampapi_default_storefront().

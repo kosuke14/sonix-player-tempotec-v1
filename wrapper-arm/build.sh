@@ -18,7 +18,7 @@ fi
 
 case "$TARGET" in
     i386) TRIPLE="i686-linux-android30"; ARCH="i686" ;;
-    arm) TRIPLE="armv7a-linux-androideabi30"; ARCH="armv7-a" ;;
+    arm) AMP_API_LEVEL="${AMP_API_LEVEL:-30}"; TRIPLE="armv7a-linux-androideabi$AMP_API_LEVEL"; ARCH="armv7-a" ;;
     *) echo "target must be i386 or arm" >&2; exit 1 ;;
 esac
 
@@ -61,12 +61,28 @@ echo "built: build/ampdaemon ($(stat -c%s build/ampdaemon) bytes)"
 # The guest build: statically linked (no Android linker under qemu), so
 # every libc symbol the Apple libs will look up at runtime must be forced
 # into the image now.
+#
+# The static variant always compiles at API 30: API 24's crt/bionic objects
+# carry a TLS segment aligned to 8, and qemu-user refuses to load a bionic
+# executable whose PT_TLS is under 32 ("TLS segment is underaligned"). The
+# decrypt daemon has no need for the auth knob anyway -- it is the 6.5.3
+# generation, and the API-24 knob exists for the dynamic auth binary only.
 echo "building static (guest) variant..."
+STATIC_TRIPLE="armv7a-linux-androideabi30"
+[ "$TARGET" = i386 ] && STATIC_TRIPLE="i686-linux-android30"
 UNWIND_DIR="$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/18/lib/linux"
 UNWIND_PATH="$UNWIND_DIR/$([ "$TARGET" = i386 ] && echo i386 || echo arm)/libunwind.a"
-clang++ --target="$TRIPLE" --sysroot="$SYSROOT" -march="$ARCH" -O2 -std=c++17 -Isrc \
-    -static -nodefaultlibs $OBJS $FORCE_SYMBOLS -o build/ampdaemon-static \
-    -L"$SYSROOT/usr/lib/${TRIPLE%%-*}-linux-android/30" \
+mkdir -p build/static-objs
+STATIC_OBJS=""
+for f in main ipc apple/loader apple/decrypt apple/runtime apple/guestelf apple/cxa_type_match apple/account; do
+    obj="build/static-objs/$(basename "$f").o"
+    clang++ --target="$STATIC_TRIPLE" --sysroot="$SYSROOT" -march="$ARCH" -O2 -std=c++17 -Isrc \
+        -c "src/$f.cpp" -o "$obj"
+    STATIC_OBJS="$STATIC_OBJS $obj"
+done
+clang++ --target="$STATIC_TRIPLE" --sysroot="$SYSROOT" -march="$ARCH" -O2 -std=c++17 -Isrc \
+    -static -nodefaultlibs $STATIC_OBJS $FORCE_SYMBOLS -o build/ampdaemon-static \
+    -L"$SYSROOT/usr/lib/${STATIC_TRIPLE%%-*}-linux-android/30" \
     -lc++_static -lc++abi -lm -lc -ldl \
     "$SYSROOT/usr/lib/$([ "$TARGET" = i386 ] && echo i686-linux-android || echo arm-linux-androideabi)/libz.a" \
     "$UNWIND_PATH" "$BUILTINS"

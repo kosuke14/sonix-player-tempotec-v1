@@ -68,6 +68,16 @@ static_assert(sizeof(std_string) == 24, "std_string ABI mismatch (64-bit)");
 static_assert(sizeof(shared_ptr) == 16, "shared_ptr ABI mismatch (64-bit)");
 #endif
 
+// Borrowed view of a std::__ndk1::vector<shared_ptr<T>> the Apple lib hands
+// back. The 3.6.0 armv7 accessors return these as a direct pointer (same
+// convention as title()/string getters), not via the Itanium sret hidden
+// first argument.
+struct std_vector {
+    void* begin;
+    void* end;
+    void* cap;
+};
+
 // A borrowed string view: the Apple call reads `data` directly; the buffer
 // must outlive the call. We never hand Apple a string it frees.
 inline std_string make_string_view(const char* s) {
@@ -328,6 +338,10 @@ inline constexpr const char* RequestContext_setFairPlayDirectoryPath =
     "_ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
 inline constexpr const char* RequestContext_setPresentationInterface =
     "_ZN17storeservicescore14RequestContext24setPresentationInterfaceERKNSt6__ndk110shared_ptrINS_21PresentationInterfaceEEE";
+inline constexpr const char* API_setDialogHandler =
+    "_ZN20androidstoreservices28AndroidPresentationInterface16setDialogHandlerEPFvxNSt6__ndk110shared_ptrIN17storeservicescore14ProtocolDialogEEENS2_INS_36AndroidProtocolDialogResponseHandlerEEEE";
+inline constexpr const char* API_handleProtocolDialogResponse =
+    "_ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKxRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE";
 inline constexpr const char* make_shared_AndroidPresentationInterface =
     "_ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_";
 inline constexpr const char* API_setCredentialsHandler =
@@ -394,6 +408,8 @@ inline constexpr const char* PurchaseRequest_setProcessDialogActions =
     "_ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb";
 inline constexpr const char* PurchaseRequest_run =
     "_ZN17storeservicescore15PurchaseRequest3runEv";
+inline constexpr const char* PurchaseRequest_response =
+    "_ZNK17storeservicescore15PurchaseRequest8responseEv";
 inline constexpr const char* PurchaseResponse_items =
     "_ZNK17storeservicescore16PurchaseResponse5itemsEv";
 inline constexpr const char* PurchaseResponse_error =
@@ -456,9 +472,37 @@ inline constexpr const char* CFRetain =
     "CFRetain";
 inline constexpr const char* CFRelease =
     "CFRelease";
+// The dictionary type-id getter; _fn keeps it apart from the AuthSymbols
+// field name only conceptually -- this is the dlsym name.
+inline constexpr const char* CFDictionaryGetTypeID_fn =
+    "CFDictionaryGetTypeID";
 inline constexpr const char* CFDataGetBytes =
     "CFDataGetBytes";
 
+}  // namespace auth36
+
+
+// ---------------------------------------------------------------------------
+// 3.6.0 protocol-dialog surface + the emplace vtables. The vtables are not
+// exported symbols (stripped in the armv7 build): their addresses are pinned
+// from the .data.rel.ro layout via the typeinfo-name scan (see account.cpp).
+// ---------------------------------------------------------------------------
+namespace auth36 {
+inline constexpr const char* ProtocolDialog_title =
+    "_ZNK17storeservicescore14ProtocolDialog5titleEv";
+inline constexpr const char* ProtocolDialog_buttons =
+    "_ZNK17storeservicescore14ProtocolDialog7buttonsEv";
+inline constexpr const char* ProtocolButton_title =
+    "_ZNK17storeservicescore14ProtocolButton5titleEv";
+inline constexpr const char* ProtocolDialogResponse_ctor =
+    "_ZN17storeservicescore22ProtocolDialogResponseC1Ev";
+inline constexpr const char* ProtocolDialogResponse_setSelectedButton =
+    "_ZN17storeservicescore22ProtocolDialogResponse17setSelectedButtonERKNSt6__ndk110shared_ptrINS_14ProtocolButtonEEE";
+inline constexpr const char* Generic_setDialogHandler =
+    "_ZN17storeservicescore28GenericPresentationInterface16setDialogHandlerENSt6__ndk18functionIFvRKNS1_10shared_ptrINS_14ProtocolDialogEEENS2_IFvRKNS3_INS_22ProtocolDialogResponseEEEEEEEEE";
+// vtable object addresses inside libstoreservicescore (.data.rel.ro)
+inline constexpr std::uintptr_t vtable_CredentialsResponse_addr = 0x1c09d0u;
+inline constexpr std::uintptr_t vtable_ProtocolDialogResponse_addr = 0x1c0a38u;
 }  // namespace auth36
 
 // The obfuscated sample-decrypt entry (same name in 3.6.0 and 6.5.3).

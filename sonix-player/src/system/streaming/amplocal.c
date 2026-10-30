@@ -5,6 +5,7 @@
 #include "src/system/net/http.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -21,43 +22,51 @@
 #include <time.h>
 #include <unistd.h>
 
-// The translated FairPlay decrypt side. One listener thread owns the
-// decrypt port and the guest daemon's pipes; the player's existing WV2D
-// client (ampwrapper.c) simply points at 127.0.0.1 instead of a remote
-// wrapper and nothing else changes.
-
-// The daemon runs two processes deep: qemu-i386 execs the Android linker,
-// which loads ampdaemon. Both live inside the guest squashfs the user
-// assembled; only qemu and the mount point live on the card root.
+// The translated FairPlay decrypt side plus the 3.6.0 auth side. One listener
+// thread owns the decrypt port and the decrypt daemon's pipes; the player's
+// WV2D client (ampwrapper.c) points at 127.0.0.1 and nothing else changes.
+// The auth channel is a second, independent guest daemon: sign-in, tokens and
+// the playback dispatch go straight over its pipes.
 //
-// Frames (both sides) are the 16/20-byte envelopes ampwrapper.c and the
-// daemon speak: WV2D on the outside, WV2I on the inside. Batch payloads
-// are byte-identical, so the relay re-encodes only the header. The
-// SPC/CKC split is the one real translation: the daemon asks (OpGetSPC),
-// we POST to Apple, answer (OpApplyCKC), and the batch replays.
+// The daemons run two processes deep: qemu-arm execs the guest binaries, and
+// the auth one re-execs the Android dynamic linker. Both live inside the
+// guest tree the user assembled; only qemu and the tree live on the card
+// root. Frames (both sides) are the 20-byte WV2I envelopes; batch payloads
+// are byte-identical, so the relay re-encodes only the header. The SPC/CKC
+// split is the one real translation: the decrypt daemon asks (OpGetSPC), we
+// POST to Apple, answer (OpApplyCKC), and the batch replays.
 
 // ---------------------------------------------------------------------------
 // state
 // ---------------------------------------------------------------------------
 
+// One guest daemon: pipes, pid, health. The two Apple generations must never
+// share a process (their ICU singletons fight), so each channel spawns its
+// own.
+typedef struct {
+	int stdin_fd;  // WV2I pipe to the guest, -1 when not spawned
+	int stdout_fd;
+	pid_t pid;
+	bool ok; // OpHealth passed after last spawn
+	long used_ms;
+} amp_channel_t;
+
 typedef struct {
 	int listen_fd; // decrypt-port listener, -1 when not translating
-	int daemon_stdin; // WV2I pipe to the guest, -1 when not spawned
-	int daemon_stdout;
-	pid_t daemon_pid;
-	char translate_root[300]; // where qemu/ and guest.squashfs live
+	amp_channel_t dec;
+	amp_channel_t auth;
+	char guest_root[300]; // where qemu-arm and the system/ tree live
 	int idle_secs; // [applemusic] translate_idle_secs
-	long idle_since_ms; // last connection/daemon use
-	bool daemon_ok; // OpHealth passed after last spawn
 	char last_error[192];
 	bool error_reported;
 	pthread_t thread;
 	bool thread_started;
-	pthread_mutex_t lock;
+	pthread_mutex_t lock;      // state + spawn
+	pthread_mutex_t auth_io;   // serializes auth-channel round trips
 } amp_local_state_t;
 
 static amp_local_state_t s_local = {
-	.listen_fd = -1, .daemon_stdin = -1, .daemon_stdout = -1, .daemon_pid = -1};
+	.listen_fd = -1, .dec = {-1, -1, -1, false, 0}, .auth = {-1, -1, -1, false, 0}};
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -106,10 +115,10 @@ static bool write_exact_fd(int fd, const void *buf, size_t len) {
 	return true;
 }
 
-// The daemon's one-second watchdog keeps a dead guest from wedging a batch:
-// polls instead of blocking forever.
-static bool wait_readable(int fd, int timeout_ms) {
-	struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
+// A guest daemon's one-second watchdog keeps a dead guest from wedging a
+// round trip: polls instead of blocking forever.
+static bool wait_readable(amp_channel_t *ch, int timeout_ms) {
+	struct pollfd pfd = {.fd = ch->stdout_fd, .events = POLLIN, .revents = 0};
 	for (int slept = 0; slept < timeout_ms; slept += 250) {
 		int r = poll(&pfd, 1, 250);
 		if (r > 0) {
@@ -118,66 +127,64 @@ static bool wait_readable(int fd, int timeout_ms) {
 		if (r < 0 && errno != EINTR) {
 			return false;
 		}
-		if (waitpid(s_local.daemon_pid, NULL, WNOHANG) != 0) {
+		if (waitpid(ch->pid, NULL, WNOHANG) != 0) {
 			return false; // died while we waited
 		}
 	}
-	return pfd.revents & POLLIN;
+	return (pfd.revents & POLLIN) != 0;
 }
 
 // ---------------------------------------------------------------------------
 // guest daemon lifecycle
 // ---------------------------------------------------------------------------
 
-static void daemon_kill_locked(void) {
-	if (s_local.daemon_pid > 0) {
+static void channel_kill_locked(amp_channel_t *ch) {
+	if (ch->pid > 0) {
 		// Politely: the daemon exits when stdin closes. SIGKILL only after
 		// a grace beat so the FootHill state gets to flush its db.
-		close(s_local.daemon_stdin);
-		close(s_local.daemon_stdout);
-		kill(s_local.daemon_pid, SIGTERM);
+		close(ch->stdin_fd);
+		close(ch->stdout_fd);
+		kill(ch->pid, SIGTERM);
 		for (int i = 0; i < 10; i++) {
-			if (waitpid(s_local.daemon_pid, NULL, WNOHANG) != 0) {
+			if (waitpid(ch->pid, NULL, WNOHANG) != 0) {
 				break;
 			}
 			struct timespec t = {.tv_sec = 0, .tv_nsec = 50 * 1000 * 1000};
 			nanosleep(&t, NULL);
 		}
-		kill(s_local.daemon_pid, SIGKILL);
-		waitpid(s_local.daemon_pid, NULL, WNOHANG);
+		kill(ch->pid, SIGKILL);
+		waitpid(ch->pid, NULL, WNOHANG);
 	}
-	s_local.daemon_pid = -1;
-	s_local.daemon_stdin = -1;
-	s_local.daemon_stdout = -1;
-	s_local.daemon_ok = false;
+	ch->pid = -1;
+	ch->stdin_fd = -1;
+	ch->stdout_fd = -1;
+	ch->ok = false;
 }
 
-// Spawns qemu-i386 -> Android linker -> ampdaemon with stdio pipes. The
-// guest tree layout under translate_root:
-//   qemu-i386            the statically linked user-mode emulator
-//   guest.squashfs       bionic + Apple libs + ampdaemon
-//   sys/                 the loop mount point (prepared here)
-//   sys/bin/linker       Android's dynamic linker (i386)
-//   sys/bin/ampdaemon    our daemon
-//   sys/lib/             bionic + Apple arm/i386 libs
-static bool daemon_spawn_locked(void) {
-	// translate_root caps at 300 bytes; three %s plus the literals fit well
-	// inside 768, but gcc cannot prove it across the unbounded %s — the
-	// bounded %.150s keeps both the compiler and the command honest.
-	char mount_cmd[768], probe[400];
-	snprintf(probe, sizeof(probe), "%s/sys/bin/ampdaemon", s_local.translate_root);
-	if (access(probe, X_OK) != 0) {
-		if (strnlen(s_local.translate_root, sizeof(s_local.translate_root)) > 150) {
-			snprintf(s_local.last_error, sizeof(s_local.last_error), "amp_guest_path_too_long");
-			return false;
-		}
-		snprintf(mount_cmd, sizeof(mount_cmd),
-				 "mkdir -p %.150s/sys && mount -t squashfs -o loop,ro %.150s/guest.squashfs %.150s/sys",
-				 s_local.translate_root, s_local.translate_root, s_local.translate_root);
-		if (system(mount_cmd) != 0) {
-			snprintf(s_local.last_error, sizeof(s_local.last_error), "amp_guest_mount_failed");
-			return false;
-		}
+// Spawns qemu-arm with stdio pipes. The guest tree layout under guest_root:
+//   qemu-arm             the statically linked user-mode emulator
+//   system/bin/linker    Android's dynamic linker (arm)
+//   system/bin/ampdaemon-auth     our auth daemon (3.6.0 set, dynamic)
+//   system/bin/ampdaemon-static   our decrypt daemon (6.5.3 set, static)
+//   system/lib lib36 lib65        the two Apple generations + API-24 closure
+//   data/                the daemons' writable base (created here)
+//
+// auth mode:  ampdaemon-auth /system/lib36 auth   (AMP_DYN_LINKER=1)
+// decrypt:    ampdaemon-static /system            (AMP_GUEST_LOADER=1)
+static bool daemon_spawn_locked(amp_channel_t *ch, bool auth_mode) {
+	char daemon_path[400], libs_arg[400], data_dir[340];
+	const char *daemon_name = auth_mode ? "ampdaemon-auth" : "ampdaemon-static";
+	snprintf(daemon_path, sizeof(daemon_path), "%.280s/system/bin/%.24s", s_local.guest_root,
+			 daemon_name);
+	if (access(daemon_path, X_OK) != 0) {
+		snprintf(s_local.last_error, sizeof(s_local.last_error), "amp_guest_tree_missing");
+		return false;
+	}
+	snprintf(libs_arg, sizeof(libs_arg), "%.280s/system/lib36", s_local.guest_root);
+	snprintf(data_dir, sizeof(data_dir), "mkdir -p %.280s/data", s_local.guest_root);
+	if (system(data_dir) != 0) {
+		snprintf(s_local.last_error, sizeof(s_local.last_error), "amp_guest_data_failed");
+		return false;
 	}
 
 	int in_pipe[2] = {-1, -1}, out_pipe[2] = {-1, -1};
@@ -186,11 +193,8 @@ static bool daemon_spawn_locked(void) {
 		return false;
 	}
 
-	char qemu_path[400], linker_path[400], daemon_path[400], base_arg[400];
-	snprintf(qemu_path, sizeof(qemu_path), "%s/qemu-i386", s_local.translate_root);
-	snprintf(linker_path, sizeof(linker_path), "%s/sys/bin/linker", s_local.translate_root);
-	snprintf(daemon_path, sizeof(daemon_path), "%s/sys/bin/ampdaemon", s_local.translate_root);
-	snprintf(base_arg, sizeof(base_arg), "AMP_BASE_DIR=/data/amp");
+	char qemu_path[400];
+	snprintf(qemu_path, sizeof(qemu_path), "%.280s/qemu-arm", s_local.guest_root);
 
 	pid_t pid = fork();
 	if (pid < 0) {
@@ -219,34 +223,45 @@ static bool daemon_spawn_locked(void) {
 				close(devnull);
 			}
 		}
-		// Wrapper path envs: ANDROID_* live inside the guest image.
-		setenv("ANDROID_DNS_MODE", "local", 1);
-		setenv("ANDROID_DATA", "/data/amp", 1);
-		setenv("ANDROID_ROOT", "/sys/system", 1);
-		setenv("AMP_BASE_DIR", "/data/amp", 1);
-		execl(qemu_path, "qemu-i386", "-L", s_local.translate_root, linker_path, daemon_path,
-			  "/sys/lib", (char *)NULL);
+		// All guest-side paths are host paths: qemu-user passes syscalls
+		// straight through, so the daemons read the tree and the data base
+		// exactly as laid out on the card.
+		char base[340];
+		snprintf(base, sizeof(base), "%.280s/data", s_local.guest_root);
+		setenv("AMP_BASE_DIR", base, 1);
+		setenv("ANDROID_DATA", base, 1);
+		setenv("ANDROID_ROOT", "/system", 1);
+		if (auth_mode) {
+			setenv("AMP_DYN_LINKER", "1", 1);
+			setenv("LD_LIBRARY_PATH", "/system/lib36:/system/lib", 1);
+			execl(qemu_path, "qemu-arm", "-L", s_local.guest_root, daemon_path, libs_arg,
+				  "auth", (char *)NULL);
+		} else {
+			setenv("AMP_GUEST_LOADER", "1", 1);
+			char sys_arg[400];
+			snprintf(sys_arg, sizeof(sys_arg), "%.280s/system", s_local.guest_root);
+			execl(qemu_path, "qemu-arm", "-L", s_local.guest_root, daemon_path, sys_arg,
+				  (char *)NULL);
+		}
 		_exit(127);
 	}
 	close(in_pipe[0]);
 	close(out_pipe[1]);
-	s_local.daemon_pid = pid;
-	s_local.daemon_stdin = in_pipe[1];
-	s_local.daemon_stdout = out_pipe[0];
-	s_local.daemon_ok = false;
+	ch->pid = pid;
+	ch->stdin_fd = in_pipe[1];
+	ch->stdout_fd = out_pipe[0];
+	ch->ok = false;
+	ch->used_ms = now_ms();
 	return true;
 }
 
-// One WV2I round trip to the daemon. Returns the response payload or false
-// (daemon dead / bad frame), filling error.
-static bool daemon_round_trip(int opcode, const uint8_t *payload, size_t len,
-							  uint8_t **resp, size_t *resp_len, bool *ok,
+// One WV2I round trip to a daemon. Returns the response payload or false
+// (daemon dead / bad frame / timeout), filling error.
+static bool daemon_round_trip(amp_channel_t *ch, int opcode, const uint8_t *payload, size_t len,
+							  uint8_t **resp, size_t *resp_len, bool *ok, int timeout_ms,
 							  char *error, size_t error_size) {
-	if (s_local.daemon_pid <= 0) {
-		pthread_mutex_lock(&s_local.lock);
-		bool spawned = daemon_spawn_locked();
-		pthread_mutex_unlock(&s_local.lock);
-		if (!spawned) {
+	if (ch->pid <= 0) {
+		if (!daemon_spawn_locked(ch, opcode != 7 && opcode != 9 && opcode != 10)) {
 			snprintf(error, error_size, "amp_guest_spawn_failed");
 			return false;
 		}
@@ -261,23 +276,23 @@ static bool daemon_round_trip(int opcode, const uint8_t *payload, size_t len,
 	head[5] = 1; // version
 	head[6] = 0;
 	head[7] = 1; // kind = request
-	be32_put(head + 8, 1); // request id: single-threaded, always 1
+	be32_put(head + 8, 1); // request id: one caller per channel at a time
 	head[12] = (uint8_t)(opcode >> 8);
 	head[13] = (uint8_t)opcode;
 	head[14] = 0;
 	head[15] = 0;
 	be32_put(head + 16, (uint32_t)len);
 
-	if (!write_exact_fd(s_local.daemon_stdin, head, sizeof(head)) ||
-		(len && !write_exact_fd(s_local.daemon_stdin, payload, len))) {
+	if (!write_exact_fd(ch->stdin_fd, head, sizeof(head)) ||
+		(len && !write_exact_fd(ch->stdin_fd, payload, len))) {
 		snprintf(error, error_size, "amp_guest_write_failed");
 		return false;
 	}
-	if (!wait_readable(s_local.daemon_stdout, 30000)) {
+	if (!wait_readable(ch, timeout_ms)) {
 		snprintf(error, error_size, "amp_guest_no_response");
 		return false;
 	}
-	if (!read_exact_fd(s_local.daemon_stdout, head, sizeof(head)) ||
+	if (!read_exact_fd(ch->stdout_fd, head, sizeof(head)) ||
 		memcmp(head, "WV2I", 4) != 0) {
 		snprintf(error, error_size, "amp_guest_bad_frame");
 		return false;
@@ -292,7 +307,7 @@ static bool daemon_round_trip(int opcode, const uint8_t *payload, size_t len,
 		snprintf(error, error_size, "amp_out_of_memory");
 		return false;
 	}
-	if (rlen && !read_exact_fd(s_local.daemon_stdout, body, rlen)) {
+	if (rlen && !read_exact_fd(ch->stdout_fd, body, rlen)) {
 		free(body);
 		snprintf(error, error_size, "amp_guest_truncated");
 		return false;
@@ -300,6 +315,270 @@ static bool daemon_round_trip(int opcode, const uint8_t *payload, size_t len,
 	*ok = head[7] == 2 && rlen > 0 && body[0] == 0;
 	*resp = body;
 	*resp_len = rlen;
+	ch->used_ms = now_ms();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// the auth channel (sign-in, tokens, playback dispatch)
+// ---------------------------------------------------------------------------
+
+static const char *auth_error_text(const uint8_t *resp, size_t len) {
+	static char text[192];
+	if (!resp || len < 2) {
+		return "amp_auth_failed";
+	}
+	size_t n = len - 1 < sizeof(text) - 1 ? len - 1 : sizeof(text) - 1;
+	memcpy(text, resp + 1, n);
+	text[n] = '\0';
+	return text;
+}
+
+// Parses the OpMe field list (state=/apple_id=/storefront=/dsid=/...).
+static bool me_from_payload(const uint8_t *payload, size_t len, amplocal_me_t *out) {
+	memset(out, 0, sizeof(*out));
+	if (len < 7 || memcmp(payload, "state=", 6) != 0) {
+		return false;
+	}
+	const char *p = (const char *)payload;
+	const char *end = p + len;
+	while (p < end) {
+		const char *nl = memchr(p, '\n', (size_t)(end - p));
+		size_t line_len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+		const char *eq = memchr(p, '=', line_len ? line_len : 1);
+		if (eq && eq < p + line_len) {
+			size_t key_len = (size_t)(eq - p);
+			size_t val_len = line_len - key_len - 1;
+			const char *val = eq + 1;
+			if (key_len == 5 && !memcmp(p, "state", 5)) {
+				snprintf(out->state, sizeof(out->state), "%.*s", (int)val_len, val);
+				out->authenticated = strstr(out->state, "authenticated") != NULL;
+			} else if (key_len == 8 && !memcmp(p, "apple_id", 8)) {
+				snprintf(out->apple_id, sizeof(out->apple_id), "%.*s", (int)val_len, val);
+			} else if (key_len == 9 && !memcmp(p, "storefront", 9)) {
+				snprintf(out->storefront, sizeof(out->storefront), "%.*s", (int)val_len, val);
+			} else if (key_len == 4 && !memcmp(p, "dsid", 4)) {
+				snprintf(out->dsid, sizeof(out->dsid), "%.*s", (int)val_len, val);
+			} else if (key_len == 9 && !memcmp(p, "dev_token", 9)) {
+				snprintf(out->dev_token, sizeof(out->dev_token), "%.*s", (int)val_len, val);
+			} else if (key_len == 16 && !memcmp(p, "music_user_token", 16)) {
+				snprintf(out->music_user_token, sizeof(out->music_user_token), "%.*s",
+						 (int)val_len, val);
+			}
+		}
+		p += line_len + (nl ? 1 : 0);
+	}
+	return out->state[0] != '\0';
+}
+
+// Drives a started login flow to a terminal state. The flow runs at TCG
+// speed and may park for a 2FA code; the cadence is gentle and the cap is
+// generous but finite -- a wrong password loops inside Apple's flow forever,
+// and this timeout is what turns that into an honest failure.
+static amplocal_login_result_t auth_wait_settled(char *error, size_t error_size) {
+	for (int i = 0; i < 800; i++) { // 800 x 300ms = 4 minutes
+		uint8_t *resp = NULL;
+		size_t resp_len = 0;
+		bool ok = false;
+		char err[192] = "";
+		if (!daemon_round_trip(&s_local.auth, 13 /* OpMe */, NULL, 0, &resp, &resp_len, &ok,
+							   30000, err, sizeof(err))) {
+			snprintf(error, error_size, "%s", err);
+			return AMPLOCAL_LOGIN_FAILED;
+		}
+		amplocal_me_t me;
+		bool parsed = ok && me_from_payload(resp, resp_len, &me);
+		free(resp);
+		if (parsed) {
+			if (!me.authenticated && strcmp(me.state, "in_progress") == 0) {
+				struct timespec t = {.tv_sec = 0, .tv_nsec = 300 * 1000 * 1000};
+				nanosleep(&t, NULL);
+				continue;
+			}
+			if (strcmp(me.state, "awaiting_2fa") == 0) {
+				return AMPLOCAL_LOGIN_2FA;
+			}
+			if (me.authenticated) {
+				return AMPLOCAL_LOGIN_OK;
+			}
+			// failed: the error text came in the snapshot's error field,
+			// which me_from_payload does not carry; keep it generic.
+			snprintf(error, error_size, "amp_login_failed");
+			return AMPLOCAL_LOGIN_FAILED;
+		}
+		snprintf(error, error_size, "amp_login_failed");
+		return AMPLOCAL_LOGIN_FAILED;
+	}
+	snprintf(error, error_size, "amp_login_timeout");
+	return AMPLOCAL_LOGIN_FAILED;
+}
+
+amplocal_login_result_t amplocal_signin(const char *username, const char *password,
+										char *error, size_t error_size) {
+	if (!username || !password || !username[0] || !password[0]) {
+		snprintf(error, error_size, "amp_bad_credentials");
+		return AMPLOCAL_LOGIN_FAILED;
+	}
+	size_t user_len = strlen(username), pass_len = strlen(password);
+	size_t len = 4 + user_len + pass_len;
+	uint8_t *payload = malloc(len);
+	if (!payload) {
+		snprintf(error, error_size, "amp_out_of_memory");
+		return AMPLOCAL_LOGIN_FAILED;
+	}
+	payload[0] = (uint8_t)(user_len >> 8);
+	payload[1] = (uint8_t)user_len;
+	payload[2] = (uint8_t)(pass_len >> 8);
+	payload[3] = (uint8_t)pass_len;
+	memcpy(payload + 4, username, user_len);
+	memcpy(payload + 4 + user_len, password, pass_len);
+
+	pthread_mutex_lock(&s_local.auth_io);
+	uint8_t *resp = NULL;
+	size_t resp_len = 0;
+	bool ok = false;
+	char err[192] = "";
+	bool sent = daemon_round_trip(&s_local.auth, 11 /* OpLogin */, payload, len, &resp,
+								  &resp_len, &ok, 30000, err, sizeof(err));
+	free(payload);
+	if (!sent) {
+		pthread_mutex_unlock(&s_local.auth_io);
+		snprintf(error, error_size, "%s", err);
+		return AMPLOCAL_LOGIN_FAILED;
+	}
+	amplocal_login_result_t r = AMPLOCAL_LOGIN_FAILED;
+	if (ok) {
+		r = auth_wait_settled(error, error_size);
+	} else {
+		snprintf(error, error_size, "%s", auth_error_text(resp, resp_len));
+	}
+	free(resp);
+	pthread_mutex_unlock(&s_local.auth_io);
+	return r;
+}
+
+amplocal_login_result_t amplocal_2fa(const char *code, char *error, size_t error_size) {
+	if (!code || !code[0]) {
+		snprintf(error, error_size, "amp_bad_credentials");
+		return AMPLOCAL_LOGIN_FAILED;
+	}
+	pthread_mutex_lock(&s_local.auth_io);
+	uint8_t *resp = NULL;
+	size_t resp_len = 0;
+	bool ok = false;
+	char err[192] = "";
+	if (!daemon_round_trip(&s_local.auth, 12 /* Op2FA */, (const uint8_t *)code,
+						   strlen(code), &resp, &resp_len, &ok, 30000, err, sizeof(err))) {
+		pthread_mutex_unlock(&s_local.auth_io);
+		snprintf(error, error_size, "%s", err);
+		return AMPLOCAL_LOGIN_FAILED;
+	}
+	amplocal_login_result_t r = AMPLOCAL_LOGIN_FAILED;
+	if (ok) {
+		r = auth_wait_settled(error, error_size);
+	} else {
+		snprintf(error, error_size, "%s", auth_error_text(resp, resp_len));
+	}
+	free(resp);
+	pthread_mutex_unlock(&s_local.auth_io);
+	return r;
+}
+
+bool amplocal_logout(char *error, size_t error_size) {
+	pthread_mutex_lock(&s_local.auth_io);
+	uint8_t *resp = NULL;
+	size_t resp_len = 0;
+	bool ok = false;
+	char err[192] = "";
+	bool sent = daemon_round_trip(&s_local.auth, 14 /* OpLogout */, NULL, 0, &resp, &resp_len,
+								  &ok, 30000, err, sizeof(err));
+	if (sent && !ok) {
+		snprintf(error, error_size, "%s", auth_error_text(resp, resp_len));
+	}
+	pthread_mutex_unlock(&s_local.auth_io);
+	free(resp);
+	if (!sent) {
+		snprintf(error, error_size, "%s", err);
+		return false;
+	}
+	return ok;
+}
+
+bool amplocal_me(amplocal_me_t *out, char *error, size_t error_size) {
+	pthread_mutex_lock(&s_local.auth_io);
+	uint8_t *resp = NULL;
+	size_t resp_len = 0;
+	bool ok = false;
+	char err[192] = "";
+	bool sent = daemon_round_trip(&s_local.auth, 13 /* OpMe */, NULL, 0, &resp, &resp_len, &ok,
+								  30000, err, sizeof(err));
+	pthread_mutex_unlock(&s_local.auth_io);
+	if (!sent) {
+		snprintf(error, error_size, "%s", err);
+		return false;
+	}
+	bool parsed = ok && me_from_payload(resp, resp_len, out);
+	free(resp);
+	if (!parsed) {
+		snprintf(error, error_size, "amp_me_failed");
+		return false;
+	}
+	return true;
+}
+
+// The playback dispatch for one track: the raw MZ dispatch JSON, malloc'd,
+// owned by the caller. amphls.c picks the master playlist URL out of
+// songList[0]. False on refusal, with the reason in `error`.
+//
+// Weak on purpose: the on-device dispatch needs the guest daemon, which no
+// test environment has. test_ampstream.c overrides it with a stand-in that
+// answers from a mock server, and the strong definition wins the link.
+__attribute__((weak)) bool amplocal_playback(const char *adam_id, char **body, size_t *body_len,
+											 char *error, size_t error_size) {
+	if (!adam_id || !adam_id[0]) {
+		snprintf(error, error_size, "amp_bad_adam_id");
+		return false;
+	}
+	size_t adam_len = strlen(adam_id);
+	uint8_t *payload = malloc(2 + adam_len);
+	if (!payload) {
+		snprintf(error, error_size, "amp_out_of_memory");
+		return false;
+	}
+	payload[0] = (uint8_t)(adam_len >> 8);
+	payload[1] = (uint8_t)adam_len;
+	memcpy(payload + 2, adam_id, adam_len);
+
+	// The dispatch is a full PurchaseRequest round trip at TCG speed: the
+	// wait is minutes, not seconds.
+	pthread_mutex_lock(&s_local.auth_io);
+	uint8_t *resp = NULL;
+	size_t resp_len = 0;
+	bool ok = false;
+	char err[192] = "";
+	bool sent = daemon_round_trip(&s_local.auth, 15 /* OpPlayback */, payload, 2 + adam_len,
+								  &resp, &resp_len, &ok, 240000, err, sizeof(err));
+	free(payload);
+	pthread_mutex_unlock(&s_local.auth_io);
+	if (!sent) {
+		snprintf(error, error_size, "%s", err);
+		return false;
+	}
+	if (!ok) {
+		snprintf(error, error_size, "%s", auth_error_text(resp, resp_len));
+		free(resp);
+		return false;
+	}
+	*body_len = resp_len - 1;
+	*body = malloc(*body_len + 1);
+	if (!*body) {
+		free(resp);
+		snprintf(error, error_size, "amp_out_of_memory");
+		return false;
+	}
+	memcpy(*body, resp + 1, *body_len);
+	(*body)[*body_len] = '\0';
+	free(resp);
 	return true;
 }
 
@@ -328,8 +607,8 @@ static bool fps_spc(const char *adam_id, const char *key_uri, uint8_t **spc, siz
 	uint8_t *resp = NULL;
 	size_t resp_len = 0;
 	bool ok = false;
-	if (!daemon_round_trip(9 /* OpGetSPC */, payload, len, &resp, &resp_len, &ok, error,
-						   error_size)) {
+	if (!daemon_round_trip(&s_local.dec, 9 /* OpGetSPC */, payload, len, &resp, &resp_len, &ok,
+						   60000, error, error_size)) {
 		free(payload);
 		return false;
 	}
@@ -374,8 +653,8 @@ static bool fps_apply_ckc(const char *adam_id, const char *key_uri, const uint8_
 	uint8_t *resp = NULL;
 	size_t resp_len = 0;
 	bool ok = false;
-	if (!daemon_round_trip(10 /* OpApplyCKC */, payload, len, &resp, &resp_len, &ok, error,
-						   error_size)) {
+	if (!daemon_round_trip(&s_local.dec, 10 /* OpApplyCKC */, payload, len, &resp, &resp_len,
+						   &ok, 60000, error, error_size)) {
 		free(payload);
 		return false;
 	}
@@ -388,10 +667,9 @@ static bool fps_apply_ckc(const char *adam_id, const char *key_uri, const uint8_
 	return !ok ? false : true;
 }
 
-// Posts the SPC to Apple's FPS key server and hands the CKC back. The
-// daemon's stderr showed the URL the 3.6.0 build used; 6.5.3's SPC request
-// carries the key uri, format and protocol as caller arguments, and the
-// endpoint itself stays the same.
+// Posts the SPC to Apple's FPS key server and hands the CKC back. The 6.5.3
+// SPC request carries the key uri, format and protocol as caller arguments,
+// and the endpoint itself stays the same across generations.
 static bool fps_exchange(const char *adam_id, const char *key_uri, char *error,
 						 size_t error_size) {
 	uint8_t *spc = NULL;
@@ -440,8 +718,8 @@ static bool relay_batch(const uint8_t *payload, size_t len, uint8_t **resp, size
 	uint8_t *out = NULL;
 	size_t out_len = 0;
 	bool ok = false;
-	if (!daemon_round_trip(7 /* OpDecryptBatch */, payload, len, &out, &out_len, &ok, error,
-						   error_size)) {
+	if (!daemon_round_trip(&s_local.dec, 7 /* OpDecryptBatch */, payload, len, &out, &out_len,
+						   &ok, 60000, error, error_size)) {
 		return false;
 	}
 	// A missing key is not a failure: negotiate, then replay the batch.
@@ -486,7 +764,9 @@ static bool relay_batch(const uint8_t *payload, size_t len, uint8_t **resp, size
 	if (!fps_exchange(adam_id, key_uri, error, error_size)) {
 		return false;
 	}
-	return daemon_round_trip(7, payload, len, resp, resp_len, &ok, error, error_size) && ok;
+	return daemon_round_trip(&s_local.dec, 7, payload, len, resp, resp_len, &ok, 60000, error,
+							 error_size) &&
+		   ok;
 }
 
 // One WV2D client connection (the player's ampwrapper opens one per stream).
@@ -538,7 +818,6 @@ static void serve_client(int fd) {
 		out[4] = 0;
 		out[5] = 1;
 		out[6] = 0;
-		out[7] = (uint8_t)(reply_kind >> 8);
 		out[7] = (uint8_t)reply_kind;
 		out[8] = (uint8_t)(id >> 24);
 		out[9] = (uint8_t)(id >> 16);
@@ -550,11 +829,7 @@ static void serve_client(int fd) {
 			free(reply_payload);
 			return;
 		}
-		if (reply_payload && reply_kind == 3) {
-			free(reply_payload);
-		} else {
-			free(reply_payload);
-		}
+		free(reply_payload);
 	}
 }
 
@@ -576,13 +851,13 @@ static void *listener_main(void *arg) {
 			continue;
 		}
 		pthread_mutex_lock(&s_local.lock);
-		s_local.idle_since_ms = now_ms();
+		s_local.dec.used_ms = now_ms();
 		pthread_mutex_unlock(&s_local.lock);
 		serve_client(fd);
 		close(fd);
 		// The batch just finished: start the idle clock again.
 		pthread_mutex_lock(&s_local.lock);
-		s_local.idle_since_ms = now_ms();
+		s_local.dec.used_ms = now_ms();
 		pthread_mutex_unlock(&s_local.lock);
 	}
 	return NULL;
@@ -602,7 +877,7 @@ bool amplocal_init(void) {
 		pthread_mutex_unlock(&s_local.lock);
 		return false;
 	}
-	snprintf(s_local.translate_root, sizeof(s_local.translate_root), "%.280s",
+	snprintf(s_local.guest_root, sizeof(s_local.guest_root), "%.280s",
 			 config_get("applemusic", "translate_root", "/mnt/sd_0/.ampguest"));
 	s_local.idle_secs = (int)config_get_int("applemusic", "translate_idle_secs", 300);
 	if (s_local.idle_secs <= 0) {
@@ -624,7 +899,8 @@ bool amplocal_init(void) {
 		return false;
 	}
 	s_local.listen_fd = fd;
-	s_local.idle_since_ms = now_ms();
+	s_local.dec.used_ms = now_ms();
+	s_local.auth.used_ms = now_ms();
 	pthread_mutex_unlock(&s_local.lock);
 
 	if (!s_local.thread_started) {
@@ -641,25 +917,38 @@ void amplocal_tick(void) {
 		pthread_mutex_unlock(&s_local.lock);
 		return;
 	}
-	// Reap a dead daemon quietly; the next batch respawns it.
-	if (s_local.daemon_pid > 0 && waitpid(s_local.daemon_pid, NULL, WNOHANG) != 0) {
-		s_local.daemon_pid = -1;
-		s_local.daemon_stdin = -1;
-		s_local.daemon_stdout = -1;
-		s_local.daemon_ok = false;
+	// Reap dead daemons quietly; the next use respawns them.
+	if (s_local.dec.pid > 0 && waitpid(s_local.dec.pid, NULL, WNOHANG) != 0) {
+		s_local.dec.pid = -1;
+		s_local.dec.stdin_fd = -1;
+		s_local.dec.stdout_fd = -1;
+		s_local.dec.ok = false;
 	}
-	// Idle kill: the guest holds the FootHill cache, but RAM is precious;
-	// after translate_idle_secs with no connection and no open work, close.
-	if (s_local.daemon_pid > 0 && s_local.idle_secs > 0 &&
-		now_ms() - s_local.idle_since_ms > (long)s_local.idle_secs * 1000) {
-		daemon_kill_locked();
+	if (s_local.auth.pid > 0 && waitpid(s_local.auth.pid, NULL, WNOHANG) != 0) {
+		s_local.auth.pid = -1;
+		s_local.auth.stdin_fd = -1;
+		s_local.auth.stdout_fd = -1;
+		s_local.auth.ok = false;
+	}
+	// Idle kill: RAM is precious; after translate_idle_secs with no use,
+	// close. The auth daemon holds the FootHill session cache on the card,
+	// but that survives a kill -- only in-flight work is lost.
+	long now = now_ms();
+	if (s_local.dec.pid > 0 && s_local.idle_secs > 0 &&
+		now - s_local.dec.used_ms > (long)s_local.idle_secs * 1000) {
+		channel_kill_locked(&s_local.dec);
+	}
+	if (s_local.auth.pid > 0 && s_local.idle_secs > 0 &&
+		now - s_local.auth.used_ms > (long)s_local.idle_secs * 1000) {
+		channel_kill_locked(&s_local.auth);
 	}
 	pthread_mutex_unlock(&s_local.lock);
 }
 
 void amplocal_shutdown(void) {
 	pthread_mutex_lock(&s_local.lock);
-	daemon_kill_locked();
+	channel_kill_locked(&s_local.dec);
+	channel_kill_locked(&s_local.auth);
 	if (s_local.listen_fd >= 0) {
 		shutdown(s_local.listen_fd, SHUT_RDWR);
 		close(s_local.listen_fd);
@@ -670,7 +959,7 @@ void amplocal_shutdown(void) {
 
 bool amplocal_running(void) {
 	pthread_mutex_lock(&s_local.lock);
-	bool running = s_local.listen_fd >= 0 && s_local.daemon_pid > 0;
+	bool running = s_local.listen_fd >= 0 && s_local.dec.pid > 0;
 	pthread_mutex_unlock(&s_local.lock);
 	return running;
 }

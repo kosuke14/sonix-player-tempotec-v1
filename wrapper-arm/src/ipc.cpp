@@ -35,6 +35,7 @@ enum Opcode : std::uint16_t {
     Op2FA = 12,       // submit the six-digit code
     OpMe = 13,        // account snapshot -> JSON-ish field list
     OpLogout = 14,
+    OpPlayback = 15,  // subscriber playback dispatch: adam u16-len -> JSON
 };
 
 struct Frame {
@@ -383,6 +384,28 @@ Frame handle_logout(const Frame& req) {
     return response(req, true, {});
 }
 
+// OpPlayback payload: adam u16-len + digits. The dispatch runs inside the
+// 3.6.0 runtime (network round trip at TCG speed): the caller's wait is
+// generous, this handler just blocks until run() settles.
+Frame handle_playback(const Frame& req) {
+    if (req.payload.size() < 2) {
+        return error_response(req, "invalid_frame");
+    }
+    const std::uint16_t adam_len = read_u16_be(req.payload.data());
+    if (adam_len == 0 || 2u + static_cast<size_t>(adam_len) > req.payload.size()) {
+        return error_response(req, "invalid_frame");
+    }
+    std::string adam_id(reinterpret_cast<const char*>(req.payload.data() + 2), adam_len);
+    std::string body, error;
+    {
+        std::lock_guard<std::mutex> lock(g_auth_mutex());
+        if (!apple::playback_dispatch(adam_id, &body, &error)) {
+            return error_response(req, error);
+        }
+    }
+    return response(req, true, std::vector<std::uint8_t>(body.begin(), body.end()));
+}
+
 }  // namespace
 
 int run_ipc_worker(apple::Runtime& rt, apple::Loader& loader) {
@@ -421,6 +444,9 @@ int run_ipc_worker(apple::Runtime& rt, apple::Loader& loader) {
                 break;
             case OpLogout:
                 resp = handle_logout(req);
+                break;
+            case OpPlayback:
+                resp = handle_playback(req);
                 break;
             case OpShutdown:
                 return 0;

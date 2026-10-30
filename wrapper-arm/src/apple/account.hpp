@@ -117,6 +117,12 @@ private:
 // initializes AuthRuntime and probes the cached session. Safe to re-call.
 bool auth_bootstrap(Loader& loader, const std::string& libs_dir);
 
+// The playback dispatch: runs the subscriber PurchaseRequest for `adam_id`
+// and serializes its MZ-protocol plist into {"songList":[...]} JSON (each
+// element is the song's full dispatch dictionary, "hls-playlist-url"
+// included). False with a reason in `error`.
+bool playback_dispatch(const std::string& adam_id, std::string* body, std::string* error);
+
 // The restored/last-harvested tokens, kept process-lifetime for the IPC
 // layer's /me-equivalent answers.
 void auth_store_tokens(const Tokens& t);

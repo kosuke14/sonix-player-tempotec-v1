@@ -666,9 +666,9 @@ void run_inits(void) {
         fprintf(stderr, "guestelf: init %s\n", lib->soname.c_str());
         fflush(stderr);
         if (lib->init && !lib->init_ran) {
-            lib->init_ran = true;
             if (InitGuard::begin()) {
                 lib->init();
+                lib->init_ran = true;
             } else {
                 fprintf(stderr, "guestelf: init %s faulted; skipped\n",
                         lib->soname.c_str());
@@ -677,8 +677,13 @@ void run_inits(void) {
             InitGuard::end();
         }
         if (lib->init_array && !lib->init_ran) {
-            lib->init_ran = true;
             for (size_t i = 0; i < lib->init_array_count; i++) {
+                // NULL slots are legal: Apple's build leaves optional
+                // initializers unrelocated (no reloc entry covers them --
+                // the Android linker skips them without a word).
+                if (!lib->init_array[i]) {
+                    continue;
+                }
                 if (g_tolerant_inits) {
                     fprintf(stderr, "guestelf: %s init_array[%zu]\n", lib->soname.c_str(), i);
                     fflush(stderr);
@@ -695,13 +700,12 @@ void run_inits(void) {
         }
     }
     if (g_tolerant_inits) {
-        // Hand faults back to the daemon-wide handler.
-        struct sigaction sa;
-        sa.sa_sigaction = amp_fault_handler;
-        sa.sa_flags = SA_SIGINFO;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGSEGV, &sa, nullptr);
-        sigaction(SIGBUS, &sa, nullptr);
+        // Hand the signal back to DEFAULT, not to the daemon handler:
+        // Apple's obfuscated libraries (libCoreADI et al.) use SIGSEGV as
+        // control flow -- they install their own handlers and raise on
+        // purpose. Any daemon-side interception of those kills the process.
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS, SIG_DFL);
     }
 }
 

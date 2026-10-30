@@ -44,12 +44,14 @@ void ampstream_release(streambridge_t *bridge);
 // Display metadata for the queue entry the path names.
 bool ampstream_metadata(const char *path, song_metadata_t *out);
 
+// The queued catalog song a path names, for the track menu's download action.
+bool ampstream_song_for(const char *path, ampapi_song_t *out);
+
 // One GUI error, then silence until something new fails.
 bool ampstream_take_error(char *out, size_t size);
 
-// Configuration, read from [applemusic] at open time: the wrapper's HTTP base
-// ("http://host:port"), the decrypt port, and the storefront for the catalog.
-void ampstream_config(char *base_url, size_t base_size, int *decrypt_port, char *storefront,
-					  size_t store_size);
+// Configuration, read from [applemusic] at open time: the decrypt port and
+// the storefront for the catalog.
+void ampstream_config(int *decrypt_port, char *storefront, size_t store_size);
 
 #endif // AMPSTREAM_H

@@ -16,11 +16,12 @@
 #include <string.h>
 
 // The producer half of Apple Music playback. One run_source() behind each
-// bridge owns the whole pipeline: the wrapper's playback dispatch, the HLS
-// walk (amphls.c), the fMP4 slicing (ampfp4.c) and the decryption, either
-// locally for the public-key prefetch samples or in batches through
-// wrapper-v2's TCP door (ampwrapper.c). What lands in the ring is plain
-// ADTS AAC, the one thing the player's existing decoder accepts.
+// bridge owns the whole pipeline: the playback dispatch (via the on-device
+// guest daemon), the HLS walk (amphls.c), the fMP4 slicing (ampfp4.c) and
+// the decryption, either locally for the public-key prefetch samples or in
+// batches through the local listener's TCP door (ampwrapper.c). What lands
+// in the ring is plain ADTS AAC, the one thing the player's existing decoder
+// accepts.
 
 // One media segment is a few seconds of AAC -- a few hundred kilobytes. The
 // same scratch carries the playlists and the init segment on the way in.
@@ -50,7 +51,6 @@ static const unsigned char AMP_PREFETCH_KEY[16] = {0x32, 0xb8, 0xad, 0xe1, 0x76,
 
 typedef struct {
 	char adam_id[32];
-	char base_url[256];
 	int decrypt_port;
 
 	amphls_playlist_t list;
@@ -106,36 +106,6 @@ static void adts_header(unsigned char *h, int frame_len, const ampfp4_init_t *in
 // The host part of the configured wrapper base, for the TCP decrypt door.
 // The HTTP port the base carries is the daemon's own; the decrypt port is
 // configured separately and may differ.
-static bool host_of(const char *base_url, char *host, size_t size) {
-	const char *p = base_url;
-	if (strncasecmp(p, "http://", 7) == 0) {
-		p += 7;
-	} else if (strncasecmp(p, "https://", 8) == 0) {
-		p += 8;
-	}
-	// The host ends at the first '/', or at the port after it. A bracketed
-	// IPv6 literal keeps its brackets and skips everything to the next one.
-	const char *end = p;
-	if (*end == '[') {
-		end = strchr(end, ']');
-		if (!end) {
-			return false;
-		}
-		end++; // include ']'
-	} else {
-		while (*end && *end != '/' && *end != ':') {
-			end++;
-		}
-	}
-	size_t n = (size_t)(end - p);
-	if (!n || n >= size) {
-		return false;
-	}
-	memcpy(host, p, n);
-	host[n] = '\0';
-	return true;
-}
-
 // songList[0]'s master playlist URL out of the playback dispatch.
 static bool playback_url(const char *body, char *url, size_t size, char *error, size_t error_size) {
 	json_doc_t doc;
@@ -408,18 +378,19 @@ static bool amp_source_open(streambridge_source_t *src, char *error, size_t erro
 		snprintf(error, error_size, "amp_out_of_memory");
 		return false;
 	}
-	snprintf(st->base_url, sizeof(st->base_url), "%s", config_get("applemusic", "wrapper_url", ""));
-	if (!st->base_url[0]) {
+	st->decrypt_port = (int)config_get_int("applemusic", "decrypt_port", 10020);
+	if (config_get_int("applemusic", "translate", 0) == 0) {
+		// No guest tree configured: nothing on this device can run the Apple
+		// libraries, so there is no playback dispatch and no decrypt door.
 		snprintf(error, error_size, "amp_not_configured");
 		return false;
 	}
-	st->decrypt_port = (int)config_get_int("applemusic", "decrypt_port", 10020);
 
 	// The playback dispatch, then the playlist walk: master, the AAC variant
 	// (HE-AAC only as the fallback), the variant itself, the init segment.
 	char *body = NULL;
 	size_t body_len = 0;
-	if (!ampw_playback(st->base_url, st->adam_id, &body, &body_len, error, error_size)) {
+	if (!amplocal_playback(st->adam_id, &body, &body_len, error, error_size)) {
 		return false;
 	}
 	char master_url[640];
@@ -473,18 +444,9 @@ static bool amp_source_open(streambridge_source_t *src, char *error, size_t erro
 		}
 	}
 
-	// Translate mode decrypts on this device: the local listener (amplocal)
-	// owns the decrypt port on loopback and drives the guest daemon. The
-	// remote wrapper keeps serving /me, /login and /playback either way.
-	char host[128];
-	int port = st->decrypt_port;
-	if (config_get_int("applemusic", "translate", 0) != 0) {
-		snprintf(host, sizeof(host), "127.0.0.1");
-	} else if (!host_of(st->base_url, host, sizeof(host))) {
-		snprintf(error, error_size, "amp_not_configured");
-		return false;
-	}
-	st->dec = ampw_decrypt_open(host, port, decrypt_stale, src);
+	// Decrypt always runs on this device: the local listener (amplocal) owns
+	// the decrypt port on loopback and drives the guest daemon.
+	st->dec = ampw_decrypt_open("127.0.0.1", st->decrypt_port, decrypt_stale, src);
 	if (!st->dec) {
 		snprintf(error, error_size, "amp_decrypt_connect");
 		return false;
@@ -829,6 +791,16 @@ void ampstream_release(streambridge_t *bridge) {
 	pthread_mutex_unlock(&lock);
 }
 
+// The queued song a path names, for the track menu's download action.
+bool ampstream_song_for(const char *path, ampapi_song_t *out) {
+	int index = index_of(path);
+	if (index < 0 || !queue) {
+		return false;
+	}
+	*out = queue[index];
+	return true;
+}
+
 bool ampstream_metadata(const char *path, song_metadata_t *out) {
 	if (!ampstream_owns(path)) {
 		return false;
@@ -867,9 +839,7 @@ bool ampstream_take_error(char *out, size_t size) {
 	return have;
 }
 
-void ampstream_config(char *base_url, size_t base_size, int *decrypt_port, char *storefront,
-					  size_t store_size) {
-	snprintf(base_url, base_size, "%s", config_get("applemusic", "wrapper_url", ""));
+void ampstream_config(int *decrypt_port, char *storefront, size_t store_size) {
 	if (decrypt_port) {
 		*decrypt_port = (int)config_get_int("applemusic", "decrypt_port", 10020);
 	}

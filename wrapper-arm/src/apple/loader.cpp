@@ -174,9 +174,39 @@ bool Loader::open(const std::string& libs_dir) {
 bool Loader::open_auth(const std::string& libs_dir) {
     auth_last_error_.clear();
     const char *self_load = getenv("AMP_GUEST_LOADER");
-    if (!self_load || self_load[0] != '1') {
-        auth_last_error_ = "auth set requires the guest loader";
+    const char *dyn_load = getenv("AMP_DYN_LINKER");
+    if ((!self_load || self_load[0] != '1') && (!dyn_load || dyn_load[0] != '1')) {
+        auth_last_error_ = "auth set requires the guest loader or AMP_DYN_LINKER";
         return false;
+    }
+    if (dyn_load && dyn_load[0] == '1' && (!self_load || self_load[0] != '1')) {
+        // The dynamic path: the Android linker lives (it spawned us), so the
+        // 3.6.0 set dlopens exactly as the wrapper original did. RTLD_GLOBAL
+        // so the cross-library references resolve transitively.
+        const std::string auth_dir = libs_dir;
+        h_libstoreservicescore_ = dlopen((auth_dir + "/libstoreservicescore.so").c_str(),
+                                         RTLD_NOW | RTLD_GLOBAL);
+        if (!h_libstoreservicescore_) {
+            auth_last_error_ = std::string("dlopen storeservicescore: ") + dlerror();
+            return false;
+        }
+        h_libandroidappmusic_ = dlopen((auth_dir + "/libandroidappmusic.so").c_str(),
+                                       RTLD_NOW | RTLD_GLOBAL);
+        if (!h_libandroidappmusic_) {
+            auth_last_error_ = std::string("dlopen androidappmusic: ") + dlerror();
+            return false;
+        }
+        // The PurchaseRequest plists arrive as CoreFoundation objects; the
+        // linker loads the lib transitively, but an explicit GLOBAL handle
+        // makes the CF surface directly dlsym-able.
+        h_libcorefoundation_ = dlopen((auth_dir + "/libCoreFoundation.so").c_str(),
+                                      RTLD_NOW | RTLD_GLOBAL);
+        if (!h_libcorefoundation_) {
+            auth_last_error_ = std::string("dlopen CoreFoundation: ") + dlerror();
+            return false;
+        }
+        auth_ready_ = true;
+        return true;
     }
 
     // The 3.6.0 inits touch resources a bare guest lacks; a faulting
@@ -235,6 +265,14 @@ void Loader::close() {
     if (h_libstoreapi_) {
         dlclose(h_libstoreapi_);
         h_libstoreapi_ = nullptr;
+    }
+    if (h_libstoreservicescore_) {
+        dlclose(h_libstoreservicescore_);
+        h_libstoreservicescore_ = nullptr;
+    }
+    if (h_libcorefoundation_) {
+        dlclose(h_libcorefoundation_);
+        h_libcorefoundation_ = nullptr;
     }
     ok_ = false;
     decrypt_available_ = false;

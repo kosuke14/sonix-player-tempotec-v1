@@ -19,7 +19,18 @@
 // liblog has no static build in the NDK, and the guest never has a logd to
 // talk to anyway: the three entry points the Apple libs import become
 // no-ops here.
-extern "C" int __android_log_print(int, const char*, const char*, ...) { return 0; }
+#include <cstdarg>
+extern "C" int __android_log_print(int prio, const char* tag, const char* fmt, ...) {
+    if (std::getenv("AMP_APPLE_LOG")) {
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        std::fprintf(stderr, "apple[%d/%s]: %s\n", prio, tag ? tag : "", buf);
+    }
+    return 0;
+}
 extern "C" int __android_log_write(int, const char*, const char*) { return 0; }
 extern "C" int __android_log_vprint(int, const char*, const char*, void*) { return 0; }
 

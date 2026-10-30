@@ -81,11 +81,18 @@ public:
     const std::string& auth_last_error() const { return auth_last_error_; }
     // True once open_auth() has resolved the 3.6.0 surface.
     bool auth_ready() const { return auth_ready_; }
+    // Handles for the account module's dlsym pass (dynamic-linker mode).
+    void* storeservicescore_handle() const { return h_libstoreservicescore_; }
+    void* androidappmusic_handle() const { return h_libandroidappmusic_; }
+    void* mediaplatform_handle() const { return h_libmediaplatform_; }
+    void* corefoundation_handle() const { return h_libcorefoundation_; }
 
 private:
     void* h_libmediaplatform_ = nullptr;
     void* h_libandroidappmusic_ = nullptr;
     void* h_libstoreapi_ = nullptr;
+    void* h_libstoreservicescore_ = nullptr;
+    void* h_libcorefoundation_ = nullptr;
 
     Symbols symbols_;
     Symbols auth_symbols_;

@@ -9,14 +9,24 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <thread>
 
+#include <dlfcn.h>
+#include <link.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "apple/abi.hpp"
 #include "apple/guestelf.h"
+
+namespace storeservicescore {
+class ProtocolDialog;
+class ProtocolDialogResponse;
+}  // namespace storeservicescore
+using ProtDialog = storeservicescore::ProtocolDialog;
+using ProtResp = storeservicescore::ProtocolDialogResponse;
 
 namespace wrapper::apple {
 
@@ -108,8 +118,19 @@ struct AuthSymbols {
     void (*RequestContext_setPresentationInterface)(void*, const abi::shared_ptr*);
     void (*make_shared_AndroidPresentationInterface)(abi::shared_ptr*);
     void (*API_setCredentialsHandler)(void*, void*);
-    void (*API_handleCredentialsResponse)(void*, const abi::shared_ptr*);
+    void* (*set_dialog_handler)(void* this_, void* stdfunc_buf);
+    void (*API_setDialogHandler)(void* this_, void* cb);
+    void (*API_handleProtocolDialogResponse)(void*, const long long*,
+                                             const abi::shared_ptr*);
+    void* (*ProtocolDialog_title)(const void*);
+    void* (*ProtocolDialog_buttons)(const void*);
+    void* (*ProtocolButton_title)(const void*);
+    void* (*ProtocolDialogResponse_ctor)(void*);
+    void* (*ProtocolDialogResponse_setSelectedButton)(void*, const abi::shared_ptr*);
     std::uintptr_t vtable_CredentialsResponse;
+    std::uintptr_t vtable_ProtocolDialogResponse;
+    std::uintptr_t storeservicescore_base;
+    void (*API_handleCredentialsResponse)(void*, const abi::shared_ptr*);
     void (*CredentialsResponse_ctor)(void*);
     void (*CredentialsResponse_setUserName)(void*, const abi::std_string*);
     void (*CredentialsResponse_setPassword)(void*, const abi::std_string*);
@@ -133,6 +154,42 @@ struct AuthSymbols {
     abi::shared_ptr* (*URLRequest_response)(void*);
     void (*URLRequest_setRequestParameter)(void*, const abi::std_string*, const abi::std_string*);
     abi::shared_ptr* (*URLResponse_underlyingResponse)(void*);
+    // playback dispatch (PurchaseRequest + the CF plist walk)
+    void (*PurchaseRequest_ctor)(void*, const abi::shared_ptr*);
+    void (*PurchaseRequest_setProcessDialogActions)(void*, std::uint8_t);
+    void (*PurchaseRequest_setURLBagKey)(void*, const abi::std_string*);
+    void (*PurchaseRequest_setBuyParameters)(void*, const abi::std_string*);
+    void (*PurchaseRequest_run)(void*);
+    abi::shared_ptr* (*PurchaseRequest_response)(void*);
+    abi::shared_ptr* (*PurchaseResponse_error)(void*);
+    void (*PurchaseResponse_items)(abi::std_vector*, void*);  // sret (by-value vector)
+    void* (*PurchaseItem_dictionary)(void*);
+    void* (*URLResponse_protocolDictionary)(void*);
+    void* (*CFRetain)(void*);
+    void (*CFRelease)(void*);
+    unsigned long (*CFGetTypeID)(const void*);
+    unsigned long (*CFDictionaryGetTypeID)(void);
+    long (*CFDictionaryGetCount)(const void*);
+    void (*CFDictionaryGetKeysAndValues)(const void*, const void**, const void**);
+    unsigned long (*CFArrayGetTypeID)(void);
+    long (*CFArrayGetCount)(const void*);
+    const void* (*CFArrayGetValueAtIndex)(const void*, long);
+    unsigned long (*CFStringGetTypeID)(void);
+    const char* (*CFStringGetCStringPtr)(const void*, unsigned long);
+    int (*CFStringGetCString)(const void*, char*, long, unsigned long);
+    long (*CFStringGetLength)(const void*);
+    long (*CFStringGetMaximumSizeForEncoding)(long, unsigned long);
+    unsigned long (*CFNumberGetTypeID)(void);
+    int (*CFNumberIsFloatType)(const void*);
+    int (*CFNumberGetValue)(const void*, long, void*);
+    unsigned long (*CFBooleanGetTypeID)(void);
+    int (*CFBooleanGetValue)(const void*);
+    unsigned long (*CFDataGetTypeID)(void);
+    const unsigned char* (*CFDataGetBytePtr)(const void*);
+    long (*CFDataGetLength)(const void*);
+    unsigned long (*CFDateGetTypeID)(void);
+    double (*CFDateGetAbsoluteTime)(const void*);
+    unsigned long (*CFNullGetTypeID)(void);
     std::string base_dir;
 };
 
@@ -152,15 +209,35 @@ bool AuthRuntime::initialize(Loader& loader, const std::string& libs_dir) {
         }
     }
 
-    const std::string auth_dir = libs_dir + "/lib36";
-    // The 3.6.0 surface spans three libraries; probe them in turn.
-    const char* auth_libs[] = {"libstoreservicescore.so", "libandroidappmusic.so",
-                               "libmediaplatform.so", nullptr};
+    const char *self_load = std::getenv("AMP_GUEST_LOADER");
+    const char *dyn_load = std::getenv("AMP_DYN_LINKER");
+    const bool dynamic = dyn_load && dyn_load[0] == '1' &&
+                         (!self_load || self_load[0] != '1');
+    // The 3.6.0 surface spans three libraries; probe them in turn. The
+    // dynamic path resolves through the Android linker's handles instead of
+    // the guest loader's per-library tables.
+    void* hs = loader.storeservicescore_handle();
+    void* ha = loader.androidappmusic_handle();
+    void* hm = loader.mediaplatform_handle();
+    void* hcf = loader.corefoundation_handle();
     auto resolve = [&](void** slot, const char* mangled) {
         *slot = nullptr;
-        for (int i = 0; auth_libs[i]; i++) {
-            *slot = guest_dlsym_in((auth_dir + "/" + auth_libs[i]).c_str(), mangled);
-            if (*slot) return;
+        if (dynamic) {
+            for (void* h : {hs, ha, hm, hcf}) {
+                if (h) {
+                    *slot = dlsym(h, mangled);
+                    if (*slot) return;
+                }
+            }
+        } else {
+            const std::string auth_dir = libs_dir + "/lib36";
+            const char* auth_libs[] = {"libstoreservicescore.so", "libandroidappmusic.so",
+                                       "libmediaplatform.so", "libCoreFoundation.so",
+                                       nullptr};
+            for (int i = 0; auth_libs[i]; i++) {
+                *slot = guest_dlsym_in((auth_dir + "/" + auth_libs[i]).c_str(), mangled);
+                if (*slot) return;
+            }
         }
         std::fprintf(stderr, "authrt: unresolved %s\n", mangled);
     };
@@ -216,7 +293,72 @@ bool AuthRuntime::initialize(Loader& loader, const std::string& libs_dir) {
     AMP_AUTHSYM(URLRequest_response);
     AMP_AUTHSYM(URLRequest_setRequestParameter);
     AMP_AUTHSYM(URLResponse_underlyingResponse);
+    AMP_AUTHSYM(PurchaseRequest_ctor);
+    AMP_AUTHSYM(PurchaseRequest_setProcessDialogActions);
+    AMP_AUTHSYM(PurchaseRequest_setURLBagKey);
+    AMP_AUTHSYM(PurchaseRequest_setBuyParameters);
+    AMP_AUTHSYM(PurchaseRequest_run);
+    AMP_AUTHSYM(PurchaseRequest_response);
+    AMP_AUTHSYM(PurchaseResponse_error);
+    AMP_AUTHSYM(PurchaseResponse_items);
+    AMP_AUTHSYM(PurchaseItem_dictionary);
+    AMP_AUTHSYM(URLResponse_protocolDictionary);
+    AMP_AUTHSYM(CFRetain);
+    AMP_AUTHSYM(CFRelease);
+    AMP_AUTHSYM(CFGetTypeID);
+    resolve((void**)&g_auth.CFDictionaryGetTypeID, abi::mangled::auth36::CFDictionaryGetTypeID_fn);
+    AMP_AUTHSYM(CFDictionaryGetCount);
+    AMP_AUTHSYM(CFDictionaryGetKeysAndValues);
+    AMP_AUTHSYM(CFArrayGetTypeID);
+    AMP_AUTHSYM(CFArrayGetCount);
+    AMP_AUTHSYM(CFArrayGetValueAtIndex);
+    AMP_AUTHSYM(CFStringGetTypeID);
+    AMP_AUTHSYM(CFStringGetCStringPtr);
+    AMP_AUTHSYM(CFStringGetCString);
+    AMP_AUTHSYM(CFStringGetLength);
+    AMP_AUTHSYM(CFStringGetMaximumSizeForEncoding);
+    AMP_AUTHSYM(CFNumberGetTypeID);
+    AMP_AUTHSYM(CFNumberIsFloatType);
+    AMP_AUTHSYM(CFNumberGetValue);
+    AMP_AUTHSYM(CFBooleanGetTypeID);
+    AMP_AUTHSYM(CFBooleanGetValue);
+    AMP_AUTHSYM(CFDataGetTypeID);
+    AMP_AUTHSYM(CFDataGetBytePtr);
+    AMP_AUTHSYM(CFDataGetLength);
+    AMP_AUTHSYM(CFDateGetTypeID);
+    AMP_AUTHSYM(CFDateGetAbsoluteTime);
+    AMP_AUTHSYM(CFNullGetTypeID);
 #undef AMP_AUTHSYM
+
+    resolve((void**)&g_auth.API_setDialogHandler, abi::mangled::auth36::API_setDialogHandler);
+    resolve((void**)&g_auth.API_handleProtocolDialogResponse,
+            abi::mangled::auth36::API_handleProtocolDialogResponse);
+    resolve((void**)&g_auth.set_dialog_handler, abi::mangled::auth36::Generic_setDialogHandler);
+    resolve((void**)&g_auth.ProtocolDialog_title, abi::mangled::auth36::ProtocolDialog_title);
+    resolve((void**)&g_auth.ProtocolDialog_buttons, abi::mangled::auth36::ProtocolDialog_buttons);
+    resolve((void**)&g_auth.ProtocolButton_title, abi::mangled::auth36::ProtocolButton_title);
+    resolve((void**)&g_auth.ProtocolDialogResponse_ctor,
+            abi::mangled::auth36::ProtocolDialogResponse_ctor);
+    resolve((void**)&g_auth.ProtocolDialogResponse_setSelectedButton,
+            abi::mangled::auth36::ProtocolDialogResponse_setSelectedButton);
+
+    // Pin the emplace vtables: not exported (weak, stripped). dladdr on the
+    // resolved CredentialsResponse ctor gives the load base; the ctor's file
+    // vaddr is 0xd704c (ARM/Thumb, so the dlsym value carries bit 0 set).
+    if (g_auth.ProtocolDialogResponse_ctor) {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<const void*>(g_auth.ProtocolDialogResponse_ctor), &info) &&
+            info.dli_fbase) {
+            auto base = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
+            g_auth.storeservicescore_base = base;
+            g_auth.vtable_CredentialsResponse =
+                base + abi::mangled::auth36::vtable_CredentialsResponse_addr;
+            g_auth.vtable_ProtocolDialogResponse =
+                base + abi::mangled::auth36::vtable_ProtocolDialogResponse_addr;
+            std::fprintf(stderr, "authrt: storeservicescore base=%p vtables pinned\n",
+                         info.dli_fbase);
+        }
+    }
 
     sym_ = &loader.auth_sym();
     base_dir_ = std::getenv("AMP_BASE_DIR") ? std::getenv("AMP_BASE_DIR")
@@ -327,6 +469,11 @@ bool AuthRuntime::init_request_context(const std::string& /*libs_dir*/) {
 
 // Defined at the end of this file (C linkage, stable address).
 extern "C" void amp_credentials_entry(const abi::shared_ptr* cred_request);
+void dialog_autopick(long long dialog_id, const abi::shared_ptr* dialog,
+                     const abi::shared_ptr* response_handler);
+extern "C" void amp_dialog_entry(long long dialog_id,
+                                 const abi::shared_ptr* dialog,
+                                 const abi::shared_ptr* response_handler);
 
 bool AuthRuntime::init_presentation(void) {
     g_auth.make_shared_AndroidPresentationInterface(&presentation_);
@@ -340,6 +487,19 @@ bool AuthRuntime::init_presentation(void) {
     if (g_auth.API_setCredentialsHandler) {
         g_auth.API_setCredentialsHandler(presentation_.obj, (void*)&amp_credentials_entry);
     }
+    if (g_auth.API_setDialogHandler) {
+        g_auth.API_setDialogHandler(presentation_.obj, (void*)&amp_dialog_entry);
+        std::fprintf(stderr, "authrt: dialog handler installed (C)\n");
+    }
+    // Wire the presentation interface into the RequestContext. Without this
+    // AuthenticateFlow runs headless: it can never call back with the
+    // credentials request or a protocol dialog, so login always ends in
+    // response type 4 / state=failed. (wrapper-v2 runtime.cpp does this as
+    // the last step of init_presentation_interface.)
+    if (g_auth.RequestContext_setPresentationInterface && request_ctx_.obj) {
+        g_auth.RequestContext_setPresentationInterface(request_ctx_.obj, &presentation_);
+        std::fprintf(stderr, "authrt: presentation wired into RequestContext\n");
+    }
     return true;
 }
 
@@ -350,9 +510,79 @@ AuthRuntime& AuthRuntime::instance() {
 
 const abi::shared_ptr& AuthRuntime::request_ctx() const { return request_ctx_; }
 const abi::shared_ptr& AuthRuntime::presentation() const { return presentation_; }
+void* rt_presentation_obj(void) { return AuthRuntime::instance().presentation().obj; }
 
 // --- the credentials bridge -------------------------------------------------
 
+
+// Auto-pick "Use Existing Apple ID" on the "Sign In" dialog (the wrapper
+// original's dialog handler, laid over the 3.6.0 ProtocolDialog surface).
+// The id is long long: in the 3.6.0 armv7 mangling the callback takes
+// `long long` (x), which occupies the r0-r1 aligned pair under AAPCS — a
+// plain `long` here would make the first pointer arg read r1 (the id's
+// high half) instead of r2.
+void dialog_autopick(long long dialog_id, const abi::shared_ptr* dialog,
+                     const abi::shared_ptr* response_handler) {
+    if (!dialog || !dialog->obj || !g_auth.ProtocolDialog_title) {
+        std::fprintf(stderr,
+                     "auth: dialog entry id=%lld dialog=%p rh=%p title_fn=%p — bail\n",
+                     dialog_id, (void*)dialog, (void*)(response_handler ? response_handler->obj : nullptr),
+                     (void*)g_auth.ProtocolDialog_title);
+        return;
+    }
+    abi::std_string* title_raw =
+        reinterpret_cast<abi::std_string* (*)(const void*)>(g_auth.ProtocolDialog_title)(
+            dialog->obj);
+    std::string title = read_std_string(title_raw);
+
+    // The response object: emplaced with the pinned ProtocolDialogResponse
+    // vtable (object at +24 in the shared_ptr control block).
+    auto* emplace = static_cast<std::uint8_t*>(::operator new(128));
+    std::memset(emplace, 0, 128);
+    *reinterpret_cast<void**>(emplace) =
+        reinterpret_cast<void*>(g_auth.vtable_ProtocolDialogResponse + 2);
+    abi::shared_ptr resp;
+    resp.obj = emplace + 24;
+    resp.ctrl_blk = emplace;
+    g_auth.ProtocolDialogResponse_ctor(resp.obj);
+
+    // The buttons live in an __ndk1::vector<shared_ptr<ProtocolButton>>;
+    // buttons() returns a pointer to it directly (same convention as the
+    // title() getter — verified live: the sret interpretation returned an
+    // empty span, the pointer interpretation returns the real vector).
+    auto buttons_fn =
+        reinterpret_cast<abi::std_vector* (*)(const void*)>(
+            reinterpret_cast<std::uintptr_t>(g_auth.ProtocolDialog_buttons));
+    abi::std_vector* vec = buttons_fn(dialog->obj);
+    auto* b = vec ? static_cast<abi::shared_ptr*>(vec->begin) : nullptr;
+    auto* b_end = vec ? static_cast<abi::shared_ptr*>(vec->end) : nullptr;
+    std::fprintf(stderr, "auth: buttons span [%p, %p)\n",
+                 vec ? vec->begin : nullptr, vec ? vec->end : nullptr);
+    bool picked = false;
+    for (; b && b < b_end && !picked; ++b) {
+        if (!b->obj) continue;
+        abi::std_string* ts = reinterpret_cast<abi::std_string* (*)(const void*)>(
+            g_auth.ProtocolButton_title)(b->obj);
+        std::string label = read_std_string(ts);
+        std::fprintf(stderr, "auth: button label: \"%s\"\n", label.c_str());
+        if (label == "Use Existing Apple ID") {
+            g_auth.ProtocolDialogResponse_setSelectedButton(resp.obj, b);
+            picked = true;
+        }
+    }
+    std::fprintf(stderr, "auth: dialog \"%s\" picked_existing=%s\n", title.c_str(),
+                 picked ? "yes" : "no");
+
+    // Fire Apple's response through the presentation interface's
+    // handleProtocolDialogResponse — the proven wrapper-v2 path. The response
+    // handler object Apple passed is deliberately not invoked directly: its
+    // operator() vtable slot differs between the two library generations and
+    // a wrong slot faults (observed SIGSEGV under the armv7 3.6.0 set).
+    if (g_auth.API_handleProtocolDialogResponse) {
+        long long id = dialog_id;
+        g_auth.API_handleProtocolDialogResponse(rt_presentation_obj(), &id, &resp);
+    }
+}
 
 void credentials_callback(const abi::shared_ptr* cred_request) {
     AuthRuntime& rt = AuthRuntime::instance();
@@ -737,7 +967,257 @@ bool warm_session_present(const std::string& base_dir) {
     return S_ISREG(st.st_mode) && st.st_size > 0;
 }
 
+// --- the playback dispatch --------------------------------------------------
+// PurchaseRequest is the subscriber download dispatch: it returns, per adam
+// id, an MZ-protocol property list whose per-song dictionaries carry the
+// master HLS playlist URL (and every variant's assets). The player only
+// needs songList[].hls-playlist-url, but the whole item dictionary is
+// serialized so future callers (downloads, artwork) can walk it too.
+
+constexpr unsigned long kCFStringEncodingUTF8 = 0x08000100;
+constexpr long kCFNumberSInt64Type = 4;
+constexpr long kCFNumberFloat64Type = 6;
+constexpr double kCFAbsoluteTimeIntervalSince1970 = 978307200.0;
+constexpr int kJsonMaxDepth = 32;
+
+void json_escape_into(std::string* out, const char* s, size_t n) {
+    out->push_back('"');
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        switch (c) {
+        case '"': *out += "\\\""; break;
+        case '\\': *out += "\\\\"; break;
+        case '\b': *out += "\\b"; break;
+        case '\f': *out += "\\f"; break;
+        case '\n': *out += "\\n"; break;
+        case '\r': *out += "\\r"; break;
+        case '\t': *out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                *out += buf;
+            } else {
+                out->push_back(static_cast<char>(c));
+            }
+        }
+    }
+    out->push_back('"');
+}
+
+std::string cf_string_value(const void* str) {
+    if (!str || !g_auth.CFStringGetCStringPtr) return {};
+    const char* fast = g_auth.CFStringGetCStringPtr(str, kCFStringEncodingUTF8);
+    if (fast) return std::string(fast);
+    if (!g_auth.CFStringGetLength || !g_auth.CFStringGetCString) return {};
+    long len = g_auth.CFStringGetLength(str);
+    if (len <= 0) return {};
+    long max = g_auth.CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8) + 1;
+    std::vector<char> buf(static_cast<size_t>(max), 0);
+    if (!g_auth.CFStringGetCString(str, buf.data(), max, kCFStringEncodingUTF8)) return {};
+    return std::string(buf.data());
+}
+
+void cf_to_json(const void* cf, std::string* out, int depth) {
+    if (!cf || depth > kJsonMaxDepth || !g_auth.CFGetTypeID) {
+        *out += "null";
+        return;
+    }
+    const unsigned long tid = g_auth.CFGetTypeID(cf);
+    if (tid == g_auth.CFDictionaryGetTypeID()) {
+        *out += '{';
+        long n = g_auth.CFDictionaryGetCount(cf);
+        if (n > 0) {
+            std::vector<const void*> keys(static_cast<size_t>(n));
+            std::vector<const void*> vals(static_cast<size_t>(n));
+            g_auth.CFDictionaryGetKeysAndValues(cf, keys.data(), vals.data());
+            bool first = true;
+            for (long i = 0; i < n; i++) {
+                if (!keys[i] || g_auth.CFGetTypeID(keys[i]) != g_auth.CFStringGetTypeID()) {
+                    continue;  // MZ plists only use string keys
+                }
+                std::string k = cf_string_value(keys[i]);
+                if (k.empty()) continue;
+                if (!first) *out += ',';
+                first = false;
+                json_escape_into(out, k.data(), k.size());
+                *out += ':';
+                cf_to_json(vals[i], out, depth + 1);
+            }
+        }
+        *out += '}';
+        return;
+    }
+    if (tid == g_auth.CFArrayGetTypeID()) {
+        *out += '[';
+        long n = g_auth.CFArrayGetCount(cf);
+        for (long i = 0; i < n; i++) {
+            if (i) *out += ',';
+            cf_to_json(g_auth.CFArrayGetValueAtIndex(cf, i), out, depth + 1);
+        }
+        *out += ']';
+        return;
+    }
+    if (tid == g_auth.CFStringGetTypeID()) {
+        std::string v = cf_string_value(cf);
+        json_escape_into(out, v.data(), v.size());
+        return;
+    }
+    if (tid == g_auth.CFNumberGetTypeID()) {
+        if (g_auth.CFNumberIsFloatType(cf)) {
+            double v = 0;
+            g_auth.CFNumberGetValue(cf, kCFNumberFloat64Type, &v);
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "%.17g", v);
+            *out += buf;
+        } else {
+            std::int64_t v = 0;
+            g_auth.CFNumberGetValue(cf, kCFNumberSInt64Type, &v);
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+            *out += buf;
+        }
+        return;
+    }
+    if (tid == g_auth.CFBooleanGetTypeID()) {
+        *out += g_auth.CFBooleanGetValue(cf) ? "true" : "false";
+        return;
+    }
+    if (tid == g_auth.CFDataGetTypeID()) {
+        // Base64 so the JSON stays string-friendly.
+        const unsigned char* p = g_auth.CFDataGetBytePtr(cf);
+        long n = g_auth.CFDataGetLength(cf);
+        static const char tbl[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        *out += '"';
+        if (p && n > 0) {
+            unsigned val = 0;
+            int valb = -6;
+            for (long i = 0; i < n; i++) {
+                val = (val << 8) + p[i];
+                valb += 8;
+                while (valb >= 0) {
+                    out->push_back(tbl[(val >> valb) & 0x3F]);
+                    valb -= 6;
+                }
+            }
+            if (valb > -6) out->push_back(tbl[((val << 8) >> (valb + 8)) & 0x3F]);
+            while (out->size() % 4 != 0) out->push_back('=');
+        }
+        *out += '"';
+        return;
+    }
+    if (tid == g_auth.CFDateGetTypeID()) {
+        double unix_secs = g_auth.CFDateGetAbsoluteTime(cf) + kCFAbsoluteTimeIntervalSince1970;
+        std::time_t t = static_cast<std::time_t>(unix_secs);
+        std::tm tm_utc{};
+        gmtime_r(&t, &tm_utc);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+        json_escape_into(out, buf, std::strlen(buf));
+        return;
+    }
+    *out += "null";  // CFNull and anything unexpected
+}
+
+// PurchaseItem wraps a retained CFDictionaryRef at object offset 0; in the
+// pinned APK dictionary() itself just returns `this`, so prefer the member.
+void* purchase_item_cfdictionary(void* item_obj) {
+    if (!item_obj) return nullptr;
+    void* from_member = *static_cast<void**>(item_obj);
+    if (g_auth.PurchaseItem_dictionary) {
+        void* ret = g_auth.PurchaseItem_dictionary(item_obj);
+        if (ret && ret != item_obj &&
+            g_auth.CFGetTypeID(ret) == g_auth.CFDictionaryGetTypeID()) {
+            return ret;
+        }
+    }
+    return from_member;
+}
+
 }  // namespace
+
+bool playback_dispatch(const std::string& adam_id, std::string* body, std::string* error) {
+    AuthRuntime& rt = AuthRuntime::instance();
+    if (!rt.initialized() || !rt.request_ctx().obj) {
+        *error = "auth runtime not initialized";
+        return false;
+    }
+    if (adam_id.empty()) {
+        *error = "adam_id required";
+        return false;
+    }
+    for (char c : adam_id) {
+        if (c < '0' || c > '9') {
+            *error = "adam_id must be numeric";
+            return false;
+        }
+    }
+    const abi::shared_ptr req_ctx = rt.request_ctx();
+
+    // PurchaseRequest is heavy; the upstream lifetime model keeps the storage
+    // forever. One buffer, never freed. Plain static, not thread_local: the
+    // IPC layer serializes auth-mode calls under one mutex, and a TLS
+    // segment in the static bionic build trips qemu's alignment floor.
+    alignas(16) static std::uint8_t pr_buf[8192];
+    std::memset(pr_buf, 0, sizeof(pr_buf));
+
+    g_auth.PurchaseRequest_ctor(pr_buf, &req_ctx);
+    g_auth.PurchaseRequest_setProcessDialogActions(pr_buf, 1);
+    auto bag = abi::make_string_view("subDownload");
+    g_auth.PurchaseRequest_setURLBagKey(pr_buf, &bag);
+    // The "S" productType + "SUBS" pricing asks the storefront for the
+    // subscriber download dispatch (every variant), not the streaming-only
+    // asset. adam_id was validated digits-only above.
+    std::string buy = "salableAdamId=" + adam_id + "&price=0&pricingParameters=SUBS&productType=S";
+    auto buy_view = abi::make_string_view(buy.c_str());
+    g_auth.PurchaseRequest_setBuyParameters(pr_buf, &buy_view);
+
+    g_auth.PurchaseRequest_run(pr_buf);
+
+    // Pull the PurchaseResponse: surface Apple's StoreErrorCondition, then
+    // walk items() -- run() does not fire the URLResponse preprocessor, so
+    // the item dictionaries ARE the dispatch.
+    abi::shared_ptr* resp = g_auth.PurchaseRequest_response(pr_buf);
+    if (!resp || !resp->obj) {
+        *error = "PurchaseRequest produced no response (HTTP failure before parsing)";
+        return false;
+    }
+    abi::shared_ptr* err = g_auth.PurchaseResponse_error(resp->obj);
+    if (err && err->obj) {
+        int code = g_auth.SEC_errorCode(err->obj);
+        const char* what = g_auth.SEC_what(err->obj);
+        *error = "Apple store error code=" + std::to_string(code);
+        if (what && *what) *error += std::string(": ") + what;
+        return false;
+    }
+
+    abi::std_vector items{};
+    g_auth.PurchaseResponse_items(&items, resp->obj);
+    const auto* begin = static_cast<const abi::shared_ptr*>(items.begin);
+    const auto* end = static_cast<const abi::shared_ptr*>(items.end);
+    const size_t count = (end > begin) ? static_cast<size_t>(end - begin) : 0;
+
+    // {"songList":[<item dict>,...]} -- the shape the player's dispatcher
+    // walks. The items vector itself leaks (a dtor symbol we do not have);
+    // the upstream wrapper makes the same trade.
+    std::string json = "{\"songList\":[";
+    bool any = false;
+    for (size_t i = 0; i < count; i++) {
+        void* dict = purchase_item_cfdictionary(begin[i].obj);
+        if (!dict) continue;
+        if (any) json += ',';
+        cf_to_json(dict, &json, 0);
+        any = true;
+    }
+    json += "]}";
+    if (!any) {
+        *error = "PurchaseResponse has no items (empty subDownload payload)";
+        return false;
+    }
+    *body = std::move(json);
+    return true;
+}
 
 void Account::worker_main() {
     AuthRuntime& rt = AuthRuntime::instance();
@@ -883,3 +1363,14 @@ bool auth_bootstrap(Loader& loader, const std::string& libs_dir) {
 extern "C" void amp_credentials_entry(const wrapper::apple::abi::shared_ptr* cred_request) {
     wrapper::apple::credentials_callback(cred_request);
 }
+
+// The dialog handler: auto-pick "Use Existing Apple ID" on "Sign In" and fire
+// the response handler Apple handed us. The response handler is a
+// shared_ptr<AndroidProtocolDialogResponseHandler> whose operator() sits at
+// vtable slot 3 (after offset-to-top/typeinfo and the two destructor slots).
+extern "C" void amp_dialog_entry(long long dialog_id,
+                                 const wrapper::apple::abi::shared_ptr* dialog,
+                                 const wrapper::apple::abi::shared_ptr* response_handler) {
+    wrapper::apple::dialog_autopick(dialog_id, dialog, response_handler);
+}
+

@@ -8,6 +8,7 @@
 #include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/ampfp4.h"
 #include "src/system/core/config.h"
+#include "src/system/net/http.h"
 
 #include <assert.h>
 #include <arpa/inet.h>
@@ -273,6 +274,26 @@ static const char *g_variant = "#EXTM3U\n"
 							   "seg2.mp4\n";
 
 static int g_http_port;
+
+// ---------------------------------------------------------------------------
+// the playback-dispatch stand-in
+// ---------------------------------------------------------------------------
+
+// The real amplocal_playback drives the guest daemon; the test cannot have
+// one. This strong definition overrides the weak one in amplocal.c and asks
+// the mock HTTP server the same question the wrapper client used to.
+bool amplocal_playback(const char *adam_id, char **body, size_t *body_len, char *error,
+					   size_t error_size) {
+	char url[128];
+	snprintf(url, sizeof(url), "http://127.0.0.1:%d/playback?adam_id=%s", g_http_port, adam_id);
+	http_req_t req = {.method = "GET", .no_https_downgrade = true};
+	int status = 0;
+	if (!http_request(url, &req, body, body_len, 1024 * 1024, 10, &status) || status != 200) {
+		snprintf(error, error_size, "amp_playback_failed");
+		return false;
+	}
+	return true;
+}
 
 static int listen_port(int *out) {
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -559,9 +580,7 @@ int main(void) {
 	pthread_create(&dec_thread, NULL, decrypt_serve, (void *)(intptr_t)dec_fd);
 
 	// ---- the configuration the source reads at open ----
-	char base[64];
-	snprintf(base, sizeof(base), "http://127.0.0.1:%d", http_port);
-	config_set("applemusic", "wrapper_url", base);
+	config_set_int("applemusic", "translate", 1);
 	config_set_int("applemusic", "decrypt_port", dec_port);
 	config_set("applemusic", "storefront", "jp");
 

@@ -16,7 +16,7 @@
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/ampapi.h"
 #include "src/system/streaming/ampstream.h"
-#include "src/system/streaming/ampwrapper.h"
+#include "src/system/streaming/amplocal.h"
 #include "src/system/streaming/streamturn.h"
 
 #include <pthread.h>
@@ -27,7 +27,7 @@
 
 lv_obj_t *amp_screen;
 static lv_obj_t *settings_screen, *edit_screen, *list_screen;
-static lv_obj_t *list_container, *list_title, *wrapper_value, *port_value, *store_value;
+static lv_obj_t *list_container, *list_title, *port_value, *store_value;
 static lv_obj_t *account_value, *user_value, *pass_value;
 static lv_obj_t *edit_field, *edit_title;
 static keyboard_t *keyboard;
@@ -108,27 +108,28 @@ static void *worker_main(void *arg) {
 		}
 		if (result) {
 			result->job = job;
-			const char *url = config_get("applemusic", "wrapper_url", "");
 			if (job.kind == JOB_LOGIN) {
-				// The sign-in flow runs on the daemon, but every field the user
-				// types comes from this device's keyboard: the player is the
-				// only place the password exists, and it is wiped right here.
-				ampw_login_result_t r = ampw_login(url, job.username, job.password,
-												   result->error, sizeof(result->error));
+				// The sign-in flow runs on the guest daemon, but every field
+				// the user types comes from this device's keyboard: the
+				// player is the only place the password exists, and it is
+				// wiped right here.
+				amplocal_login_result_t r = amplocal_signin(job.username, job.password,
+															result->error,
+															sizeof(result->error));
 				memset(job.password, 0, sizeof(job.password));
-				result->count = r == AMPW_LOGIN_OK ? 0 : r == AMPW_LOGIN_2FA ? 1 : -1;
+				result->count = r == AMPLOCAL_LOGIN_OK ? 0 : r == AMPLOCAL_LOGIN_2FA ? 1 : -1;
 			} else if (job.kind == JOB_2FA) {
-				result->count = ampw_login_2fa(url, job.code, result->error,
-											   sizeof(result->error)) == AMPW_LOGIN_OK ? 0 : -1;
+				result->count = amplocal_2fa(job.code, result->error,
+											 sizeof(result->error)) == AMPLOCAL_LOGIN_OK ? 0 : -1;
 				memset(job.code, 0, sizeof(job.code));
 			} else if (job.kind == JOB_LOGOUT) {
-				result->count = ampw_logout(url, result->error, sizeof(result->error)) ? 0 : -1;
+				result->count = amplocal_logout(result->error, sizeof(result->error)) ? 0 : -1;
 			} else {
-				ampw_me_t me;
+				amplocal_me_t me;
 				// The tokens rotate whenever the daemon re-authenticates, so
 				// every job reads them fresh; they are wiped before the result
 				// is sent.
-				if (!ampw_me(url, &me, result->error, sizeof(result->error))) {
+				if (!amplocal_me(&me, result->error, sizeof(result->error))) {
 					result->count = -1;
 				} else {
 					result->signed_in = me.authenticated;
@@ -153,11 +154,11 @@ static void *worker_main(void *arg) {
 				}
 			}
 			// A sign-in hop changes the session behind the flow, so the
-			// account row is refreshed from a fresh /me inside the same job.
+			// account row is refreshed from a fresh snapshot inside the job.
 			if (job.kind == JOB_LOGIN || job.kind == JOB_2FA || job.kind == JOB_LOGOUT) {
 				if (result->count >= 0) {
-					ampw_me_t me;
-					if (ampw_me(url, &me, result->error, sizeof(result->error))) {
+					amplocal_me_t me;
+					if (amplocal_me(&me, result->error, sizeof(result->error))) {
 						result->signed_in = me.authenticated;
 						snprintf(result->apple_id, sizeof(result->apple_id), "%s", me.apple_id);
 						memset(&me, 0, sizeof(me));
@@ -235,33 +236,29 @@ static void page_left_cb(lv_event_t *e) {
 }
 
 // ---------------------------------------------------------------------------
-// the settings draft: the wrapper config is saved, the credentials are not
+// the settings draft: the guest config is saved, the credentials are not
 // ---------------------------------------------------------------------------
 
-static char draft_url[256], draft_store[32];
+static char draft_store[32];
 static char draft_user[128], draft_pass[128]; // this session only; never written to the card
 static int draft_port;
 
 static void draft_load(void) {
-	ampstream_config(draft_url, sizeof(draft_url), &draft_port, draft_store, sizeof(draft_store));
+	ampstream_config(&draft_port, draft_store, sizeof(draft_store));
 }
 
 static void draft_save(void) {
-	config_set("applemusic", "wrapper_url", draft_url);
 	config_set_int("applemusic", "decrypt_port", draft_port);
 	config_set("applemusic", "storefront", draft_store);
 }
 
 static bool configured(void) {
-	char url[256];
-	int port;
-	char store[32];
-	ampstream_config(url, sizeof(url), &port, store, sizeof(store));
-	return url[0] != '\0';
+	// The guest tree is the whole feature: without it there is no daemon to
+	// sign in on and nothing to decrypt with.
+	return config_get_int("applemusic", "translate", 0) != 0;
 }
 
 static void settings_refresh(void) {
-	lv_label_set_text(wrapper_value, draft_url[0] ? draft_url : tr("amp_not_set"));
 	char port[16];
 	snprintf(port, sizeof(port), "%d", draft_port);
 	lv_label_set_text(port_value, port);
@@ -297,13 +294,12 @@ static void edit_cb(lv_event_t *e) {
 	}
 	searching = false;
 	editing = (int)(intptr_t)lv_event_get_user_data(e);
-	static const char *keys[] = {"amp_wrapper_url", "amp_decrypt_port", "amp_storefront",
-								 "amp_username", "password"};
+	static const char *keys[] = {"amp_decrypt_port", "amp_storefront", "amp_username",
+								 "password"};
 	lv_label_set_text(edit_title, tr(keys[editing]));
-	const char *text = editing == 0	 ? draft_url
-					   : editing == 1 ? ""
-					   : editing == 2 ? draft_store
-					   : editing == 3 ? draft_user
+	const char *text = editing == 0	 ? ""
+					   : editing == 1 ? draft_store
+					   : editing == 2 ? draft_user
 									  : draft_pass;
 	lv_textarea_set_accepted_chars(edit_field, NULL);
 	lv_textarea_set_max_length(edit_field, 127);
@@ -347,8 +343,6 @@ static void accept_cb(lv_event_t *e) {
 		return;
 	}
 	if (editing == 0) {
-		snprintf(draft_url, sizeof(draft_url), "%s", value);
-	} else if (editing == 1) {
 		char *end = NULL;
 		long port = strtol(value, &end, 10);
 		if (!value[0] || (end && *end) || port < 1 || port > 65535) {
@@ -356,7 +350,7 @@ static void accept_cb(lv_event_t *e) {
 			return;
 		}
 		draft_port = (int)port;
-	} else if (editing == 2) {
+	} else if (editing == 1) {
 		// The storefront is tiny ("jp", "us"): refuse overlong values rather
 		// than truncate them into a different store.
 		if (strlen(value) >= sizeof(draft_store)) {
@@ -364,7 +358,7 @@ static void accept_cb(lv_event_t *e) {
 			return;
 		}
 		snprintf(draft_store, sizeof(draft_store), "%s", value);
-	} else if (editing == 3) {
+	} else if (editing == 2) {
 		snprintf(draft_user, sizeof(draft_user), "%s", value);
 	} else {
 		snprintf(draft_pass, sizeof(draft_pass), "%s", value);
@@ -387,8 +381,8 @@ static void test_cb(lv_event_t *e) {
 	if (busy) {
 		return;
 	}
-	if (!draft_url[0]) {
-		toast_error("amp_not_configured"); // nothing to test: fill in the URL
+	if (!configured()) {
+		toast_error("amp_not_configured"); // no guest tree: nothing to test
 		return;
 	}
 	draft_save();
@@ -404,7 +398,7 @@ static void login_cb(lv_event_t *e) {
 	if (busy || switcher_back_drag_active()) {
 		return;
 	}
-	if (!draft_url[0]) {
+	if (!configured()) {
 		toast_error("amp_not_configured");
 		return;
 	}
@@ -561,10 +555,10 @@ static void open_settings_cb(lv_event_t *e) {
 	draft_load();
 	settings_refresh();
 	switch_screen(settings_screen);
-	// The account row reads a fresh /me rather than remembering last time:
-	// the daemon's session can lapse, or be restored, behind our back. The
-	// same job doubles as the connection test.
-	if (draft_url[0]) {
+	// The account row reads a fresh snapshot rather than remembering last
+	// time: the daemon's session can lapse, or be restored, behind our back.
+	// The same job doubles as the connection test.
+	if (configured()) {
 		job_t job = {.kind = JOB_ME};
 		submit(&job);
 	}
@@ -583,21 +577,19 @@ void amppage_init(gui_config_t *cfg) {
 	settingsrow_add_icon(row, &icon_search, THEME_SEMANTIC_GREEN);
 	player_sheet_attach_drag(home, true);
 
-	// The settings page: where the wrapper lives, the decrypt port, the
-	// storefront the catalog is read from, and the account signed in here.
+	// The settings page: the decrypt port, the storefront the catalog is
+	// read from, and the account signed in here.
 	settings_screen = screen();
 	lv_obj_t *container = settingsrow_page(settings_screen, cfg, "amp_wrapper_settings");
-	row = settingsrow_add(container, "amp_wrapper_url", &wrapper_value, edit_cb, (void *)(intptr_t)0);
-	settingsrow_add_icon(row, &icon_wifi_high, THEME_SEMANTIC_BLUE);
-	row = settingsrow_add(container, "amp_decrypt_port", &port_value, edit_cb, (void *)(intptr_t)1);
+	row = settingsrow_add(container, "amp_decrypt_port", &port_value, edit_cb, (void *)(intptr_t)0);
 	settingsrow_add_icon(row, &icon_music_settings, THEME_SEMANTIC_PURPLE);
-	row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)2);
+	row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)1);
 	settingsrow_add_icon(row, &icon_music_note, THEME_SEMANTIC_CYAN);
 	row = settingsrow_add(container, "amp_account", &account_value, NULL, NULL);
 	settingsrow_add_icon(row, &icon_artist, THEME_SEMANTIC_GREEN);
-	row = settingsrow_add(container, "amp_username", &user_value, edit_cb, (void *)(intptr_t)3);
+	row = settingsrow_add(container, "amp_username", &user_value, edit_cb, (void *)(intptr_t)2);
 	settingsrow_add_icon(row, &icon_artist, THEME_SEMANTIC_BLUE);
-	row = settingsrow_add(container, "amp_password", &pass_value, edit_cb, (void *)(intptr_t)4);
+	row = settingsrow_add(container, "amp_password", &pass_value, edit_cb, (void *)(intptr_t)3);
 	settingsrow_add_icon(row, &icon_eye, THEME_SEMANTIC_PURPLE);
 	row = settingsrow_action(container, "amp_sign_in", login_cb, NULL);
 	settingsrow_add_icon(row, &icon_check, THEME_SEMANTIC_GREEN);
