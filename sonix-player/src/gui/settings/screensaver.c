@@ -1222,7 +1222,8 @@ void screensaver_init(gui_config_t *cfg) {
 	lv_obj_set_style_image_opa(chevron_icon, LV_OPA_70, 0);
 	lv_obj_center(chevron_icon);
 
-	// The reference uses a black field, pale segmented bars and a white rail.
+	// The reference uses a black field, segmented bars and a rail. Both use
+	// the shared accent style so theme and accent changes take effect immediately.
 	// Keep it wholly above the metadata strip, so the clock is never covered.
 	spectrum = lv_obj_create(saver);
 	int spectrum_h = screen_h - DEFAULT_STRIP_H;
@@ -1245,7 +1246,7 @@ void screensaver_init(gui_config_t *cfg) {
 	lv_obj_t *rail = lv_obj_create(spectrum);
 	lv_obj_set_pos(rail, margin, rail_y);
 	lv_obj_set_size(rail, screen_w - 2 * margin, rail_h);
-	lv_obj_set_style_bg_color(rail, lv_color_white(), 0);
+	lv_obj_add_style(rail, &theme_style_accent_bg, 0);
 	lv_obj_set_style_bg_opa(rail, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(rail, 0, 0);
 	lv_obj_set_style_radius(rail, 0, 0);
@@ -1255,7 +1256,7 @@ void screensaver_init(gui_config_t *cfg) {
 		spectrum_segments[b][y] = segment;
 		lv_obj_set_pos(segment, margin + b * cell + 1, rail_y - (y + 1) * step);
 		lv_obj_set_size(segment, cell - 2, step - 1);
-		lv_obj_set_style_bg_color(segment, lv_color_make(192, 192, 204), 0);
+		lv_obj_add_style(segment, &theme_style_accent_bg, 0);
 		lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, 0);
 		lv_obj_set_style_border_width(segment, 0, 0);
 		lv_obj_set_style_radius(segment, 0, 0);

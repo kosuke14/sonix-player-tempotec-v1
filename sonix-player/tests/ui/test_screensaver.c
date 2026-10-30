@@ -968,6 +968,20 @@ int main(int argc, char **argv) {
 	assert(!lv_obj_is_hidden(spectrum));
 	assert(lv_obj_is_hidden(cover_box()));
 	assert(!lv_obj_is_hidden(info_strip()));
+	// All bars and the rail follow both built-in palettes and a chosen accent,
+	// including changes while the screensaver is already visible.
+	for (int kind = 0; kind < THEME_KIND_COUNT; kind++) {
+		theme_set_kind((theme_kind_t)kind);
+		assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, 0), 0), theme()->accent));
+		for (int i = 1; i <= VISUALIZER_BANDS * 24; i++)
+			assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, i), 0), theme()->accent));
+		assert(lv_color_eq(lv_obj_get_style_bg_color(spectrum, 0), lv_color_black()));
+	}
+	theme_set_accent(1);
+	assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, 0), 0), theme()->accent));
+	assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, 1), 0), theme()->accent));
+	theme_set_accent(0);
+	theme_set_kind(THEME_KIND_DARK);
 	int16_t pcm[4096 * 2];
 	for (int i = 0; i < 4096; i++) pcm[2*i] = pcm[2*i+1] = (int16_t)(24000 * sin(2 * 3.14159265 * 850 * i / 44100));
 	int16_t original[4096 * 2];
