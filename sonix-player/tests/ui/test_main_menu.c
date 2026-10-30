@@ -584,8 +584,14 @@ int main(int argc, char **argv) {
 	/* ---- the boot screen, and the page its Custom pill opens ---------------- */
 
 	/* Custom with no picture behind it is a request to go and pick one, not a
-	 * choice: the page opens instead of the marker being written. */
-	lv_obj_t *custom_pill = find_label(appearance_screen, tr("appearance_boot_custom"));
+	 * choice: the page opens instead of the marker being written. The theme
+	 * card above carries a Custom pill of its own, so the search is scoped to
+	 * the boot card -- a bare find_label would hit the theme pill first and
+	 * trip its invalid-custom toast. */
+	lv_obj_t *boot_card =
+		lv_obj_get_parent(find_label(appearance_screen, tr("appearance_boot_screen")));
+	assert(boot_card);
+	lv_obj_t *custom_pill = find_label(boot_card, tr("appearance_boot_custom"));
 	assert(custom_pill);
 	lv_obj_send_event(lv_obj_get_parent(custom_pill), LV_EVENT_CLICKED, NULL);
 	assert(lv_screen_active() == bootpicpage_screen);
