@@ -31,6 +31,9 @@ void screensaver_init(gui_config_t *cfg);
 // Off is the default.
 void screensaver_set_enabled(bool enabled);
 bool screensaver_get_enabled(void);
+// Replace album artwork with a live spectrum; folder pictures are unaffected.
+void screensaver_set_visualizer(bool enabled);
+bool screensaver_get_visualizer(void);
 
 // Where the picture comes from.
 //

@@ -28,6 +28,8 @@
 #include "src/gui/nowplaying/coverloader.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/screensaver.h"
+#include "src/system/audio/visualizer.h"
+#include <math.h>
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/core/config.h"
@@ -317,6 +319,13 @@ static void pump(uint32_t ms) {
 
 // One tick of the screensaver's own once-a-second timer.
 static void tick(void) { pump(1010); }
+
+static int spectrum_bar_height(lv_obj_t *spectrum, int band) {
+    int height = 0;
+    for (int y = 0; y < 24; y++)
+        if (!lv_obj_is_hidden(lv_obj_get_child(spectrum, 1 + band * 24 + y))) height++;
+    return height;
+}
 
 static void hide_now(void) {
 	screensaver_hide();
@@ -949,6 +958,54 @@ int main(int argc, char **argv) {
 	assert(frame_job.requests == requests);
 	hide_now();
 	screensaver_set_source(SCREENSAVER_SOURCE_ALBUM);
+
+	/* Visualizer replaces the album, not the clock, and responds to PCM. */
+	screensaver_set_visualizer(true);
+	assert(config_init(config) && config_get_bool("screen", "screensaver_visualizer", false));
+	go_dark();
+	wake();
+	lv_obj_t *spectrum = lv_obj_get_child(saver_obj(), 3);
+	assert(!lv_obj_is_hidden(spectrum));
+	assert(lv_obj_is_hidden(cover_box()));
+	assert(!lv_obj_is_hidden(info_strip()));
+	// All bars and the rail follow both built-in palettes and a chosen accent,
+	// including changes while the screensaver is already visible.
+	for (int kind = 0; kind < THEME_KIND_COUNT; kind++) {
+		theme_set_kind((theme_kind_t)kind);
+		assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, 0), 0), theme()->accent));
+		for (int i = 1; i <= VISUALIZER_BANDS * 24; i++)
+			assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, i), 0), theme()->accent));
+		assert(lv_color_eq(lv_obj_get_style_bg_color(spectrum, 0), lv_color_black()));
+	}
+	theme_set_accent(1);
+	assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, 0), 0), theme()->accent));
+	assert(lv_color_eq(lv_obj_get_style_bg_color(lv_obj_get_child(spectrum, 1), 0), theme()->accent));
+	theme_set_accent(0);
+	theme_set_kind(THEME_KIND_DARK);
+	int16_t pcm[4096 * 2];
+	for (int i = 0; i < 4096; i++) pcm[2*i] = pcm[2*i+1] = (int16_t)(24000 * sin(2 * 3.14159265 * 850 * i / 44100));
+	int16_t original[4096 * 2];
+	memcpy(original, pcm, sizeof(pcm));
+	visualizer_feed(pcm, 4096, 2, 16, 44100);
+	assert(memcmp(original, pcm, sizeof(pcm)) == 0);
+	uint8_t levels[VISUALIZER_BANDS];
+	visualizer_levels(levels);
+	assert(levels[4] > levels[0]);
+	pump(50);
+	int first_height = spectrum_bar_height(spectrum, 4);
+	assert(first_height > 0 && first_height < 24);
+	pump(100);
+	int rising_height = spectrum_bar_height(spectrum, 4);
+	assert(rising_height > first_height);
+	memset(pcm, 0, sizeof(pcm));
+	visualizer_feed(pcm, 4096, 2, 16, 44100);
+	pump(100);
+	int falling_height = spectrum_bar_height(spectrum, 4);
+	assert(falling_height > 0 && falling_height < rising_height);
+	screensaver_set_visualizer(false);
+	assert(lv_obj_is_hidden(spectrum));
+	assert(!lv_obj_is_hidden(cover_box()));
+	hide_now();
 
 	/* Switched off with the screensaver up: everything goes with it. */
 	go_dark();
