@@ -33,8 +33,10 @@ void visualizer_feed(const void *pcm, int frames, int channels, int bits, int ra
     if (sample_rate != sr) { count = stride_phase = 0; sample_rate = sr; }
     const unsigned char *p = pcm;
     int bytes = bits / 8;
-    for (int i = 0; i < frames; i++) {
-        if (stride_phase++ % stride != 0) continue;
+    // Jump directly between the samples we keep, rather than visiting every
+    // source frame (especially important for high-rate material).
+    int first = stride_phase ? stride - stride_phase : 0;
+    for (int i = first; i < frames; i += stride) {
         float sum = 0;
         for (int c = 0; c < channels; c++) {
             const unsigned char *s = p + ((size_t)i * channels + c) * bytes;
@@ -46,7 +48,7 @@ void visualizer_feed(const void *pcm, int frames, int channels, int bits, int ra
         samples[count++ % WINDOW] = sum / channels;
         if (count >= WINDOW * 2) count -= WINDOW;
     }
-    stride_phase %= stride;
+    stride_phase = (stride_phase + frames % stride) % stride;
     clock_gettime(CLOCK_MONOTONIC, &updated);
     pthread_mutex_unlock(&lock);
 }

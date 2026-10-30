@@ -320,6 +320,13 @@ static void pump(uint32_t ms) {
 // One tick of the screensaver's own once-a-second timer.
 static void tick(void) { pump(1010); }
 
+static int spectrum_bar_height(lv_obj_t *spectrum, int band) {
+    int height = 0;
+    for (int y = 0; y < 24; y++)
+        if (!lv_obj_is_hidden(lv_obj_get_child(spectrum, 1 + band * 24 + y))) height++;
+    return height;
+}
+
 static void hide_now(void) {
 	screensaver_hide();
 	for (int i = 0; i < 100 && screensaver_is_visible(); i++) {
@@ -963,12 +970,24 @@ int main(int argc, char **argv) {
 	assert(!lv_obj_is_hidden(info_strip()));
 	int16_t pcm[4096 * 2];
 	for (int i = 0; i < 4096; i++) pcm[2*i] = pcm[2*i+1] = (int16_t)(24000 * sin(2 * 3.14159265 * 850 * i / 44100));
+	int16_t original[4096 * 2];
+	memcpy(original, pcm, sizeof(pcm));
 	visualizer_feed(pcm, 4096, 2, 16, 44100);
+	assert(memcmp(original, pcm, sizeof(pcm)) == 0);
 	uint8_t levels[VISUALIZER_BANDS];
 	visualizer_levels(levels);
 	assert(levels[4] > levels[0]);
-	pump(150);
-	assert(!lv_obj_is_hidden(lv_obj_get_child(spectrum, 1 + 4 * 24)));
+	pump(50);
+	int first_height = spectrum_bar_height(spectrum, 4);
+	assert(first_height > 0 && first_height < 24);
+	pump(100);
+	int rising_height = spectrum_bar_height(spectrum, 4);
+	assert(rising_height > first_height);
+	memset(pcm, 0, sizeof(pcm));
+	visualizer_feed(pcm, 4096, 2, 16, 44100);
+	pump(100);
+	int falling_height = spectrum_bar_height(spectrum, 4);
+	assert(falling_height > 0 && falling_height < rising_height);
 	screensaver_set_visualizer(false);
 	assert(lv_obj_is_hidden(spectrum));
 	assert(!lv_obj_is_hidden(cover_box()));

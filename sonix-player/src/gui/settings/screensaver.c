@@ -44,6 +44,10 @@ static bool enabled;
 static bool visualizer_selected;
 static lv_obj_t *spectrum, *spectrum_segments[VISUALIZER_BANDS][24];
 static lv_timer_t *spectrum_timer;
+// Fixed-point bar heights, and the last rendered segment count.
+static int spectrum_level[VISUALIZER_BANDS], spectrum_height[VISUALIZER_BANDS];
+static uint8_t spectrum_target[VISUALIZER_BANDS];
+static unsigned spectrum_frame;
 
 static int screen_w, screen_h;
 static int strip_h;
@@ -213,6 +217,7 @@ bool screensaver_is_visible(void) { return saver && !lv_obj_is_hidden(saver); }
 bool screensaver_get_enabled(void) { return enabled; }
 
 static void refresh_content(void);
+static void spectrum_reset(void);
 screensaver_source_t screensaver_source(void) { return source; }
 bool screensaver_get_visualizer(void) { return visualizer_selected; }
 void screensaver_set_visualizer(bool on) {
@@ -221,7 +226,7 @@ void screensaver_set_visualizer(bool on) {
 	config_save();
 	if (screensaver_is_visible()) {
 		visualizer_enable(on && spectrum_now() && power_screen_is_on());
-		if (spectrum_now()) lv_timer_resume(spectrum_timer); else lv_timer_pause(spectrum_timer);
+		if (spectrum_now()) lv_timer_resume(spectrum_timer); else { lv_timer_pause(spectrum_timer); spectrum_reset(); }
 		refresh_content();
 	}
 }
@@ -247,7 +252,7 @@ void screensaver_set_source(screensaver_source_t chosen) {
 	}
 	if (screensaver_is_visible()) {
 		visualizer_enable(spectrum_now() && power_screen_is_on());
-		if (spectrum_now()) lv_timer_resume(spectrum_timer); else lv_timer_pause(spectrum_timer);
+		if (spectrum_now()) lv_timer_resume(spectrum_timer); else { lv_timer_pause(spectrum_timer); spectrum_reset(); }
 		refresh_content();
 	}
 }
@@ -859,6 +864,7 @@ static void finish_hide(void) {
 	lv_timer_pause(clock_timer);
 	lv_timer_pause(spectrum_timer);
 	visualizer_enable(false);
+	spectrum_reset();
 	// Let go of the player's pixels: it frees them at the next track change,
 	// and nothing here may still be pointing at them by then. The picture owned
 	// here goes too -- about a megabyte, and the device is in use again, which
@@ -919,7 +925,7 @@ bool screensaver_prepare(void) {
 	// is waiting. Lighting up is when it is collected and swapped in -- no card,
 	// no decode, nothing between the button and the backlight.
 	bool waking = power_screen_is_on();
-	if (!waking) visualizer_enable(false);
+	if (!waking) { visualizer_enable(false); spectrum_reset(); }
 	else if (spectrum_now()) visualizer_enable(true);
 
 	if (screensaver_is_visible()) {
@@ -1031,17 +1037,37 @@ static void drag_cb(lv_event_t *e) {
 	}
 }
 
-// Eight segmented bars and a baseline, scaled to the area above the clock.
+// The visual shape stays the same: only the heights ease toward the latest
+// measurements. Analyse at 10 Hz and animate at 20 Hz, so the extra frames
+// cost just a few integer operations and only changed segments are invalidated.
 static void spectrum_tick(lv_timer_t *timer) {
     (void)timer;
     if (!screensaver_is_visible() || !spectrum_now() || !power_screen_is_on()) return;
-    uint8_t levels[VISUALIZER_BANDS];
-    visualizer_levels(levels);
+    if ((spectrum_frame++ & 1u) == 0) visualizer_levels(spectrum_target);
     for (int b = 0; b < VISUALIZER_BANDS; b++) {
-        int height = (levels[b] * 24 + 254) / 255;
-        for (int y = 0; y < 24; y++)
-            lv_obj_set_hidden(spectrum_segments[b][y], y >= height);
+        int target = spectrum_target[b] * 24 * 256 / 255;
+        int delta = target - spectrum_level[b];
+        // A quick attack and slower release avoid flicker while still following
+        // the music; round toward the target so the bars eventually settle.
+        int divisor = delta > 0 ? 3 : 6;
+        int step = delta / divisor;
+        if (!step && delta) step = delta > 0 ? 1 : -1;
+        spectrum_level[b] += step;
+        int height = (spectrum_level[b] + 255) / 256;
+        int old = spectrum_height[b];
+        for (int y = old; y < height; y++) lv_obj_set_hidden(spectrum_segments[b][y], false);
+        for (int y = height; y < old; y++) lv_obj_set_hidden(spectrum_segments[b][y], true);
+        spectrum_height[b] = height;
     }
+}
+
+static void spectrum_reset(void) {
+    for (int b = 0; b < VISUALIZER_BANDS; b++) {
+        for (int y = 0; y < spectrum_height[b]; y++) lv_obj_set_hidden(spectrum_segments[b][y], true);
+        spectrum_level[b] = spectrum_height[b] = 0;
+        spectrum_target[b] = 0;
+    }
+    spectrum_frame = 0;
 }
 
 void screensaver_init(gui_config_t *cfg) {
@@ -1236,7 +1262,7 @@ void screensaver_init(gui_config_t *cfg) {
 		lv_obj_set_clickable(segment, false);
 		lv_obj_set_hidden(segment, true);
 	}
-	spectrum_timer = lv_timer_create(spectrum_tick, 100, NULL);
+	spectrum_timer = lv_timer_create(spectrum_tick, 50, NULL);
 	lv_timer_pause(spectrum_timer);
 	power_pause_in_standby(spectrum_timer);
 
