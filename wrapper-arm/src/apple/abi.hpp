@@ -280,6 +280,187 @@ inline constexpr const char* SVFootHillPContext_kdContext =
 inline constexpr const char* SVFootHillPContext_ckc =
     "_ZNK18SVFootHillPContext3ckcEv";
 
+// ---------------------------------------------------------------------------
+// The 3.6.0 auth generation (libstoreservicescore.so / libandroidappmusic.so
+// of Apple Music 3.6.0-beta): the RequestContext/AuthenticateFlow/URLRequest
+// stack the 6.5.3 build only exposes through JNI. Names lifted from the
+// wrapper-v2 table (aarch64 -- unchanged for armv7, the mangling is ABI-
+// independent).
+// ---------------------------------------------------------------------------
+namespace auth36 {
+inline constexpr const char* resolv_set_nameservers_for_net =
+    "_resolv_set_nameservers_for_net";
+inline constexpr const char* FootHillConfig_config =
+    "_ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE";
+inline constexpr const char* DeviceGUID_instance =
+    "_ZN17storeservicescore10DeviceGUID8instanceEv";
+inline constexpr const char* DeviceGUID_configure =
+    "_ZN17storeservicescore10DeviceGUID9configureERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_RKjRKb";
+inline constexpr const char* make_shared_RequestContext =
+    "_ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_";
+inline constexpr const char* vtable_RequestContextConfig =
+    "_ZTVNSt6__ndk120__shared_ptr_emplaceIN17storeservicescore20RequestContextConfigENS_9allocatorIS2_EEEE";
+inline constexpr const char* RequestContextConfig_ctor =
+    "_ZN17storeservicescore20RequestContextConfigC2Ev";
+inline constexpr const char* RCC_setBaseDirectoryPath =
+    "_ZN17storeservicescore20RequestContextConfig20setBaseDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setClientIdentifier =
+    "_ZN17storeservicescore20RequestContextConfig19setClientIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setVersionIdentifier =
+    "_ZN17storeservicescore20RequestContextConfig20setVersionIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setPlatformIdentifier =
+    "_ZN17storeservicescore20RequestContextConfig21setPlatformIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setProductVersion =
+    "_ZN17storeservicescore20RequestContextConfig17setProductVersionERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setDeviceModel =
+    "_ZN17storeservicescore20RequestContextConfig14setDeviceModelERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setBuildVersion =
+    "_ZN17storeservicescore20RequestContextConfig15setBuildVersionERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setLocaleIdentifier =
+    "_ZN17storeservicescore20RequestContextConfig19setLocaleIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RCC_setLanguageIdentifier =
+    "_ZN17storeservicescore20RequestContextConfig21setLanguageIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RequestContextManager_configure =
+    "_ZN21RequestContextManager9configureERKNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEEE";
+inline constexpr const char* RequestContext_init =
+    "_ZN17storeservicescore14RequestContext4initERKNSt6__ndk110shared_ptrINS_20RequestContextConfigEEE";
+inline constexpr const char* RequestContext_setFairPlayDirectoryPath =
+    "_ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* RequestContext_setPresentationInterface =
+    "_ZN17storeservicescore14RequestContext24setPresentationInterfaceERKNSt6__ndk110shared_ptrINS_21PresentationInterfaceEEE";
+inline constexpr const char* make_shared_AndroidPresentationInterface =
+    "_ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_";
+inline constexpr const char* API_setCredentialsHandler =
+    "_ZN20androidstoreservices28AndroidPresentationInterface21setCredentialsHandlerEPFvNSt6__ndk110shared_ptrIN17storeservicescore18CredentialsRequestEEENS2_INS_33AndroidCredentialsResponseHandlerEEEE";
+inline constexpr const char* API_handleCredentialsResponse =
+    "_ZN20androidstoreservices28AndroidPresentationInterface25handleCredentialsResponseERKNSt6__ndk110shared_ptrIN17storeservicescore19CredentialsResponseEEE";
+inline constexpr const char* vtable_CredentialsResponse =
+    "_ZTVNSt6__ndk120__shared_ptr_emplaceIN17storeservicescore19CredentialsResponseENS_9allocatorIS2_EEEE";
+inline constexpr const char* CredentialsResponse_ctor =
+    "_ZN17storeservicescore19CredentialsResponseC1Ev";
+inline constexpr const char* CredentialsResponse_setUserName =
+    "_ZN17storeservicescore19CredentialsResponse11setUserNameERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* CredentialsResponse_setPassword =
+    "_ZN17storeservicescore19CredentialsResponse11setPasswordERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* CredentialsResponse_setResponseType =
+    "_ZN17storeservicescore19CredentialsResponse15setResponseTypeENS0_12ResponseTypeE";
+inline constexpr const char* CR_requiresHSA2VerificationCode =
+    "_ZNK17storeservicescore18CredentialsRequest28requiresHSA2VerificationCodeEv";
+inline constexpr const char* make_shared_AuthenticateFlow =
+    "_ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_";
+inline constexpr const char* AuthenticateFlow_run =
+    "_ZN17storeservicescore16AuthenticateFlow3runEv";
+inline constexpr const char* AuthenticateFlow_response =
+    "_ZNK17storeservicescore16AuthenticateFlow8responseEv";
+inline constexpr const char* AR_responseType =
+    "_ZNK17storeservicescore20AuthenticateResponse12responseTypeEv";
+inline constexpr const char* AR_error =
+    "_ZNK17storeservicescore20AuthenticateResponse5errorEv";
+inline constexpr const char* AR_customerMessage =
+    "_ZNK17storeservicescore20AuthenticateResponse15customerMessageEv";
+inline constexpr const char* SEC_errorCode =
+    "_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv";
+inline constexpr const char* SEC_what =
+    "_ZNK17storeservicescore19StoreErrorCondition4whatEv";
+inline constexpr const char* RequestContext_storeFrontIdentifier =
+    "_ZNK17storeservicescore14RequestContext20storeFrontIdentifierERKNSt6__ndk110shared_ptrINS_6URLBagEEE";
+inline constexpr const char* HTTPMessage_ctor_c1 =
+    "_ZN13mediaplatform11HTTPMessageC1ENSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES7_";
+inline constexpr const char* HTTPMessage_setHeader =
+    "_ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_";
+inline constexpr const char* URLRequest_ctor =
+    "_ZN17storeservicescore10URLRequestC2ERKNSt6__ndk110shared_ptrIN13mediaplatform11HTTPMessageEEERKNS2_INS_14RequestContextEEE";
+inline constexpr const char* URLRequest_run =
+    "_ZN17storeservicescore10URLRequest3runEv";
+inline constexpr const char* URLRequest_error =
+    "_ZNK17storeservicescore10URLRequest5errorEv";
+inline constexpr const char* URLRequest_response =
+    "_ZNK17storeservicescore10URLRequest8responseEv";
+inline constexpr const char* URLRequest_setRequestParameter =
+    "_ZN17storeservicescore10URLRequest19setRequestParameterERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_";
+inline constexpr const char* URLResponse_underlyingResponse =
+    "_ZNK17storeservicescore11URLResponse18underlyingResponseEv";
+inline constexpr const char* URLResponse_protocolDictionary =
+    "_ZN17storeservicescore11URLResponse18protocolDictionaryEv";
+inline constexpr const char* URLRequest_setURLResponsePreprocessor =
+    "_ZN17storeservicescore10URLRequest26setURLResponsePreprocessorERKNSt6__ndk18functionIFvRKNS1_10shared_ptrINS_11URLResponseEEEEEE";
+inline constexpr const char* PurchaseRequest_ctor =
+    "_ZN17storeservicescore15PurchaseRequestC2ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE";
+inline constexpr const char* PurchaseRequest_setBuyParameters =
+    "_ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* PurchaseRequest_setURLBagKey =
+    "_ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
+inline constexpr const char* PurchaseRequest_setProcessDialogActions =
+    "_ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb";
+inline constexpr const char* PurchaseRequest_run =
+    "_ZN17storeservicescore15PurchaseRequest3runEv";
+inline constexpr const char* PurchaseResponse_items =
+    "_ZNK17storeservicescore16PurchaseResponse5itemsEv";
+inline constexpr const char* PurchaseResponse_error =
+    "_ZN17storeservicescore16PurchaseResponse5errorEv";
+inline constexpr const char* PurchaseItem_dictionary =
+    "_ZNK17storeservicescore12PurchaseItem10dictionaryEv";
+inline constexpr const char* SVPlaybackLeaseManager_ctor =
+    "_ZN22SVPlaybackLeaseManagerC2ERKNSt6__ndk18functionIFvRKiEEERKNS1_IFvRKNS0_10shared_ptrIN17storeservicescore19StoreErrorConditionEEEEEE";
+inline constexpr const char* SVPlaybackLeaseManager_refreshLeaseAutomatically =
+    "_ZN22SVPlaybackLeaseManager25refreshLeaseAutomaticallyERKb";
+inline constexpr const char* SVPlaybackLeaseManager_requestLease =
+    "_ZN22SVPlaybackLeaseManager12requestLeaseERKb";
+inline constexpr const char* SVFootHillSessionCtrl_instance =
+    "_ZN21SVFootHillSessionCtrl8instanceEv";
+inline constexpr const char* CFGetTypeID =
+    "CFGetTypeID";
+inline constexpr const char* CFStringGetTypeID =
+    "CFStringGetTypeID";
+inline constexpr const char* CFStringGetCString =
+    "CFStringGetCString";
+inline constexpr const char* CFStringGetLength =
+    "CFStringGetLength";
+inline constexpr const char* CFStringGetCStringPtr =
+    "CFStringGetCStringPtr";
+inline constexpr const char* CFStringGetMaximumSizeForEncoding =
+    "CFStringGetMaximumSizeForEncoding";
+inline constexpr const char* CFArrayGetTypeID =
+    "CFArrayGetTypeID";
+inline constexpr const char* CFArrayGetCount =
+    "CFArrayGetCount";
+inline constexpr const char* CFArrayGetValueAtIndex =
+    "CFArrayGetValueAtIndex";
+inline constexpr const char* CFNumberGetTypeID =
+    "CFNumberGetTypeID";
+inline constexpr const char* CFNumberIsFloatType =
+    "CFNumberIsFloatType";
+inline constexpr const char* CFNumberGetValue =
+    "CFNumberGetValue";
+inline constexpr const char* CFBooleanGetTypeID =
+    "CFBooleanGetTypeID";
+inline constexpr const char* CFBooleanGetValue =
+    "CFBooleanGetValue";
+inline constexpr const char* CFDataGetTypeID =
+    "CFDataGetTypeID";
+inline constexpr const char* CFDataGetBytePtr =
+    "CFDataGetBytePtr";
+inline constexpr const char* CFDataGetLength =
+    "CFDataGetLength";
+inline constexpr const char* CFDateGetTypeID =
+    "CFDateGetTypeID";
+inline constexpr const char* CFDateGetAbsoluteTime =
+    "CFDateGetAbsoluteTime";
+inline constexpr const char* CFDictionaryGetCount =
+    "CFDictionaryGetCount";
+inline constexpr const char* CFDictionaryGetKeysAndValues =
+    "CFDictionaryGetKeysAndValues";
+inline constexpr const char* CFNullGetTypeID =
+    "CFNullGetTypeID";
+inline constexpr const char* CFRetain =
+    "CFRetain";
+inline constexpr const char* CFRelease =
+    "CFRelease";
+inline constexpr const char* CFDataGetBytes =
+    "CFDataGetBytes";
+
+}  // namespace auth36
+
 // The obfuscated sample-decrypt entry (same name in 3.6.0 and 6.5.3).
 inline constexpr const char* fp_sample_decrypt =
     "NfcRKVnxuKZy04KWbdFu71Ou";

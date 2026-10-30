@@ -79,6 +79,8 @@ public:
     const std::string& last_error() const { return last_error_; }
     const Symbols& auth_sym() const { return auth_symbols_; }
     const std::string& auth_last_error() const { return auth_last_error_; }
+    // True once open_auth() has resolved the 3.6.0 surface.
+    bool auth_ready() const { return auth_ready_; }
 
 private:
     void* h_libmediaplatform_ = nullptr;
@@ -89,6 +91,7 @@ private:
     Symbols auth_symbols_;
     std::string auth_last_error_;
     bool ok_{false};
+    bool auth_ready_{false};
     bool decrypt_available_{false};
     std::string last_error_;
 };

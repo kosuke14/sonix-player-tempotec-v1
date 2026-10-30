@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 
+#include "apple/account.hpp"
 #include "apple/decrypt.hpp"
 
 namespace wrapper {
@@ -30,6 +31,10 @@ enum Opcode : std::uint16_t {
     OpGetSPC = 9,     // build the FairPlay SPC request payload
     OpApplyCKC = 10,  // host fetched the CKC; create + cache the context
     OpShutdown = 8,
+    OpLogin = 11,     // Apple ID sign-in (adam-style: user u16-len, pass u16-len)
+    Op2FA = 12,       // submit the six-digit code
+    OpMe = 13,        // account snapshot -> JSON-ish field list
+    OpLogout = 14,
 };
 
 struct Frame {
@@ -144,6 +149,13 @@ Frame response(const Frame& req, bool ok, const std::vector<std::uint8_t>& body)
 Frame error_response(const Frame& req, const std::string& text) {
     std::vector<std::uint8_t> body(text.begin(), text.end());
     return response(req, false, body);
+}
+
+// The auth surface (Apple's 3.6.0 stack) is single-threaded per process;
+// every account op takes this.
+std::mutex& g_auth_mutex() {
+    static std::mutex m;
+    return m;
 }
 
 // Shared request parse: adam_len u16, uri_len u16, [count u32], table,
@@ -308,6 +320,69 @@ Frame handle_decrypt_batch(const Frame& req, apple::Runtime& rt, apple::Loader& 
     return response(req, true, out);
 }
 
+// OpLogin payload: user u16 + pass u16 (big endian lengths).
+Frame handle_login(const Frame& req) {
+    const auto* p = req.payload.data();
+    if (req.payload.size() < 4) {
+        return error_response(req, "invalid_frame");
+    }
+    const std::uint16_t user_len = read_u16_be(p);
+    const std::uint16_t pass_len = read_u16_be(p + 2);
+    if (4u + user_len + pass_len > req.payload.size() || !user_len || !pass_len) {
+        return error_response(req, "invalid_frame");
+    }
+    std::string user(reinterpret_cast<const char*>(p + 4), user_len);
+    std::string pass(reinterpret_cast<const char*>(p + 4 + user_len), pass_len);
+    std::string error;
+    {
+        std::lock_guard<std::mutex> lock(g_auth_mutex());
+        if (!apple::Account::instance().start_login(user, pass)) {
+            return error_response(req, "login_busy");
+        }
+    }
+    return response(req, true, {});
+}
+
+Frame handle_2fa(const Frame& req) {
+    std::string code(reinterpret_cast<const char*>(req.payload.data()), req.payload.size());
+    std::lock_guard<std::mutex> lock(g_auth_mutex());
+    if (!apple::Account::instance().submit_2fa(code)) {
+        return error_response(req, "not_awaiting_2fa");
+    }
+    return response(req, true, {});
+}
+
+Frame handle_me(const Frame& req, apple::Runtime& rt) {
+    (void)rt;
+    // Poll until the flow settles (bounded; the login worker runs at TCG
+    // speed, so the listener polls with its own frame cadence instead).
+    auto& acct = apple::Account::instance();
+    apple::LoginState st = acct.state();
+    if (st == apple::LoginState::InProgress) {
+        return response(req, true, {'p'});  // "poll again"
+    }
+    apple::AccountSnapshot snap = acct.snapshot();
+    std::string body = std::string("state=") + apple::login_state_name(snap.state);
+    body += "\napple_id=" + snap.apple_id;
+    body += "\nstorefront=" + snap.storefront;
+    body += "\ndsid=" + snap.dsid;
+    if (snap.state == apple::LoginState::Authenticated) {
+        body += "\ndev_token=" + snap.dev_token;
+        body += "\nmusic_user_token=" + snap.music_user_token;
+    }
+    if (snap.state == apple::LoginState::Failed) {
+        body += "\nerror=" + snap.last_error;
+        body += "\nerror_code=" + std::to_string(snap.last_error_code);
+    }
+    return response(req, true, std::vector<std::uint8_t>(body.begin(), body.end()));
+}
+
+Frame handle_logout(const Frame& req) {
+    std::lock_guard<std::mutex> lock(g_auth_mutex());
+    apple::Account::instance().logout();
+    return response(req, true, {});
+}
+
 }  // namespace
 
 int run_ipc_worker(apple::Runtime& rt, apple::Loader& loader) {
@@ -334,6 +409,18 @@ int run_ipc_worker(apple::Runtime& rt, apple::Loader& loader) {
                 break;
             case OpApplyCKC:
                 resp = handle_apply_ckc(req, rt, loader);
+                break;
+            case OpLogin:
+                resp = handle_login(req);
+                break;
+            case Op2FA:
+                resp = handle_2fa(req);
+                break;
+            case OpMe:
+                resp = handle_me(req, rt);
+                break;
+            case OpLogout:
+                resp = handle_logout(req);
                 break;
             case OpShutdown:
                 return 0;

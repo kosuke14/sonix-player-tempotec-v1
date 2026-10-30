@@ -117,12 +117,14 @@ void init_self_symbols(void) {
     }
     fclose(f);
     if (((uint32_t *)file)[0] != 0x464c457fu) {
+        fprintf(stderr, "guestelf: self init: not ELF\n");
         free(file);
         return;
     }
     Elf32_Ehdr *eh = (Elf32_Ehdr *)file;
     Elf32_Shdr *shdrs = (Elf32_Shdr *)(file + eh->e_shoff);
     if (eh->e_shoff == 0 || (long)(eh->e_shoff + eh->e_shnum * sizeof(Elf32_Shdr)) > size) {
+        fprintf(stderr, "guestelf: self init: no section headers (stripped?)\n");
         free(file);
         return; // stripped
     }
@@ -148,6 +150,8 @@ void init_self_symbols(void) {
     }
     // Join the daemon's own definitions to the global scope (only functions
     // and data: st_value==0 entries are section placeholders).
+    fprintf(stderr, "guestelf: self init: symtab=%p count=%u\n", (void*)g_self.symtab,
+            g_self.symtab_count);
     if (g_self.symtab && g_self.strtab) {
         for (uint32_t i = 1; i < g_self.symtab_count; i++) {
             Elf32_Sym *sym = &g_self.symtab[i];
@@ -617,15 +621,14 @@ static bool g_tolerant_inits = false;
 static sigjmp_buf g_init_jmp;
 static volatile sig_atomic_t g_init_active = 0;
 
-extern "C" void amp_init_fault_handler(int, siginfo_t *, void *) {
+extern "C" void amp_init_fault_handler(int sig, siginfo_t *, void *) {
     if (g_init_active) {
         g_init_active = 0;
         siglongjmp(g_init_jmp, 1);
     }
     // Not ours: restore the default action and re-raise.
-    std::signal(SIGSEGV, SIG_DFL);
-    std::signal(SIGBUS, SIG_DFL);
-    std::raise(SIGSEGV);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
 }
 
 struct InitGuard {
@@ -639,6 +642,9 @@ struct InitGuard {
         sigemptyset(&sa.sa_mask);
         sigaction(SIGSEGV, &sa, nullptr);
         sigaction(SIGBUS, &sa, nullptr);
+        // The 3.6.0 constructors abort on missing directories (an uncaught
+        // mediaplatform::POSIXException): catch that too.
+        sigaction(SIGABRT, &sa, nullptr);
     }
     static bool begin() {
         if (!g_tolerant_inits) {
@@ -731,6 +737,10 @@ void guest_set_fallback_dir(const char *dir) {
 
 void guest_set_tolerant_inits(bool tolerant) {
     g_tolerant_inits = tolerant;
+}
+
+void guest_preinit(void) {
+    init_self_symbols();
 }
 
 void *guest_dlsym(const char *name) {

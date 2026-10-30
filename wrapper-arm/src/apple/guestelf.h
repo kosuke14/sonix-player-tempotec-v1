@@ -50,6 +50,11 @@ void guest_set_fallback_dir(const char *dir);
 // sets whose inits must be strict.
 void guest_set_tolerant_inits(bool tolerant);
 
+// Capture the daemon's own symbol table NOW: the self-symbol walk reads the
+// auxv tail after environ, and the first setenv() may reallocate that
+// array, orphaning the walk. Call before any setenv().
+void guest_preinit(void);
+
 // True when `name` was already loaded.
 bool guest_is_loaded(const char *soname);
 

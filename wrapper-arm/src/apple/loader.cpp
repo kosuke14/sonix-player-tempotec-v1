@@ -181,13 +181,27 @@ bool Loader::open_auth(const std::string& libs_dir) {
 
     // The 3.6.0 inits touch resources a bare guest lacks; a faulting
     // constructor is skipped rather than fatal.
+    //
+    // MODE SPLIT: the two Apple generations must never be resident together
+    // -- ICU's global registry (and mediaplatform's) is process-wide, and a
+    // second generation's static initializers corrupt it (the two icuuc
+    // sets fought over the singleton map and the process died inside
+    // libstoreapi). The daemon therefore runs EITHER mode:
+    //   ampdaemon [libs]        -> 6.5.3 decrypt generation (open())
+    //   ampdaemon [libs] auth   -> 3.6.0 auth generation (open_auth())
     guest_set_tolerant_inits(true);
-    // The 3.6.0 generation lives in lib36/ (or the dir itself when flat).
+    // The constructors below derive the data root from ANDROID_DATA and
+    // abort on a missing directory: point them at the writable base BEFORE
+    // the first init runs (AuthRuntime would set it too late).
+    {
+        const char* base = getenv("AMP_BASE_DIR");
+        if (!base || !base[0]) base = "/data/data/com.apple.android.music/files";
+        std::string mkdir_cmd = std::string("mkdir -p ") + base + " " + base + "/mpl_db";
+        (void)!system(mkdir_cmd.c_str());
+        setenv("ANDROID_DATA", base, 1);
+        setenv("ANDROID_ROOT", "/system", 1);
+    }
     const std::string auth_dir = gen_dir(libs_dir, "lib36");
-    // guest_load keys by path, so the auth generation's libandroidappmusic.so
-    // coexists with the decrypt generation's file. The decrypt set must be
-    // loaded FIRST (open()) so its symbols win the global scope where the
-    // two generations genuinely overlap.
     char err_buf[256] = "";
     if (!guest_load((auth_dir + "/libandroidappmusic.so").c_str(), err_buf,
                     sizeof(err_buf))) {
@@ -200,41 +214,16 @@ bool Loader::open_auth(const std::string& libs_dir) {
         return false;
     }
 
-    // The auth surface lives in libstoreservicescore (the 3.6.0 build exports
-    // the full RequestContext/AuthenticateFlow/URLRequest stack from it);
-    // resolve through that library by path.
-    Symbols* s = &auth_symbols_;
-    *s = Symbols{};
-    auto resolve = [&](const char* mangled) -> void* {
-        return guest_dlsym_in((auth_dir + "/libstoreservicescore.so").c_str(), mangled);
-    };
-    auto resolve_aam = [&](const char* mangled) -> void* {
-        return guest_dlsym_in((auth_dir + "/libandroidappmusic.so").c_str(), mangled);
-    };
-    int found = 0, total = 0;
-    auto probe = [&](void** slot, const char* mangled) {
-        total++;
-        *slot = resolve(mangled);
-        if (!*slot) {
-            *slot = resolve_aam(mangled);
-        }
-        if (*slot) {
-            found++;
-        } else {
-            std::fprintf(stderr, "auth: unresolved %s\n", mangled);
-        }
-    };
-    // Core bootstrap + auth surface: resolve all and count; the account
-    // module reports what it actually needs missing.
-    probe((void**)&s->SVFootHillSessionCtrl_instance, "SVFootHillSessionCtrl_instance");
-    probe((void**)&s->fp_sample_decrypt, "fp_sample_decrypt");
-
-    std::fprintf(stderr, "auth: %d/%d auth-generation symbols resolved\n", found, total);
+    // The account module resolves what it needs through the per-library
+    // dlsym (AuthRuntime::initialize); the loader only guarantees the sets
+    // are resident and relocated.
     guest_set_tolerant_inits(false);
+    auth_ready_ = true;
     return true;
 }
 
 void Loader::close() {
+    auth_ready_ = false;
     if (h_libandroidappmusic_) {
         dlclose(h_libandroidappmusic_);
         h_libandroidappmusic_ = nullptr;

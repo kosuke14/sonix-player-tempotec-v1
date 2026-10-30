@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <string>
 
+#include "apple/account.hpp"
+#include "apple/guestelf.h"
 #include "apple/loader.hpp"
 #include "apple/runtime.hpp"
 #include "ipc.hpp"
@@ -59,39 +61,43 @@ static void install_fault_handler() {
 int main(int argc, char** argv) {
     setvbuf(stderr, NULL, _IONBF, 0);
     install_fault_handler();
+    wrapper::apple::guest_preinit(); // before any setenv (auxv walk)
     std::string libs_dir = "/system/lib";
     if (argc > 1) {
         libs_dir = argv[1];
     }
 
-    fprintf(stderr, "boot: guest daemon starting\n");
+    const bool auth_mode = argc > 2 && std::strcmp(argv[2], "auth") == 0;
+    fprintf(stderr, "boot: guest daemon starting (%s)\n",
+            auth_mode ? "auth" : "decrypt");
     wrapper::apple::Loader loader;
     if (const char* env = std::getenv("WRAPPER_LIBS_DIR"); env && env[0]) {
         libs_dir = env;
     }
     fprintf(stderr, "boot: opening %s\n", libs_dir.c_str());
-    if (!loader.open(libs_dir)) {
+
+    if (auth_mode) {
+        // Auth mode: the 3.6.0 generation only (see loader.cpp's MODE SPLIT
+        // note). Sign-in, tokens, anisette; no decrypt session.
+        if (loader.open_auth(libs_dir) && auth_bootstrap(loader, libs_dir)) {
+            fprintf(stderr, "boot: auth runtime ready\n");
+        } else {
+            fprintf(stderr, "boot: auth runtime failed (%s)\n",
+                    loader.auth_last_error().c_str());
+        }
+    } else if (!loader.open(libs_dir)) {
         // Stub mode: still serve OpHealth so the listener can report a
         // precise failure instead of seeing a silent death.
         std::fprintf(stderr, "wrapper-arm: libs not loaded (%s)\n",
                      loader.last_error().c_str());
-    }
-
-    fprintf(stderr, "boot: loader.ok=%d\n", loader.ok());
-    if (loader.ok() && std::getenv("AMP_AUTH_PROBE")) {
-        // The 3.6.0 auth generation: load + resolve its surface. The account
-        // module (next milestone) drives sign-in/tokens through these.
-        if (loader.open_auth(libs_dir)) {
-            fprintf(stderr, "boot: auth set loaded\n");
-        } else {
-            fprintf(stderr, "boot: auth set failed: %s\n", loader.auth_last_error().c_str());
-        }
-    }
-    wrapper::apple::Runtime rt;
-    if (loader.ok()) {
+    } else {
+        wrapper::apple::Runtime rt;
         rt.initialize(loader);
+        fprintf(stderr, "boot: entering ipc loop\n");
+        return wrapper::run_ipc_worker(rt, loader);
     }
-    fprintf(stderr, "boot: entering ipc loop\n");
 
-    return wrapper::run_ipc_worker(rt, loader);
+    fprintf(stderr, "boot: entering ipc loop (auth)\n");
+    wrapper::apple::Runtime rt_stub;
+    return wrapper::run_ipc_worker(rt_stub, loader);
 }
