@@ -23,10 +23,11 @@
 #include "src/system/core/lang.h"
 #include "src/system/device/bootlogo.h"
 #include "src/system/device/bootpic.h"
+#include "src/system/device/system.h"
 
 lv_obj_t *appearance_screen;
 
-static lv_obj_t *theme_buttons[THEME_KIND_COUNT];
+static lv_obj_t *theme_buttons[THEME_KIND_CUSTOM + 1];
 static lv_obj_t *btn_boot[5];		 // Stock / Retrospace / Space / Travelling in space / Custom
 static lv_obj_t *boot_picture_value; // the name of the custom picture, on its row
 static lv_obj_t *btn_clock[4]; // left / centre / right / hidden
@@ -206,7 +207,7 @@ static void font_pills_reload_cb(lv_event_t *e) {
 // outlined selected pill that suits their compact V1 appearance card.
 static void refresh_buttons(void) {
 	theme_kind_t active_kind = theme_get_kind();
-	for (int i = 0; i < THEME_KIND_COUNT; i++) {
+	for (int i = 0; i <= THEME_KIND_CUSTOM; i++) {
 		lv_obj_t *button = theme_buttons[i];
 		if (!button) {
 			continue;
@@ -327,6 +328,10 @@ static lv_obj_t *make_clock_choice(lv_obj_t *parent, const char *text, int pos, 
 
 static void theme_pick_cb(lv_event_t *e) {
 	theme_kind_t kind = (theme_kind_t)(intptr_t)lv_event_get_user_data(e);
+	if (kind == THEME_KIND_CUSTOM && !theme_reload_custom()) {
+		toast_error("appearance_custom_invalid");
+		return;
+	}
 	theme_set_kind(kind);
 	refresh_buttons();
 	appearance_preview_refresh();
@@ -397,6 +402,13 @@ static void boot_pick_cb(lv_event_t *e) {
 // The card's fonts are not the only thing that can change under this page:
 // the picture the boot screen was made from can be changed, or its card taken
 // out, while the picker is open. Both are read again on the way in.
+static void custom_card_refresh_cb(lv_event_t *e) {
+	(void)e;
+	// The player may have started without a card and mounted one later.
+	theme_set_card_root(storage_sd_root());
+	theme_reload_custom();
+}
+
 static void boot_card_refresh_cb(lv_event_t *e) {
 	(void)e;
 	refresh_boot_picture();
@@ -639,6 +651,13 @@ void appearance_init(gui_config_t *cfg) {
 	theme_buttons[THEME_KIND_AMBER_ON_BLACK] = make_theme_choice(row,
 		compact ? "appearance_amber_short" : "appearance_amber_on_black", THEME_KIND_AMBER_ON_BLACK, compact);
 	theme_buttons[THEME_KIND_OLED] = make_theme_choice(row, "appearance_oled", THEME_KIND_OLED, compact);
+	theme_buttons[THEME_KIND_CUSTOM] = make_theme_choice(row, "appearance_custom", THEME_KIND_CUSTOM, compact);
+	lv_obj_t *custom_note = lv_label_create(container);
+	lv_label_set_long_mode(custom_note, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(custom_note, lv_pct(100));
+	lv_obj_add_style(custom_note, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(custom_note, &font_ui_22, 0);
+	lv_label_set_text(custom_note, tr("appearance_custom_note"));
 
 	// Compact palette and function-glyph examples for Tokyo Night, Amber on
 	// Black and OLED, immediately after the theme switch. Hidden for Dark/Light
@@ -893,4 +912,5 @@ void appearance_init(gui_config_t *cfg) {
 	// up, and one whose card has been pulled out is gone from the row.
 	lv_obj_add_event_cb(appearance_screen, font_pills_reload_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	lv_obj_add_event_cb(appearance_screen, boot_card_refresh_cb, LV_EVENT_SCREEN_LOADED, NULL);
+	lv_obj_add_event_cb(appearance_screen, custom_card_refresh_cb, LV_EVENT_SCREEN_LOADED, NULL);
 }
