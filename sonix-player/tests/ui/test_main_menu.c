@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "src/gui/board_profile.h"
@@ -43,6 +44,55 @@
 #include "src/system/library/library.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/playback/playlist.h"
+
+static void check_custom_theme(void) {
+	char root[] = "/tmp/sonix-theme-XXXXXX";
+	assert(mkdtemp(root));
+	char dir[256], path[256];
+	snprintf(dir, sizeof(dir), "%s/Themes", root);
+	snprintf(path, sizeof(path), "%s/custom.ini", dir);
+	assert(mkdir(dir, 0700) == 0);
+	theme_set_card_root(root);
+	assert(!theme_reload_custom());
+	theme_set_kind(THEME_KIND_CUSTOM);
+	assert(theme_get_kind() != THEME_KIND_CUSTOM);
+	FILE *f = fopen(path, "w");
+	assert(f);
+	fputs("[theme]\nscreen_bg = #010203\nsurface = #101112\nsurface_pressed = #202122\n"
+		"panel = #303132\ncover_bg = #404142\ntext_primary = #f0f1f2\n"
+		"text_secondary = #a0a1a2\naccent = #123456\n", f);
+	assert(fclose(f) == 0);
+	theme_set_kind(THEME_KIND_CUSTOM);
+	assert(theme_get_kind() == THEME_KIND_CUSTOM);
+	assert(strcmp(config_get("ui", "theme", ""), "custom") == 0);
+	assert(theme()->screen_bg.red == 1 && theme()->screen_bg.green == 2);
+	assert(theme()->accent.blue == 0x56);
+	// A changed file is picked up without restarting the player.
+	f = fopen(path, "w");
+	assert(f);
+	fputs("[theme]\nscreen_bg = #040506\nsurface = #101112\nsurface_pressed = #202122\n"
+		"panel = #303132\ncover_bg = #404142\ntext_primary = #f0f1f2\n"
+		"text_secondary = #a0a1a2\naccent = #123456\n", f);
+	assert(fclose(f) == 0);
+	assert(theme_reload_custom());
+	assert(theme()->screen_bg.red == 4);
+	// Invalid edits must not partially repaint or change the saved choice.
+	f = fopen(path, "w");
+	assert(f);
+	fputs("[theme]\nscreen_bg = #zzzzzz\n", f);
+	assert(fclose(f) == 0);
+	assert(!theme_reload_custom());
+	assert(theme()->screen_bg.red == 4);
+	theme_set_kind(THEME_KIND_DARK);
+	theme_set_kind(THEME_KIND_CUSTOM);
+	assert(theme_get_kind() == THEME_KIND_DARK);
+	assert(unlink(path) == 0);
+	assert(rmdir(dir) == 0);
+	assert(rmdir(root) == 0);
+	theme_set_card_root(NULL);
+}
+
+const char *storage_sd_root(void) { return NULL; }
 
 lv_obj_t *streaming_screen, *wireless_screen;
 lv_obj_t *audiobooks_screen, *morepage_screen, *settings_screen, *player_screen;
@@ -448,6 +498,7 @@ int main(int argc, char **argv) {
 	gui_config_t cfg = {bp_screen_w(), bp_screen_h(), bp_padding(), bp_status_bar_h(), "/tmp"};
 	lv_display_create(cfg.screen_width, cfg.screen_height);
 	theme_init();
+	check_custom_theme();
 	music_screen = lv_obj_create(NULL);
 	streaming_screen = lv_obj_create(NULL);
 	wireless_screen = lv_obj_create(NULL);

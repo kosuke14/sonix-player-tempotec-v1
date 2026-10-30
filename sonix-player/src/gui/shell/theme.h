@@ -14,9 +14,10 @@ typedef enum {
 	THEME_KIND_TOKYO_NIGHT = 2,
 	THEME_KIND_AMBER_ON_BLACK = 3,
 	THEME_KIND_OLED = 4,
+	THEME_KIND_CUSTOM = 5,
 } theme_kind_t;
 
-#define THEME_KIND_COUNT 5
+#define THEME_KIND_COUNT 5 // built-in themes; Custom is a separate SD-card choice
 
 // Fixed semantic accents used by Tokyo Night's function-matched glyphs.
 // Amber on Black and OLED map every icon role to their accent (signal amber,
@@ -115,6 +116,13 @@ void theme_register_refresh(theme_refresh_cb_t cb);
 // them. Call it when the slider is built and from the page's theme-refresh
 // callback -- the colour depends on the theme in force.
 void theme_apply_slider_knob(lv_obj_t *slider);
+
+// A single editable palette at <SD root>/Themes/custom.ini. Set the root
+// before theme_init(); reload on entering Appearance or when selecting Custom.
+// A missing/invalid file never changes the active palette. Custom saved in
+// config falls back to Dark at startup if the card is unavailable.
+void theme_set_card_root(const char *root);
+bool theme_reload_custom(void);
 
 // Builds the shared styles. Call once, before any screen is created.
 void theme_init(void);
