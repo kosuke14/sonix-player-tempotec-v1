@@ -50,8 +50,8 @@ bool ampstream_song_for(const char *path, ampapi_song_t *out);
 // One GUI error, then silence until something new fails.
 bool ampstream_take_error(char *out, size_t size);
 
-// Configuration, read from [applemusic] at open time: the decrypt port and
-// the storefront for the catalog.
-void ampstream_config(int *decrypt_port, char *storefront, size_t store_size);
+// Configuration, read from [applemusic] at open time: the storefront the
+// catalog is read from. The decrypt port is ampmocal's own fixed 10020.
+void ampstream_config(char *storefront, size_t store_size);
 
 #endif // AMPSTREAM_H

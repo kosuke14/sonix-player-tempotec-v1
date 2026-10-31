@@ -839,9 +839,6 @@ bool ampstream_take_error(char *out, size_t size) {
 	return have;
 }
 
-void ampstream_config(int *decrypt_port, char *storefront, size_t store_size) {
-	if (decrypt_port) {
-		*decrypt_port = (int)config_get_int("applemusic", "decrypt_port", 10020);
-	}
+void ampstream_config(char *storefront, size_t store_size) {
 	snprintf(storefront, store_size, "%s", config_get("applemusic", "storefront", "jp"));
 }

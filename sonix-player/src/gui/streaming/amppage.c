@@ -27,7 +27,7 @@
 
 lv_obj_t *amp_screen;
 static lv_obj_t *settings_screen, *edit_screen, *list_screen;
-static lv_obj_t *list_container, *list_title, *port_value, *store_value;
+static lv_obj_t *list_container, *list_title, *store_value;
 static lv_obj_t *account_value, *user_value, *pass_value;
 static lv_obj_t *edit_field, *edit_title;
 static keyboard_t *keyboard;
@@ -255,14 +255,12 @@ static void page_left_cb(lv_event_t *e) {
 
 static char draft_store[32];
 static char draft_user[128], draft_pass[128]; // this session only; never written to the card
-static int draft_port;
 
 static void draft_load(void) {
-	ampstream_config(&draft_port, draft_store, sizeof(draft_store));
+	ampstream_config(draft_store, sizeof(draft_store));
 }
 
 static void draft_save(void) {
-	config_set_int("applemusic", "decrypt_port", draft_port);
 	config_set("applemusic", "storefront", draft_store);
 }
 
@@ -273,9 +271,6 @@ static bool configured(void) {
 }
 
 static void settings_refresh(void) {
-	char port[16];
-	snprintf(port, sizeof(port), "%d", draft_port);
-	lv_label_set_text(port_value, port);
 	lv_label_set_text(store_value, draft_store[0] ? draft_store : tr("amp_not_set"));
 	// The account row mirrors the daemon's session as the last job saw it;
 	// the password is shown as a marker only, since it is never stored.
@@ -308,12 +303,10 @@ static void edit_cb(lv_event_t *e) {
 	}
 	searching = false;
 	editing = (int)(intptr_t)lv_event_get_user_data(e);
-	static const char *keys[] = {"amp_decrypt_port", "amp_storefront", "amp_username",
-								 "password"};
+	static const char *keys[] = {"amp_storefront", "amp_username", "password"};
 	lv_label_set_text(edit_title, tr(keys[editing]));
-	const char *text = editing == 0	 ? ""
-					   : editing == 1 ? draft_store
-					   : editing == 2 ? draft_user
+	const char *text = editing == 0 ? draft_store
+					   : editing == 1 ? draft_user
 									  : draft_pass;
 	lv_textarea_set_accepted_chars(edit_field, NULL);
 	lv_textarea_set_max_length(edit_field, 127);
@@ -321,7 +314,7 @@ static void edit_cb(lv_event_t *e) {
 	// Readable, like the subsonic page's, so a mistyped password is seen
 	// before it is sent.
 	lv_textarea_set_password_mode(edit_field, false);
-	lv_textarea_set_placeholder_text(edit_field, editing == 1 ? "10020" : tr(keys[editing]));
+	lv_textarea_set_placeholder_text(edit_field, tr(keys[editing]));
 	keyboard_reset(keyboard);
 	keyboard_set_visible(keyboard, true);
 	switch_screen(edit_screen);
@@ -357,14 +350,6 @@ static void accept_cb(lv_event_t *e) {
 		return;
 	}
 	if (editing == 0) {
-		char *end = NULL;
-		long port = strtol(value, &end, 10);
-		if (!value[0] || (end && *end) || port < 1 || port > 65535) {
-			toast_error("amp_bad_port");
-			return;
-		}
-		draft_port = (int)port;
-	} else if (editing == 1) {
 		// The storefront is tiny ("jp", "us"): refuse overlong values rather
 		// than truncate them into a different store.
 		if (strlen(value) >= sizeof(draft_store)) {
@@ -372,7 +357,7 @@ static void accept_cb(lv_event_t *e) {
 			return;
 		}
 		snprintf(draft_store, sizeof(draft_store), "%s", value);
-	} else if (editing == 2) {
+	} else if (editing == 1) {
 		snprintf(draft_user, sizeof(draft_user), "%s", value);
 	} else {
 		snprintf(draft_pass, sizeof(draft_pass), "%s", value);
@@ -616,19 +601,18 @@ void amppage_init(gui_config_t *cfg) {
 	settingsrow_add_icon(row, &icon_search, THEME_SEMANTIC_GREEN);
 	player_sheet_attach_drag(home, true);
 
-	// The settings page: the decrypt port, the storefront the catalog is
-	// read from, and the account signed in here.
+	// The settings page: the storefront the catalog is read from, and the
+	// account signed in here. The decrypt port stays at its fixed 10020 --
+	// ampmocal owns it and the guest tree brings the daemon up on it.
 	settings_screen = screen();
 	lv_obj_t *container = settingsrow_page(settings_screen, cfg, "amp_wrapper_settings");
-	row = settingsrow_add(container, "amp_decrypt_port", &port_value, edit_cb, (void *)(intptr_t)0);
-	settingsrow_add_icon(row, &icon_music_settings, THEME_SEMANTIC_PURPLE);
-	row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)1);
+	row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)0);
 	settingsrow_add_icon(row, &icon_music_note, THEME_SEMANTIC_CYAN);
 	row = settingsrow_add(container, "amp_account", &account_value, NULL, NULL);
 	settingsrow_add_icon(row, &icon_artist, THEME_SEMANTIC_GREEN);
-	row = settingsrow_add(container, "amp_username", &user_value, edit_cb, (void *)(intptr_t)2);
+	row = settingsrow_add(container, "amp_username", &user_value, edit_cb, (void *)(intptr_t)1);
 	settingsrow_add_icon(row, &icon_artist, THEME_SEMANTIC_BLUE);
-	row = settingsrow_add(container, "amp_password", &pass_value, edit_cb, (void *)(intptr_t)3);
+	row = settingsrow_add(container, "amp_password", &pass_value, edit_cb, (void *)(intptr_t)2);
 	settingsrow_add_icon(row, &icon_eye, THEME_SEMANTIC_PURPLE);
 	row = settingsrow_action(container, "amp_sign_in", login_cb, NULL);
 	settingsrow_add_icon(row, &icon_check, THEME_SEMANTIC_GREEN);
