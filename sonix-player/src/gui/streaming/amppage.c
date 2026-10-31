@@ -141,6 +141,9 @@ static void *worker_main(void *arg) {
 						result->count = -1;
 						snprintf(result->error, sizeof(result->error), "amp_not_authenticated");
 					} else if (job.kind == JOB_ALBUM) {
+						char storefront[32];
+						snprintf(storefront, sizeof(storefront), "%.20s",
+								 config_get("applemusic", "storefront", ampapi_default_storefront()));
 						result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
 						result->count =
 							result->songs
