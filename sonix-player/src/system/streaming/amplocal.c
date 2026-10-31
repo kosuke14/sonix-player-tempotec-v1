@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -49,6 +50,7 @@ typedef struct {
 	pid_t pid;
 	bool ok; // OpHealth passed after last spawn
 	long used_ms;
+	int log_fd; // the guest's stderr + death notes, -1 when not spawned
 } amp_channel_t;
 
 typedef struct {
@@ -66,7 +68,9 @@ typedef struct {
 } amp_local_state_t;
 
 static amp_local_state_t s_local = {
-	.listen_fd = -1, .dec = {-1, -1, -1, false, 0}, .auth = {-1, -1, -1, false, 0}};
+	.listen_fd = -1,
+	.dec = {-1, -1, -1, false, 0, -1},
+	.auth = {-1, -1, -1, false, 0, -1}};
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -115,6 +119,40 @@ static bool write_exact_fd(int fd, const void *buf, size_t len) {
 	return true;
 }
 
+// One line into the guest's log, from the player side: spawn decisions and
+// death notices share the file the daemon's stderr already writes.
+static void guest_logf(amp_channel_t *ch, const char *fmt, ...) {
+	if (ch->log_fd < 0) {
+		return;
+	}
+	va_list ap;
+	va_start(ap, fmt);
+	char line[200];
+	int n = vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	if (n > 0) {
+		if (write(ch->log_fd, line, (size_t)n) < 0) {
+			// the log is best effort; a full card must not fail the round trip
+		}
+	}
+}
+
+// The child's exit status, if it has exited; logs and returns the raw status.
+static int guest_reap_if_dead(amp_channel_t *ch) {
+	int status = -1;
+	if (ch->pid > 0 && waitpid(ch->pid, &status, WNOHANG) == ch->pid) {
+		guest_logf(ch, "player: guest pid %d exited status=0x%x\n", (int)ch->pid, status);
+		ch->pid = -1;
+		ch->ok = false;
+		close(ch->stdin_fd);
+		close(ch->stdout_fd);
+		ch->stdin_fd = -1;
+		ch->stdout_fd = -1;
+		return status;
+	}
+	return -1;
+}
+
 // A guest daemon's one-second watchdog keeps a dead guest from wedging a
 // round trip: polls instead of blocking forever.
 static bool wait_readable(amp_channel_t *ch, int timeout_ms) {
@@ -127,7 +165,7 @@ static bool wait_readable(amp_channel_t *ch, int timeout_ms) {
 		if (r < 0 && errno != EINTR) {
 			return false;
 		}
-		if (waitpid(ch->pid, NULL, WNOHANG) != 0) {
+		if (guest_reap_if_dead(ch) >= 0) {
 			return false; // died while we waited
 		}
 	}
@@ -145,8 +183,11 @@ static void channel_kill_locked(amp_channel_t *ch) {
 		close(ch->stdin_fd);
 		close(ch->stdout_fd);
 		kill(ch->pid, SIGTERM);
+		int status = 0;
 		for (int i = 0; i < 10; i++) {
-			if (waitpid(ch->pid, NULL, WNOHANG) != 0) {
+			if (waitpid(ch->pid, &status, WNOHANG) != 0) {
+				guest_logf(ch, "player: killed guest pid %d status=0x%x\n", (int)ch->pid,
+						   status);
 				break;
 			}
 			struct timespec t = {.tv_sec = 0, .tv_nsec = 50 * 1000 * 1000};
@@ -159,6 +200,10 @@ static void channel_kill_locked(amp_channel_t *ch) {
 	ch->stdin_fd = -1;
 	ch->stdout_fd = -1;
 	ch->ok = false;
+	if (ch->log_fd >= 0) {
+		close(ch->log_fd);
+		ch->log_fd = -1;
+	}
 }
 
 // Spawns qemu-arm with stdio pipes. The guest tree layout under guest_root:
@@ -196,8 +241,40 @@ static bool daemon_spawn_locked(amp_channel_t *ch, bool auth_mode) {
 	char qemu_path[400];
 	snprintf(qemu_path, sizeof(qemu_path), "%.280s/qemu-arm", s_local.guest_root);
 
+	// The guest's stderr is the only window into a guest that died on the
+	// device (no console there): qemu's own boot log, the daemon's voice and
+	// our death notes all land in data/guest-<mode>.log, truncated per spawn
+	// so the file always describes the most recent attempt.
+	char log_path[420];
+	snprintf(log_path, sizeof(log_path), "%.280s/data/guest-%s.log", s_local.guest_root,
+			 auth_mode ? "auth" : "decrypt");
+	int log_fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	// Read before fork: config takes a lock the child must never touch.
+	int debug = (int)config_get_int("applemusic", "translate_debug", 1);
+	if (log_fd >= 0) {
+		char stamp[20];
+		time_t now = time(NULL);
+		strftime(stamp, sizeof(stamp), "%H:%M:%S", localtime(&now));
+		long avail_kb = 0;
+		FILE *mem = fopen("/proc/meminfo", "r");
+		if (mem) {
+			char line[100];
+			while (fgets(line, sizeof(line), mem)) {
+				if (sscanf(line, "MemAvailable: %ld kB", &avail_kb) == 1) {
+					break;
+				}
+			}
+			fclose(mem);
+		}
+		dprintf(log_fd, "spawn %s %s daemon=%s mem_avail=%ldkB debug=%d\n", stamp,
+				auth_mode ? "auth" : "decrypt", daemon_path, avail_kb, debug);
+	}
+
 	pid_t pid = fork();
 	if (pid < 0) {
+		if (log_fd >= 0) {
+			close(log_fd);
+		}
 		close(in_pipe[0]);
 		close(in_pipe[1]);
 		close(out_pipe[0]);
@@ -216,11 +293,15 @@ static bool daemon_spawn_locked(amp_channel_t *ch, bool auth_mode) {
 		}
 		dup2(in_pipe[0], STDIN_FILENO);
 		dup2(out_pipe[1], STDOUT_FILENO);
-		int devnull = open("/dev/null", O_WRONLY);
-		if (devnull >= 0) {
-			dup2(devnull, STDERR_FILENO);
-			if (devnull > 2) {
-				close(devnull);
+		if (log_fd >= 0) {
+			dup2(log_fd, STDERR_FILENO);
+		} else {
+			int devnull = open("/dev/null", O_WRONLY);
+			if (devnull >= 0) {
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > 2) {
+					close(devnull);
+				}
 			}
 		}
 		// All guest-side paths are host paths: qemu-user passes syscalls
@@ -231,19 +312,45 @@ static bool daemon_spawn_locked(amp_channel_t *ch, bool auth_mode) {
 		setenv("AMP_BASE_DIR", base, 1);
 		setenv("ANDROID_DATA", base, 1);
 		setenv("ANDROID_ROOT", "/system", 1);
+		// The mipsel host has 2 GiB of user space and the ARM commpage lives
+		// at guest 0xffff0000: left to its own devices qemu maps it identity
+		// and dies with "Allocating guest commpage: Cannot allocate memory"
+		// before the daemon says a word. -B shifts the guest window so the
+		// commpage wraps into free host space at 0x9ff0000 while every guest
+		// mapping stays under the 2 GiB line -- which the decrypt loader
+		// makes tight: it places its libraries from guest 0x70000000, so the
+		// base must stay under ~0x0be00000 for the top to fit, and above
+		// qemu's own image and heap so nothing of ours is under it.
 		if (auth_mode) {
 			setenv("AMP_DYN_LINKER", "1", 1);
 			setenv("LD_LIBRARY_PATH", "/system/lib36:/system/lib", 1);
-			execl(qemu_path, "qemu-arm", "-L", s_local.guest_root, daemon_path, libs_arg,
-				  "auth", (char *)NULL);
+			dprintf(STDERR_FILENO, "env: LD_LIBRARY_PATH=%s AMP_DYN_LINKER=1\n",
+					getenv("LD_LIBRARY_PATH"));
+			if (debug) {
+				execl(qemu_path, "qemu-arm", "-B", "0x0a000000", "-L", s_local.guest_root,
+					  "-strace", "-d", "page", daemon_path, libs_arg, "auth", (char *)NULL);
+			} else {
+				execl(qemu_path, "qemu-arm", "-B", "0x0a000000", "-L", s_local.guest_root,
+					  daemon_path, libs_arg, "auth", (char *)NULL);
+			}
 		} else {
 			setenv("AMP_GUEST_LOADER", "1", 1);
 			char sys_arg[400];
 			snprintf(sys_arg, sizeof(sys_arg), "%.280s/system", s_local.guest_root);
-			execl(qemu_path, "qemu-arm", "-L", s_local.guest_root, daemon_path, sys_arg,
-				  (char *)NULL);
+			dprintf(STDERR_FILENO, "env: AMP_GUEST_LOADER=1\n");
+			if (debug) {
+				execl(qemu_path, "qemu-arm", "-B", "0x0a000000", "-L", s_local.guest_root,
+					  "-strace", "-d", "page", daemon_path, sys_arg, (char *)NULL);
+			} else {
+				execl(qemu_path, "qemu-arm", "-B", "0x0a000000", "-L", s_local.guest_root,
+					  daemon_path, sys_arg, (char *)NULL);
+			}
 		}
+		dprintf(STDERR_FILENO, "exec %s failed: %s\n", qemu_path, strerror(errno));
 		_exit(127);
+	}
+	if (log_fd >= 0) {
+		ch->log_fd = log_fd;
 	}
 	close(in_pipe[0]);
 	close(out_pipe[1]);
@@ -285,10 +392,13 @@ static bool daemon_round_trip(amp_channel_t *ch, int opcode, const uint8_t *payl
 
 	if (!write_exact_fd(ch->stdin_fd, head, sizeof(head)) ||
 		(len && !write_exact_fd(ch->stdin_fd, payload, len))) {
+		guest_logf(ch, "player: op %d write failed errno=%d\n", opcode, errno);
+		guest_reap_if_dead(ch);
 		snprintf(error, error_size, "amp_guest_write_failed");
 		return false;
 	}
 	if (!wait_readable(ch, timeout_ms)) {
+		guest_logf(ch, "player: op %d no response\n", opcode);
 		snprintf(error, error_size, "amp_guest_no_response");
 		return false;
 	}
