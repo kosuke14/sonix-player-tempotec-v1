@@ -45,7 +45,6 @@ cd "$BUILD"
     --disable-qed \
     --disable-vvfat \
     --disable-vdi \
-    --disable-vpc \
     --disable-qom-cast-debug \
     --target-list=arm-linux-user \
     --cross-prefix="$TOOLCHAIN/mipsel-rockbox-linux-gnu-" \
