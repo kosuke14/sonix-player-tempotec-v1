@@ -42,6 +42,12 @@ sanitize:
 sanitize-ampstream:
 	$(MAKE) BUILD=.build/sanitize-ampstream CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' ampstream
 
+# The same for the guest-tree fetcher: the inflate window and the tar walk
+# move every byte of a 180 MB tree, which is exactly where a slip hides.
+.PHONY: sanitize-ampguest
+sanitize-ampguest:
+	$(MAKE) BUILD=.build/sanitize-ampguest CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' ampguest
+
 # The battery guard: when the player warns at five percent, when it switches
 # itself off at one, and which readings leave standby alone. The rule is its own
 # small module with no LVGL, no sysfs and no clock, which is exactly what makes
@@ -73,7 +79,7 @@ $(BUILD)/test_screensaverpics: $(PICS_SRC) $(ROOT)/src/system/device/screensaver
 # the boot script can draw. The pictures are written here with the player's own
 # encoder and the copy is checked by decoding it back. Plain C, no LVGL.
 BOOTPIC_SRC = test_bootpic.c $(ROOT)/src/system/device/bootpic.c \
-              $(ROOT)/src/system/image/jpeg_scaled.c $(ROOT)/src/system/image/png_scaled.c \
+              $(ROOT)/src/system/image/jpeg_scaled.c $(ROOT)/src/system/image/png_scaled.c $(ROOT)/src/system/image/tinfl.c \
               $(ROOT)/src/system/image/stb_image_impl.c $(ROOT)/src/system/library/jpeginfo.c
 .PHONY: bootpic
 bootpic: $(BUILD)/test_bootpic
@@ -154,6 +160,24 @@ $(BUILD)/test_ampstream: $(AMPS_SRC) $(ROOT)/src/system/streaming/ampstream.h \
                          $(ROOT)/src/system/streaming/ampfp4.h $(ROOT)/src/system/streaming/amphls.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(AMPS_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The guest-tree fetcher: the space check, the sha256 gate, the gzip inflate
+# and the tar walk, against a fixture archive and a card in /tmp. The pinned
+# URL and hash are compiled over with the fixture's own, so the module is the
+# stock one and only its constants move.
+AG_SRC = test_ampguest.c $(ROOT)/src/system/streaming/ampguest.c \
+         $(ROOT)/src/system/core/sha256.c $(ROOT)/src/system/image/tinfl.c
+.PHONY: ampguest
+ampguest: $(BUILD)/test_ampguest
+	$(BUILD)/test_ampguest
+
+$(BUILD)/test_ampguest: $(AG_SRC) $(ROOT)/src/system/streaming/ampguest.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) \
+		-DAMPGUEST_URL='"fixture://ampguest.tar.gz"' \
+		-DAMPGUEST_SHA256='"588a6cf87db24f5e8c8e45e70d117287e5e49051b6e7702c42a105b35efaf783"' \
+		-DAMPGUEST_ARCHIVE_BYTES=245ULL -DAMPGUEST_UNPACKED_BYTES=8192ULL \
+		-o $@ $(AG_SRC) $(LDFLAGS) $(LDLIBS)
 
 # The Calculator page's arithmetic and the notes folder's rules: the two new
 # pages' plain-C halves, with no LVGL and no screen. The calculator model and
@@ -260,7 +284,7 @@ TAGS_SRC = test_tags.c \
            $(ROOT)/src/system/library/vorbischap.c \
            $(ROOT)/src/system/library/tagdate.c \
            $(ROOT)/src/system/library/cue.c \
-           $(ROOT)/src/system/image/png_scaled.c \
+           $(ROOT)/src/system/image/png_scaled.c $(ROOT)/src/system/image/tinfl.c \
            $(ROOT)/src/system/core/config.c \
            $(ROOT)/src/system/core/utils.c
 .PHONY: tags
@@ -285,6 +309,7 @@ COVERS_SRC = test_covers.c \
              $(ROOT)/src/system/image/art_shrink.c \
              $(ROOT)/src/system/image/jpeg_scaled.c \
              $(ROOT)/src/system/image/png_scaled.c \
+             $(ROOT)/src/system/image/tinfl.c \
              $(ROOT)/src/system/image/stb_image_impl.c \
              $(ROOT)/src/system/core/utils.c
 .PHONY: covers

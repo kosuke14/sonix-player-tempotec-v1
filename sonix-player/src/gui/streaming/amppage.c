@@ -15,6 +15,7 @@
 #include "src/system/playback/device_state.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/ampapi.h"
+#include "src/system/streaming/ampguest.h"
 #include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/amplocal.h"
 #include "src/system/streaming/streamturn.h"
@@ -28,7 +29,7 @@
 lv_obj_t *amp_screen;
 static lv_obj_t *settings_screen, *edit_screen, *list_screen;
 static lv_obj_t *list_container, *list_title, *store_value;
-static lv_obj_t *account_value, *user_value, *pass_value;
+static lv_obj_t *account_value, *user_value, *pass_value, *guest_value;
 static lv_obj_t *edit_field, *edit_title;
 static keyboard_t *keyboard;
 static gui_config_t *config;
@@ -272,6 +273,14 @@ static bool configured(void) {
 
 static void settings_refresh(void) {
 	lv_label_set_text(store_value, draft_store[0] ? draft_store : tr("amp_not_set"));
+	// The guest-tree row: what the card carries right now, or the fetch in
+	// progress.
+	if (ampguest_busy()) {
+		lv_label_set_text(guest_value, tr("amp_guest_running"));
+	} else {
+		lv_label_set_text(guest_value, tr(ampguest_present() ? "amp_guest_installed"
+															 : "amp_not_set"));
+	}
 	// The account row mirrors the daemon's session as the last job saw it;
 	// the password is shown as a marker only, since it is never stored.
 	if (session_signed_in && session_apple_id[0]) {
@@ -374,6 +383,21 @@ static void edit_left_cb(lv_event_t *e) {
 // ---------------------------------------------------------------------------
 // the settings page: connect saves the draft, the sign-in rows drive the flow
 // ---------------------------------------------------------------------------
+
+// The guest tree, fetched by the player itself: the space check, the download
+// and the unpack all happen on the fetcher's own thread; the poll below
+// mirrors the progress into the row and toasts the outcome.
+static void guest_download_cb(lv_event_t *e) {
+	(void)e;
+	if (busy || switcher_back_drag_active()) {
+		return;
+	}
+	if (ampguest_busy()) {
+		return; // already running; the row shows the progress
+	}
+	ampguest_fetch_start();
+	settings_refresh();
+}
 
 static void test_cb(lv_event_t *e) {
 	(void)e;
@@ -614,6 +638,8 @@ void amppage_init(gui_config_t *cfg) {
 	settingsrow_add_icon(row, &icon_artist, THEME_SEMANTIC_BLUE);
 	row = settingsrow_add(container, "amp_password", &pass_value, edit_cb, (void *)(intptr_t)2);
 	settingsrow_add_icon(row, &icon_eye, THEME_SEMANTIC_PURPLE);
+	row = settingsrow_add(container, "amp_guest_download", &guest_value, guest_download_cb, NULL);
+	settingsrow_add_icon(row, &icon_import, THEME_SEMANTIC_GREEN);
 	row = settingsrow_action(container, "amp_sign_in", login_cb, NULL);
 	settingsrow_add_icon(row, &icon_check, THEME_SEMANTIC_GREEN);
 	row = settingsrow_action(container, "amp_sign_out", logout_cb, NULL);
@@ -711,6 +737,32 @@ static void poll_cb(lv_timer_t *timer) {
 	char error[192];
 	if (ampstream_take_error(error, sizeof(error))) {
 		toast_error(error);
+	}
+	// The guest-tree fetch reports through the same one-news-take pattern the
+	// producer uses; the row follows it either way.
+	char guest_error[64];
+	if (ampguest_take_result(guest_error, sizeof(guest_error))) {
+		toast_busy_end();
+		if (guest_error[0]) {
+			toast_error(guest_error);
+		} else {
+			toast_success("amp_guest_ready");
+		}
+	}
+	if (guest_value && lv_screen_active() == settings_screen) {
+		if (ampguest_busy()) {
+			int percent = ampguest_progress();
+			char line[16];
+			if (percent >= 0) {
+				snprintf(line, sizeof(line), "%d%%", percent);
+			} else {
+				snprintf(line, sizeof(line), "%s", tr("amp_guest_running"));
+			}
+			lv_label_set_text(guest_value, line);
+		} else {
+			lv_label_set_text(guest_value,
+							  tr(ampguest_present() ? "amp_guest_installed" : "amp_not_set"));
+		}
 	}
 	if (audio_get_status() == AUDIO_STATUS_PLAYING) {
 		char current[512], next[512];

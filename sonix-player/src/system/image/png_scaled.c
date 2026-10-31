@@ -4,9 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-// miniz's streaming inflate, compiled into this translation unit. Nothing
-// else links it, so there are no symbol clashes to manage.
-#include "miniz/tinfl_impl.inc"
+// miniz's streaming inflate lives in tinfl.c; the declarations come from
+// miniz_tinfl.h.
+#include "miniz/miniz_tinfl.h"
 
 // ---------------------------------------------------------------------------
 // PNG plumbing
@@ -285,7 +285,7 @@ uint8_t *png_scaled_decode(const uint8_t *data, size_t size, int min_box, int *o
 	s.acc = calloc((size_t)s.out_w * 3, sizeof(uint32_t));
 	s.out = malloc((size_t)s.out_w * s.out_h * 3);
 
-	tinfl_decompressor *inflator = malloc(sizeof(tinfl_decompressor));
+	tinfl_decompressor *inflator = tinfl_decompressor_alloc();
 	uint8_t *window = malloc(TINFL_LZ_DICT_SIZE); // 32 KB inflate window
 
 	bool ok = s.row && s.prev_row && s.acc && s.out && inflator && window;
@@ -399,7 +399,7 @@ uint8_t *png_scaled_decode(const uint8_t *data, size_t size, int min_box, int *o
 	}
 
 	free(window);
-	free(inflator);
+	tinfl_decompressor_free(inflator);
 	free(s.acc);
 	free(s.prev_row);
 	free(s.row);
