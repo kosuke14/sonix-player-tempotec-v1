@@ -4,6 +4,14 @@ This repository is a community port of the original **[Sonix Player](https://git
 
 The firmware builder starts with an official V1 update package, replaces the stock music player and its interface with Sonix, then repackages the update as `v1.upt`.
 
+**Settings → System → About → TempoTec base version** shows the official
+firmware release the image is based on: the bundled V1 1.3 archive is labelled
+`1.3` by its SHA-256 during packaging (that package's own product metadata
+still reads `1.2`), and any other stock image reports the version from its
+product configuration. No date or time is shown. This is separate from the
+Sonix build number; unknown images or missing metadata show a dash.
+
+
 This is not an official TempoTec or HiBy release. **The port has been tested on physical TempoTec Variations V1 hardware and works perfectly on the tested device.** It targets the **TempoTec Variations V1 only**; compatibility with the V1-A or other players in the Variations family is not established.
 
 
@@ -239,6 +247,8 @@ Only attempt this on a TempoTec Variations V1. Read the warning above before pro
 2. Extract the workflow artifact — its name ends in the commit it was built from, and `BUILD-REPORT.txt` inside repeats it — and copy **both** `v1.upt` and `v1_md5.txt` to the root of a microSD card supported by the device. On a release, the uploaded `v1.upt` is always built from that release's own tag; if `BUILD-REPORT.txt` names another commit, the artifact is not the release's and should not be flashed as it.
 3. Charge the player adequately, insert the card and start the device's built-in firmware update process. Menu names vary by stock firmware version; follow the device's on-screen instructions and do not interrupt the update.
 4. If you want to restore stock firmware, put the original vendor `v1.upt` and its matching checksum file at the card root and use the same update process.
+
+The build workflow defaults to the supplied V1 1.3 stock archive; an optional workflow URL selects a different stock image. See [stock firmware input](sonix-packer/firmware-input/README.md) for local preparation. The 1.3 archive has been inspected, but a Sonix image based on it has not been verified on hardware.
 
 The package builder is designed to preserve the stock `xImage` kernel and leave the existing update/recovery path in place. This is checked during the build, but it is **not** a guarantee that recovery will work on every device or in every failure case.
 
