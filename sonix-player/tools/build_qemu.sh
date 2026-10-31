@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the statically linked qemu user-mode emulator for the V1's mipsel
-# host, guest = i386 (the Android x86 32-bit ABI the FairPlay libs ship in).
+# host, guest = arm (the Android armeabi-v7a ABI both Apple Music
+# generations ship in -- 3.6.0 for the auth set, 6.5.3 for the decrypt set).
 #
 # QEMU 7.2 is pinned deliberately: it is the last series with the tcg/mips
 # host backend (removed in 8.0), and 32-bit guest on 32-bit host is the only
@@ -8,7 +9,7 @@
 #
 #   tools/build_qemu.sh <qemu-7.2-source-dir>
 #
-# Output: build/ampguest/qemu-i386 (static, for /mnt/sd_0/.ampguest/)
+# Output: build/ampguest/qemu-arm (static, for /mnt/sd_0/.ampguest/)
 set -e
 QEMU_SRC="$1"
 if [ ! -f "$QEMU_SRC/configure" ]; then
@@ -46,14 +47,14 @@ cd "$BUILD"
     --disable-vdi \
     --disable-vpc \
     --disable-qom-cast-debug \
-    --target-list=i386-linux-user \
+    --target-list=arm-linux-user \
     --cross-prefix="$TOOLCHAIN/mipsel-rockbox-linux-gnu-" \
     --extra-cflags="-O2 -ffunction-sections -fdata-sections" \
     --extra-ldflags="-Wl,--gc-sections"
 
-make -j"$(nproc)" qemu-i386
-i386size=$(stat -c%s i386-linux-user/qemu-i386)
-echo "qemu-i386: $i386size bytes"
+make -j"$(nproc)" qemu-arm
+armsize=$(stat -c%s arm-linux-user/qemu-arm)
+echo "qemu-arm: $armsize bytes"
 mkdir -p "$HERE/build/ampguest"
-cp i386-linux-user/qemu-i386 "$HERE/build/ampguest/qemu-i386"
-echo "placed: $HERE/build/ampguest/qemu-i386"
+cp arm-linux-user/qemu-arm "$HERE/build/ampguest/qemu-arm"
+echo "placed: $HERE/build/ampguest/qemu-arm"
