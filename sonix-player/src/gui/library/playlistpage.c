@@ -583,9 +583,9 @@ static void menu_btn_cb(lv_event_t *e) {
 	snprintf(menu_name, sizeof(menu_name), "%s", name);
 
 	popover_item_t items[3] = {
-		{"rename", menu_rename_action, NULL},
-		{"delete", menu_delete_action, NULL},
-		{"playlist_backup", menu_backup_action, NULL},
+		{"rename", menu_rename_action, NULL, false, false},
+		{"delete", menu_delete_action, NULL, false, false},
+		{"playlist_backup", menu_backup_action, NULL, false, false},
 	};
 	popover_show(lv_event_get_current_target(e), items, 3);
 }

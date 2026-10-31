@@ -6156,10 +6156,10 @@ static void book_summary_action(void *user) {
 static void more_btn_event_cb(lv_event_t *e) {
 	if (audiobook_mode) {
 		static const popover_item_t BOOK_ITEMS[] = {
-			{"chapters", book_chapters_action, NULL},
-			{"audiobook_add_bookmark", book_add_bookmark_action, NULL},
-			{"bookmarks", book_bookmarks_action, NULL},
-			{"audiobook_summary", book_summary_action, NULL},
+			{"chapters", book_chapters_action, NULL, false, false},
+			{"audiobook_add_bookmark", book_add_bookmark_action, NULL, false, false},
+			{"bookmarks", book_bookmarks_action, NULL, false, false},
+			{"audiobook_summary", book_summary_action, NULL, false, false},
 		};
 		popover_show(lv_event_get_current_target(e), BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
 		return;

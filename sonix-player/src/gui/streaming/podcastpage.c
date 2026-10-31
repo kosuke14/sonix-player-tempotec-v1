@@ -1797,8 +1797,8 @@ static void row_menu_cb(lv_event_t *e) {
 	// Two one-entry tables instead of one label picked with a ternary: the tool
 	// that collects the strings to translate reads popover_item_t INITIALISERS,
 	// not assignments.
-	static const popover_item_t FOLLOW[] = {{"podcast_follow", follow_cb, NULL}};
-	static const popover_item_t UNFOLLOW[] = {{"podcast_unfollow", unfollow_cb, NULL}};
+	static const popover_item_t FOLLOW[] = {{"podcast_follow", follow_cb, NULL, false, false}};
+	static const popover_item_t UNFOLLOW[] = {{"podcast_unfollow", unfollow_cb, NULL, false, false}};
 
 	bool followed = podcastsubs_is_followed(result_feeds[menu_row_index].id);
 	popover_show(lv_event_get_current_target(e), followed ? UNFOLLOW : FOLLOW, 1);
@@ -1966,7 +1966,7 @@ static void row_long_cb(lv_event_t *e) {
 	if (indev) {
 		lv_indev_wait_release(indev);
 	}
-	static const popover_item_t ITEMS[] = {{"podcast_download", download_cb, NULL}};
+	static const popover_item_t ITEMS[] = {{"podcast_download", download_cb, NULL, false, false}};
 	popover_show(lv_event_get_current_target(e), ITEMS, 1);
 }
 

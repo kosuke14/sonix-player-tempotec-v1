@@ -1419,53 +1419,53 @@ void trackmenu_open(lv_obj_t *anchor) {
 	// because a podcast episode has no album and calling it one would be a
 	// borrowed term to make a menu line up.
 	static const popover_item_t ITEMS[] = {
-		{"trackmenu_queue", open_queue_cb, NULL},
-		{"smartmix_start", start_genius_cb, NULL},
-		{"add_to_playlist", add_to_playlist_cb, NULL},
-		{"show_album", open_album_cb, NULL},
-		{"show_artist", open_artist_cb, NULL},
-		{"details", open_details_cb, NULL},
-		{"settings", open_settings_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL, false, false},
+		{"smartmix_start", start_genius_cb, NULL, false, false},
+		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
+		{"show_album", open_album_cb, NULL, false, false},
+		{"show_artist", open_artist_cb, NULL, false, false},
+		{"details", open_details_cb, NULL, false, false},
+		{"settings", open_settings_cb, NULL, false, false},
 	};
 	static const popover_item_t ITEMS_TIDAL[] = {
-		{"trackmenu_queue", open_queue_cb, NULL},
-		{"smartmix_start", start_genius_cb, NULL},
-		{"add_to_playlist", add_to_playlist_cb, NULL},
-		{"show_album", open_album_cb, NULL},
-		{"show_artist", open_tidal_artist_cb, NULL},
-		{"details", open_details_cb, NULL},
-		{"settings", open_settings_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL, false, false},
+		{"smartmix_start", start_genius_cb, NULL, false, false},
+		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
+		{"show_album", open_album_cb, NULL, false, false},
+		{"show_artist", open_tidal_artist_cb, NULL, false, false},
+		{"details", open_details_cb, NULL, false, false},
+		{"settings", open_settings_cb, NULL, false, false},
 	};
 	static const popover_item_t ITEMS_PODCAST[] = {
-		{"trackmenu_queue", open_queue_cb, NULL},
-		{"add_to_playlist", add_to_playlist_cb, NULL},
-		{"trackmenu_show_podcast", open_album_cb, NULL},
-		{"details", open_details_cb, NULL},
-		{"settings", open_settings_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL, false, false},
+		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
+		{"trackmenu_show_podcast", open_album_cb, NULL, false, false},
+		{"details", open_details_cb, NULL, false, false},
+		{"settings", open_settings_cb, NULL, false, false},
 	};
 	// A Tidal or Qobuz track that was played from its download gains one line:
 	// the cache copies it into the library, where it stays. A table rather than
 	// a line appended at runtime for the same reason as the two above -- the
 	// string-extraction tool only reads these initialisers.
 	static const popover_item_t ITEMS_KEEP[] = {
-		{"trackmenu_queue", open_queue_cb, NULL},
-		{"smartmix_start", start_genius_cb, NULL},
-		{"add_to_playlist", add_to_playlist_cb, NULL},
-		{"show_album", open_album_cb, NULL},
-		{"show_artist", open_artist_cb, NULL},
-		{"trackmenu_keep_on_card", keep_on_card_cb, NULL},
-		{"details", open_details_cb, NULL},
-		{"settings", open_settings_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL, false, false},
+		{"smartmix_start", start_genius_cb, NULL, false, false},
+		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
+		{"show_album", open_album_cb, NULL, false, false},
+		{"show_artist", open_artist_cb, NULL, false, false},
+		{"trackmenu_keep_on_card", keep_on_card_cb, NULL, false, false},
+		{"details", open_details_cb, NULL, false, false},
+		{"settings", open_settings_cb, NULL, false, false},
 	};
 	// The Apple Music track's own table: its download assembles the file
 	// rather than copying one, so it gets its own action.
 	static const popover_item_t ITEMS_AMP[] = {
-		{"trackmenu_queue", open_queue_cb, NULL},
-		{"smartmix_start", start_genius_cb, NULL},
-		{"show_album", open_album_cb, NULL},
-		{"trackmenu_keep_on_card", amp_keep_cb, NULL},
-		{"details", open_details_cb, NULL},
-		{"settings", open_settings_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL, false, false},
+		{"smartmix_start", start_genius_cb, NULL, false, false},
+		{"show_album", open_album_cb, NULL, false, false},
+		{"trackmenu_keep_on_card", amp_keep_cb, NULL, false, false},
+		{"details", open_details_cb, NULL, false, false},
+		{"settings", open_settings_cb, NULL, false, false},
 	};
 
 	device_state_t state;

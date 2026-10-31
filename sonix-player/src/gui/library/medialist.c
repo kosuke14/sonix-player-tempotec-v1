@@ -2963,7 +2963,7 @@ static void sort_clicked_cb(lv_event_t *e) {
 	int n = sort_can_year(p->kind, p->filter) ? SORT_CHOICES : SORT_YEAR_UP;
 	popover_item_t items[SORT_CHOICES];
 	for (int i = 0; i < n; i++) {
-		items[i] = (popover_item_t){labels[i], sort_picked, (void *)(intptr_t)i, i == (int)current};
+		items[i] = (popover_item_t){labels[i], sort_picked, (void *)(intptr_t)i, i == (int)current, false};
 	}
 	sort_menu_panel = p;
 	popover_show(lv_event_get_current_target(e), items, n);
@@ -3573,25 +3573,26 @@ static void menu_btn_cb(lv_event_t *e) {
 	// ways of finding out more about the track rather than doing something to
 	// it.
 	items[n++] = (popover_item_t){
-		library_fav_contains(menu_path) ? "remove_from_favourites" : "medialist_add_to_favourites", menu_fav_action, NULL};
-	items[n++] = (popover_item_t){"add_to_queue", menu_queue_action, NULL};
-	items[n++] = (popover_item_t){"smartmix_start", medialist_mix_track, NULL};
+		library_fav_contains(menu_path) ? "remove_from_favourites" : "medialist_add_to_favourites",
+		menu_fav_action, NULL, false, false};
+	items[n++] = (popover_item_t){"add_to_queue", menu_queue_action, NULL, false, false};
+	items[n++] = (popover_item_t){"smartmix_start", medialist_mix_track, NULL, false, false};
 	// Inside a playlist the useful action is the opposite one: this list is
 	// where the track already is, so offering to file it somewhere else while
 	// looking at it would be the wrong way round.
 	if (p->playlist[0]) {
-		items[n++] = (popover_item_t){"medialist_remove_from_playlist", menu_playlist_remove_action, NULL};
+		items[n++] = (popover_item_t){"medialist_remove_from_playlist", menu_playlist_remove_action, NULL, false, false};
 	} else {
-		items[n++] = (popover_item_t){"add_to_playlist", menu_playlist_action, NULL};
+		items[n++] = (popover_item_t){"add_to_playlist", menu_playlist_action, NULL, false, false};
 	}
 
 	// Only when there is an album to show, and not when this list already IS
 	// that album: offering to open the page already on screen is noise.
 	if (menu_album[0] && !(p->filter == LIBRARY_FILTER_ALBUM && library_album_same(p->filter_value, menu_album))) {
-		items[n++] = (popover_item_t){"show_album", menu_album_action, NULL};
+		items[n++] = (popover_item_t){"show_album", menu_album_action, NULL, false, false};
 	}
 
-	items[n++] = (popover_item_t){"details", menu_details_action, NULL};
+	items[n++] = (popover_item_t){"details", menu_details_action, NULL, false, false};
 	popover_show(button, items, n);
 }
 

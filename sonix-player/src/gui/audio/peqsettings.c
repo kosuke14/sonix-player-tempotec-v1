@@ -111,7 +111,7 @@ static void preset_menu_cb(lv_event_t *e) {
 	snprintf(menu_name, sizeof(menu_name), "%s", name);
 
 	popover_item_t items[1] = {
-		{"delete", menu_delete_action, NULL},
+		{"delete", menu_delete_action, NULL, false, false},
 	};
 	popover_show(lv_event_get_current_target(e), items, 1);
 }

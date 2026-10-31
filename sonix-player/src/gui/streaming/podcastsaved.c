@@ -483,7 +483,7 @@ static void episode_long_cb(lv_event_t *e) {
 	if (indev) {
 		lv_indev_wait_release(indev);
 	}
-	static const popover_item_t ITEMS[] = {{"delete", delete_cb, NULL}};
+	static const popover_item_t ITEMS[] = {{"delete", delete_cb, NULL, false, false}};
 	popover_show(lv_event_get_current_target(e), ITEMS, 1);
 }
 

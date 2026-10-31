@@ -747,7 +747,7 @@ static void menu_btn_cb(lv_event_t *e) {
 	snprintf(menu_name, sizeof(menu_name), "%s", stations[index].name);
 
 	static const popover_item_t items[] = {
-		{"remove_from_favourites", menu_remove_action, NULL},
+		{"remove_from_favourites", menu_remove_action, NULL, false, false},
 	};
 	popover_show(button, items, 1);
 }

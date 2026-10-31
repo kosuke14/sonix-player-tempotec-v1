@@ -954,10 +954,10 @@ static void entry_menu_cb(lv_event_t *e) {
 	snprintf(acting_on, sizeof(acting_on), "%s", entries[index].name);
 
 	static const popover_item_t items[] = {
-		{"rename", menu_rename_action, NULL, false},
-		{"files_move_to", menu_move_action, NULL, false},
-		{"files_copy_to", menu_copy_action, NULL, false},
-		{"delete", menu_delete_action, NULL, false},
+		{"rename", menu_rename_action, NULL, false, false},
+		{"files_move_to", menu_move_action, NULL, false, false},
+		{"files_copy_to", menu_copy_action, NULL, false, false},
+		{"delete", menu_delete_action, NULL, false, false},
 	};
 	popover_show(lv_event_get_target(e), items, 4);
 }
