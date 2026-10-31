@@ -395,7 +395,22 @@ static void guest_download_cb(lv_event_t *e) {
 	if (ampguest_busy()) {
 		return; // already running; the row shows the progress
 	}
-	ampguest_fetch_start();
+	// A tree that is already here does not need a second download: re-fetching
+	// it would cost a hundred megabytes and several minutes to arrive at the
+	// very same files. The tap itself asks to use it, which matters for a
+	// tree fetched before this row switched the feature on by itself.
+	if (ampguest_present()) {
+		if (config_get_int("applemusic", "translate", 0) == 0) {
+			config_set_int("applemusic", "translate", 1);
+			config_save();
+			amplocal_init();
+		}
+		toast_success("amp_guest_installed");
+		return;
+	}
+	if (ampguest_fetch_start()) {
+		toast_success("amp_guest_started");
+	}
 	settings_refresh();
 }
 
@@ -746,6 +761,14 @@ static void poll_cb(lv_timer_t *timer) {
 		if (guest_error[0]) {
 			toast_error(guest_error);
 		} else {
+			// A landed tree is the whole on-device feature: from here sign-in
+			// and playback are allowed, so the switch flips itself on and the
+			// decrypt listener comes up now rather than at the next playback.
+			// Until it did, a fresh download still ended at a refused
+			// sign-in, which read like the fetch had failed.
+			config_set_int("applemusic", "translate", 1);
+			config_save();
+			amplocal_init();
 			toast_success("amp_guest_ready");
 		}
 	}
