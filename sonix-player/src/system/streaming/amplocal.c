@@ -240,6 +240,14 @@ static bool daemon_spawn_locked(amp_channel_t *ch, bool auth_mode) {
 
 	char qemu_path[400];
 	snprintf(qemu_path, sizeof(qemu_path), "%.280s/qemu-arm", s_local.guest_root);
+	// The diagnostic build (stage markers before anything else prints) wins
+	// when present: on a device that dies with no voice at all, the markers
+	// are the difference between a bug report and a shrug.
+	char diag_path[400];
+	snprintf(diag_path, sizeof(diag_path), "%.280s/qemu-arm-diag", s_local.guest_root);
+	if (access(diag_path, X_OK) == 0) {
+		snprintf(qemu_path, sizeof(qemu_path), "%s", diag_path);
+	}
 
 	// The guest's stderr is the only window into a guest that died on the
 	// device (no console there): qemu's own boot log, the daemon's voice and
