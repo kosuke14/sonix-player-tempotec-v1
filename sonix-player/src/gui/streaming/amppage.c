@@ -3,6 +3,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/shell/confirm.h"
 #include "src/gui/shell/keyboard.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
@@ -608,6 +609,7 @@ static void lyrics_cb(lv_event_t *e) {
 // The guest tree, fetched by the player itself: the space check, the download
 // and the unpack all happen on the fetcher's own thread; the poll below
 // mirrors the progress into the row and toasts the outcome.
+static void setup_confirmed_cb(void *user);
 static void guest_download_cb(lv_event_t *e) {
 	(void)e;
 	if (busy || switcher_back_drag_active()) {
@@ -627,6 +629,20 @@ static void guest_download_cb(lv_event_t *e) {
 			amplocal_init();
 		}
 		toast_success("amp_guest_installed");
+		return;
+	}
+	// The download is a hundred-megabyte decision: say what it costs before
+	// it starts, from the pinned figures, and ask.
+	unsigned archive_mb = (unsigned)((AMPGUEST_ARCHIVE_BYTES + (1 << 20) - 1) >> 20);
+	unsigned unpacked_mb = (unsigned)((AMPGUEST_UNPACKED_BYTES + (1 << 20) - 1) >> 20);
+	char msg[300];
+	snprintf(msg, sizeof(msg), tr("amp_setup_confirm"), archive_mb, unpacked_mb);
+	confirm_show("amp_setup", msg, "amp_setup_download", setup_confirmed_cb, NULL);
+}
+
+static void setup_confirmed_cb(void *user) {
+	(void)user;
+	if (ampguest_busy()) {
 		return;
 	}
 	if (ampguest_fetch_start()) {
@@ -681,7 +697,10 @@ static void login_field_focus_cb(lv_event_t *e) {
 }
 
 static void remember_maybe_save(void) {
-	if (remember_checked && pending_user[0] && pending_pass[0]) {
+	if (!remember_checked) {
+		return;
+	}
+	if (pending_user[0] && pending_pass[0]) {
 		creds_save(pending_user, pending_pass);
 	}
 	memset(pending_user, 0, sizeof(pending_user));
@@ -694,17 +713,12 @@ static void remember_cb(lv_event_t *e) {
 		creds_forget();
 		return;
 	}
-	const char *user = lv_textarea_get_text(login_user_field);
-	const char *pass = lv_textarea_get_text(login_pass_field);
-	if (user[0] && pass[0]) {
-		remember_checked = true;
-		creds_save(user, pass);
-		return;
+	// Arm immediately: what the fields held is what gets remembered, typed or
+	// mistyped, signed in or not -- the user said so, that is the whole point.
+	remember_checked = true;
+	if (draft_user[0] && draft_pass[0]) {
+		creds_save(draft_user, draft_pass);
 	}
-	// Nothing typed yet: remembering starts when a sign-in succeeds.
-	remember_checked = false;
-	lv_obj_remove_state(lv_event_get_target(e), LV_STATE_CHECKED);
-	toast_error("amp_remember_after_signin");
 }
 
 static void open_login_cb(lv_event_t *e) {
@@ -742,6 +756,7 @@ static void login_accept_cb(lv_event_t *e) {
 	remember_checked = lv_obj_has_state(remember_switch, LV_STATE_CHECKED);
 	snprintf(pending_user, sizeof(pending_user), "%s", user);
 	snprintf(pending_pass, sizeof(pending_pass), "%s", pass);
+	remember_maybe_save();
 	job_t job = {.kind = JOB_LOGIN};
 	snprintf(job.username, sizeof(job.username), "%s", user);
 	snprintf(job.password, sizeof(job.password), "%s", pass);
@@ -1060,15 +1075,12 @@ static void poll_cb(lv_timer_t *timer) {
 				rebuild_list();
 			} else if (result->job.kind == JOB_LOGIN) {
 				if (result->count == 1) {
-					remember_maybe_save(); // the password was accepted; keep it if asked
 					apply_state(result);
 					open_2fa_box(); // Apple wants the second factor
 				} else {
-					remember_maybe_save();
 					toast_success("amp_signed_in_ok");
 				}
 			} else if (result->job.kind == JOB_2FA) {
-				remember_maybe_save();
 				toast_success("amp_signed_in_ok");
 			} else if (result->job.kind == JOB_LOGOUT) {
 				creds_forget(); // a signed-out account leaves nothing behind
