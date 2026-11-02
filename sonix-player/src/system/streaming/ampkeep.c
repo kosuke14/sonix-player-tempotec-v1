@@ -553,11 +553,8 @@ static void *keep_worker(void *arg) {
 	}
 	char variant_url[640];
 	if (ok) {
-		bool picked = amphls_pick_variant((const char *)body, master_url, AMPHLS_CODEC_AAC,
-										  variant_url, sizeof(variant_url)) ||
-					  amphls_pick_variant((const char *)body, master_url, AMPHLS_CODEC_HE_AAC,
-										  variant_url, sizeof(variant_url));
-		if (!picked) {
+		if (!amphls_pick_preferred((const char *)body, master_url, variant_url,
+								   sizeof(variant_url))) {
 			snprintf(error, sizeof(error), "amp_no_variant");
 			ok = false;
 		}

@@ -1913,6 +1913,10 @@ typedef struct {
 	unsigned generation;
 	char path[1024];
 	char title[256];
+	char artist[256];
+	char album[256];
+	int duration; // seconds, for the LRCLIB search of a streaming track
+	bool from_stream; // no file behind the path: LRCLIB answers in memory only
 	lyrics_t lyrics;
 	bool found;
 } lyrics_job_t;
@@ -1935,7 +1939,22 @@ static void lyrics_arrived(void *user) {
 
 static void *lyrics_worker(void *arg) {
 	lyrics_job_t *job = arg;
-	job->found = lyrics_load(job->path, job->title, &job->lyrics);
+	if (job->from_stream) {
+		// A streaming track has no file to carry an .lrc beside and no tags to
+		// read: LRCLIB answers from the stream's metadata, and the words live
+		// in memory for this play only.
+		lrclib_record_t *records = NULL;
+		int count = 0;
+		job->found = false;
+		lrclib_result_t r = lrclib_search(job->title, job->artist, job->album, job->duration,
+										  &records, &count);
+		if (r == LRCLIB_OK && count > 0 && records[0].text) {
+			job->found = lyrics_from_text(records[0].text, &job->lyrics);
+		}
+		lrclib_free(records, count);
+	} else {
+		job->found = lyrics_load(job->path, job->title, &job->lyrics);
+	}
 	if (!gui_post(lyrics_arrived, job)) {
 		lyrics_free(&job->lyrics);
 		free(job);
@@ -1943,11 +1962,19 @@ static void *lyrics_worker(void *arg) {
 	return NULL;
 }
 
-// Only a file on the card has words to show.
+// Apple Music streams can have words too: LRCLIB answers from the stream's
+// metadata, and the setting decides whether that network leg happens at all.
+static bool amp_lyrics_wanted(const device_state_t *state) {
+	return ampstream_owns(state->current_file) &&
+		   config_get_int("applemusic", "lyrics", 1) != 0;
+}
+
+// Only a file on the card has words to show -- or an Apple Music stream,
+// when the setting asks LRCLIB for them.
 static bool lyrics_available(void) {
 	device_state_t state;
 	device_state_get(&state);
-	return playing_local_file(&state);
+	return playing_local_file(&state) || amp_lyrics_wanted(&state);
 }
 
 // The page is up, or on its way in or out under a finger.
@@ -1968,7 +1995,11 @@ static bool lyrics_has_words(void) { return lyrics_loaded && lyrics_cur.count > 
 // starts: the tags of a FLAC are read whole, pictures included, and that is
 // not the interface's to wait for. Asked again only when the file changes.
 static void lyrics_request(const device_state_t *state) {
-	if (!state->current_file[0] || !playing_local_file(state)) {
+	if (!state->current_file[0]) {
+		return;
+	}
+	bool from_stream = !playing_local_file(state) && amp_lyrics_wanted(state);
+	if (!from_stream && !playing_local_file(state)) {
 		return;
 	}
 	if (strcmp(state->current_file, lyrics_path) == 0) {
@@ -1985,8 +2016,14 @@ static void lyrics_request(const device_state_t *state) {
 		return;
 	}
 	job->generation = lyrics_generation;
+	job->from_stream = from_stream;
 	snprintf(job->path, sizeof(job->path), "%s", state->current_file);
 	snprintf(job->title, sizeof(job->title), "%s", state->metadata.title);
+	if (from_stream) {
+		snprintf(job->artist, sizeof(job->artist), "%s", state->metadata.artist);
+		snprintf(job->album, sizeof(job->album), "%s", state->metadata.album);
+		job->duration = (int)state->progress_total_secs;
+	}
 	pthread_t thread;
 	if (pthread_create(&thread, NULL, lyrics_worker, job) == 0) {
 		pthread_detach(thread);

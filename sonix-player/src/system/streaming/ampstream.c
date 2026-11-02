@@ -404,10 +404,8 @@ static bool amp_source_open(streambridge_source_t *src, char *error, size_t erro
 		return false;
 	}
 	char variant_url[640];
-	if (!amphls_pick_variant((const char *)st->scratch, master_url, AMPHLS_CODEC_AAC, variant_url,
-							 sizeof(variant_url)) &&
-		!amphls_pick_variant((const char *)st->scratch, master_url, AMPHLS_CODEC_HE_AAC,
-							 variant_url, sizeof(variant_url))) {
+	if (!amphls_pick_preferred((const char *)st->scratch, master_url, variant_url,
+							   sizeof(variant_url))) {
 		snprintf(error, error_size, "amp_no_variant");
 		return false;
 	}

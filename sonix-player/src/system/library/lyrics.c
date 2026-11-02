@@ -389,6 +389,25 @@ static bool parse(char *text, lyrics_t *out) {
 
 // ---------------------------------------------------------------------------
 
+bool lyrics_from_text(const char *text, lyrics_t *out) {
+	memset(out, 0, sizeof(*out));
+	if (!text || !text[0]) {
+		return false;
+	}
+	// The parser takes the arena over: it keeps line pointers into it.
+	size_t len = strlen(text) + 1;
+	out->arena = malloc(len);
+	if (!out->arena) {
+		return false;
+	}
+	memcpy(out->arena, text, len);
+	if (!parse(out->arena, out)) {
+		lyrics_free(out);
+		return false;
+	}
+	return true;
+}
+
 bool lyrics_load(const char *path, const char *title, lyrics_t *out) {
 	memset(out, 0, sizeof(*out));
 	if (!path || !path[0]) {

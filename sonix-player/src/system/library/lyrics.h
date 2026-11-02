@@ -34,6 +34,12 @@ typedef struct {
 // empty, when there are none. Reads the card: not on the interface thread.
 bool lyrics_load(const char *path, const char *title, lyrics_t *out);
 
+// Parses LRC (timed or plain) text that came from somewhere else -- LRCLIB's
+// answer, for a streaming track that has no file to carry an .lrc beside.
+// `text` is copied; the caller keeps theirs. False, with `out` empty, when
+// nothing parses.
+bool lyrics_from_text(const char *text, lyrics_t *out);
+
 void lyrics_free(lyrics_t *lyrics);
 
 // The line being sung at `ms` into the track: the last one whose time has

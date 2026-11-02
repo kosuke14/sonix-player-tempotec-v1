@@ -47,6 +47,15 @@ typedef struct {
 bool amphls_pick_variant(const char *master_text, const char *master_url, amphls_codec_t codec,
 						 char *variant_url, size_t variant_size);
 
+// The codec the [applemusic] quality setting asks for (AAC 256, or the
+// data-saver HE-AAC 64), and a pick that tries it first and falls back to the
+// other playable codec. Lossless and Dolby Atmos variants exist in the master
+// but the device has no decoder for either; the fallback keeps a track
+// playing rather than refusing it.
+amphls_codec_t amphls_preferred_codec(void);
+bool amphls_pick_preferred(const char *master_text, const char *master_url, char *variant_url,
+						   size_t variant_size);
+
 // Parses a variant playlist into its init segment, its keys and its segments.
 // `base_url` resolves relative URIs. The playlist must be freed with
 // amphls_free_playlist(). False on a playlist with no segments.

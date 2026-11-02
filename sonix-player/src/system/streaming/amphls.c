@@ -1,5 +1,7 @@
 #include "amphls.h"
 
+#include "src/system/core/config.h"
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -326,4 +328,23 @@ const char *amphls_key_for(const amphls_playlist_t *list, int index) {
 		return "";
 	}
 	return list->keys[key].uri;
+}
+
+// ---------------------------------------------------------------------------
+// the quality setting
+// ---------------------------------------------------------------------------
+
+// [applemusic] quality: 0 = AAC 256 (the master's default pick), 1 = the
+// data-saver HE-AAC 64. The lossless and Dolby Atmos variants the master
+// also offers have no decoder on this device, so they are not choices here.
+amphls_codec_t amphls_preferred_codec(void) {
+	return config_get_int("applemusic", "quality", 0) == 1 ? AMPHLS_CODEC_HE_AAC : AMPHLS_CODEC_AAC;
+}
+
+bool amphls_pick_preferred(const char *master_text, const char *master_url, char *variant_url,
+						   size_t variant_size) {
+	amphls_codec_t first = amphls_preferred_codec();
+	amphls_codec_t second = first == AMPHLS_CODEC_AAC ? AMPHLS_CODEC_HE_AAC : AMPHLS_CODEC_AAC;
+	return amphls_pick_variant(master_text, master_url, first, variant_url, variant_size) ||
+		   amphls_pick_variant(master_text, master_url, second, variant_url, variant_size);
 }
