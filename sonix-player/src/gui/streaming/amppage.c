@@ -410,8 +410,9 @@ static void draft_save(void) {
 
 static bool configured(void) {
 	// The guest tree is the whole feature: without it there is no daemon to
-	// sign in on and nothing to decrypt with.
-	return config_get_int("applemusic", "translate", 0) != 0;
+	// sign in on and nothing to decrypt with. The flag alone lies after the
+	// tree is deleted from the card -- the setup row must come back.
+	return config_get_int("applemusic", "translate", 0) != 0 && ampguest_present();
 }
 
 // The page shows only what the state can use: before the guest tree exists,
@@ -946,6 +947,8 @@ void amppage_init(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(settings_screen, config, "amp_wrapper_settings");
 	setup_row = settingsrow_add(container, "amp_setup", &guest_value, guest_download_cb, NULL);
 	settingsrow_add_icon(setup_row, &icon_import, THEME_SEMANTIC_GREEN);
+	lyrics_card = NULL; // built below in signed-in order
+	settingsrow_toggle(container, "amp_remember_password", &remember_switch, remember_cb);
 	login_row = settingsrow_action(container, "amp_sign_in", open_login_cb, NULL);
 	settingsrow_add_icon(login_row, &icon_check, THEME_SEMANTIC_GREEN);
 	store_row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)0);
@@ -993,32 +996,6 @@ void amppage_init(gui_config_t *cfg) {
 	login_eye_icon = lv_image_create(eye);
 	lv_obj_add_style(login_eye_icon, &theme_style_icon, 0);
 	lv_obj_center(login_eye_icon);
-	lv_obj_t *remember_card = lv_obj_create(login_screen);
-	lv_obj_set_size(remember_card, config->screen_width - 2 * config->padding,
-					config->screen_width < 320 ? 44 : 52);
-	lv_obj_align(remember_card, LV_ALIGN_TOP_LEFT, config->padding, top + 2 * pitch);
-	lv_obj_add_style(remember_card, &theme_style_card, 0);
-	lv_obj_set_style_radius(remember_card, 12, 0);
-	lv_obj_set_style_border_width(remember_card, 0, 0);
-	lv_obj_set_style_shadow_width(remember_card, 0, 0);
-	lv_obj_set_style_pad_hor(remember_card, 12, 0);
-	lv_obj_set_style_pad_ver(remember_card, 4, 0);
-	lv_obj_set_scrollable(remember_card, false);
-	lv_obj_t *remember_label = lv_label_create(remember_card);
-	lv_label_set_text(remember_label, tr("amp_remember_password"));
-	lv_obj_set_style_text_font(remember_label, &font_ui_18, 0);
-	lv_obj_align(remember_label, LV_ALIGN_LEFT_MID, 0, 0);
-	remember_switch = lv_switch_create(remember_card);
-	lv_obj_set_size(remember_switch, 44, 24);
-	lv_obj_align(remember_switch, LV_ALIGN_RIGHT_MID, 0, 0);
-	lv_obj_add_event_cb(remember_switch, remember_cb, LV_EVENT_VALUE_CHANGED, NULL);
-	lv_obj_t *login_note = lv_label_create(login_screen);
-	lv_obj_add_style(login_note, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(login_note, &font_ui_18, 0);
-	lv_obj_set_width(login_note, lv_pct(100));
-	lv_label_set_long_mode(login_note, LV_LABEL_LONG_WRAP);
-	lv_label_set_text(login_note, tr("amp_2fa_note"));
-	lv_obj_align(login_note, LV_ALIGN_TOP_LEFT, config->padding, top + 2 * pitch + 60);
 	login_keyboard = keyboard_create(login_screen, config->screen_width,
 									 config->screen_width < 320 ? 144 : 316, login_user_field,
 									 NULL, "ok", login_accept_cb, NULL);
