@@ -26,10 +26,10 @@
 // size, the hash and the unpacked figure as one. The guards exist so the
 // host test can point the fetcher at a tiny fixture of its own.
 #ifndef AMPGUEST_URL
-#define AMPGUEST_URL "https://files.catbox.moe/yxzv65.gz"
-#define AMPGUEST_SHA256 "524abed311b1541dbdab099d5052c5ec28ba2ccc27617e4d62350ae99c395e93"
-#define AMPGUEST_ARCHIVE_BYTES 90012406ULL
-#define AMPGUEST_UNPACKED_BYTES 189575168ULL
+#define AMPGUEST_URL "https://github.com/kosuke14/sonix-player-tempotec-v1/releases/download/guest-tree/ampguest-diag.tar.gz"
+#define AMPGUEST_SHA256 "d02ebf2f96239bf3931b3c1063060ba08145e369940227b801e1508dd161e5e2"
+#define AMPGUEST_ARCHIVE_BYTES 97131762ULL
+#define AMPGUEST_UNPACKED_BYTES 210825328ULL
 #endif
 
 typedef enum {
