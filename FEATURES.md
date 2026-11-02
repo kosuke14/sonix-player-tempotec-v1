@@ -26,7 +26,15 @@
   response, computed from the coefficients that are running. Presets are
   Equalizer APO files in the `PEQ` folder of the card: the `ParametricEQ.txt`
   that AutoEq publishes for your headphones loads as it is, and a preset saved
-  on the player opens in APO.
+  on the player opens in APO. Two persistent PEQ profiles keep separate bands,
+  preamp and on/off states for two pairs of headphones. Select Profile 1 or 2
+  on the PEQ page; importing, saving or resetting affects only that profile.
+  The numbered **PEQ profile** button in Control Centre switches between them
+  without leaving playback. It is added after the existing buttons: use the
+  expand handle if it is below the first eight, or Settings → More → Control
+  centre to make room for it on a full panel. A long press opens the PEQ page.
+  Existing PEQ settings become Profile 1; Profile 2 starts flat and off. Switching is manual and
+  preserves each profile's on/off state, rather than enabling EQ automatically.
 - **MSEB** - HiBy's MageSound tuning, matched to the stock player: 10
   characteristics driven by 13 filters, with the slider travel selectable
   between 20, 40 and 100.
@@ -192,10 +200,10 @@ a self-signed certificate), and HLS.
 
 ## Tools
 
-> **Calculator**, **Notes** and **Metronome** are in the **More** menu, under
-> the file manager. All three are drawn for the panel they are on: on the
-> 240x320 V1 the twenty keys stay a finger's width, and each page -- display,
-> keypad and labels -- fits without scrolling.
+> **Calculator**, **Notes**, **Metronome** and **Pet** are in the **More**
+> menu, under the file manager. All four are drawn for the panel they are on:
+> on the 240x320 V1 the twenty keys stay a finger's width, and each page --
+> display, keypad and labels -- fits without scrolling.
 
 - **Calculator** - a display and the twenty keys of an ordinary pocket
   calculator: the four operations, sign, percent, backspace and clear. The sum
@@ -243,15 +251,109 @@ a self-signed certificate), and HLS.
   remembered across visits and across a reboot; leaving the page stops the
   click, because the page is the only place it can be stopped from.
 
+- **Pet** - a small creature fed by the music it can actually be heard by: a
+  local track, a stream, internet radio or a phone over Bluetooth, at a volume
+  at or above 10 percent. The first time the page opens it asks which animal to
+  raise -- **a grey cat, a sandy dog or a goldfish** -- and what to call it; the name can be
+  changed whenever you like from the pencil in the corner. There is no egg: the
+  animal you choose is the animal from the first minute, and it grows through
+  four stages (hatchling, child, teen, adult). A fish lives in an aquarium --
+  water, sand, weeds and slow bubbles -- instead of the room the others sit in.
+  It keeps a daily streak, earns **Musical Notes** for the minutes it heard and
+  spends them in a wardrobe on hats, headphones, a scarf, a crown, two room
+  themes and streak freezes. A **15-minute daily goal** builds the streak and a
+  bought freeze covers one missed day. Achievements for listening late, hearing
+  an album through, five genres in a day and half an hour without a pause are
+  worth extra notes. **The last thirty days give it a character**: a month of
+  pop and dance makes an **Upbeat** pet whose energy fills faster and who turns
+  up a note or two on the floor as the music goes by, a month of jazz and
+  classical makes a **Calm** one with a drifting soundscape on its card, and a
+  month of indie, alternative and metal makes a **Curious** one that finds
+  something -- notes, and now and then a streak freeze -- after forty-five
+  minutes of listening without a break, once a day. Under three days of
+  listening it has no character yet, and the page says nothing. A genre tag also
+  nudges how it moves: a slow sway for jazz, ambient or lo-fi, a faster bob for
+  rock, metal and electronic, and a breath no faster than two seconds even
+  then. **Once a day it offers a tap-along**: sixteen beats of the metronome's
+  tempo, tapped on the glass, worth up to a dozen notes and a freeze for a clean
+  run. And it has a limit on flicking through a library: **more than five
+  skipped tracks in ten minutes** and it is dizzy for fifteen -- still fed by
+  whatever is playing, but earning nothing until it clears. It never dies, and nothing it does
+  punishes a player for not listening: forty-eight hours without music is only
+  "sleepy", and the first track wakes it. The page is one borderless card: the
+  name and stage top left, **hearts and energy top right**, the animal in the
+  middle -- **pat it by touching it** -- the track it is feeding on along the
+  bottom, a close corner bottom right, and the day's minutes and the streak in
+  two lines under the card. A pencil opens the name and the animal, a star the
+  wardrobe; both are sheets over the page, and the chevron closes them in turn.
+  Its state lives in the settings file and survives a reboot; the only cost is
+  one callback a second in the interface loop that is already running, and
+  nothing at all when the page is not open. The creature is drawn from the
+  interface's own shapes -- a flat fill inside the same heavy ink line the icons
+  use -- and each animal is its own silhouette, so it adds no art to the image.
+  It moves in two frames rather than in an interpolation, and the page redraws
+  only what changed: a meter that has not moved is not touched between one
+  second and the next. While music plays, the line at the foot of the card says
+  what it is feeding on beside a three-bar equalizer. Each animal has a shape of
+  its own -- a cat's ears and whiskers, a dog's rounded ears and snout, a fish's
+  forked tail, dorsal fin and gill -- and a few flat things of its own behind
+  it: a rug and a plant, a fence and a bone, or the tank the fish swims in,
+  furnished down to the weeds -- a fan of grass and a leafy plant on each side
+  of the sand. The face carries the mood too: round eyes and a smile when it is
+  happy, eyes shut in a smile at the top of it, brows and a tear when it is sad,
+  and, while music is playing, an open mouth and a pair of notes in the air
+  beside its head. **It answers the keys as well as the glass**: a step up on
+  the volume and it jumps, a step down and it ducks, Previous and Next and it
+  leans the way they go, and a tap picks one of three tiny reactions -- a heart,
+  a hop or a wave -- on the pat's own cooldown. **Hold a finger on it for two
+  seconds** and three hearts fill under it; the third pays the day's groom,
+  once a day. A genre tag dresses it for the track it is hearing -- shades for
+  the electronic family, a gold chain for hip hop, a studded collar for rock, a
+  cup on the floor for the calm ones -- and the volume shows on its face, wide
+  eyes past eighty per cent and a heavy-lidded rest between twenty and forty.
+  **A box sits in the corner of the card**: in it are the day's fortune, one of
+  six drawn from the date and worth fifty notes once it has been carried out; an
+  hourly note game -- one note crossing one line, six times, five notes for
+  turning up and one for each note caught; and the shelf, where what the
+  listening turns up goes: every half hour of audible music finds a bone, a
+  cassette, a sticker or a record on the floor, and a tap puts it on the shelf,
+  three at most. The card also knows what time it is: a sun on it by day, and
+  after eight in the evening a darker card, a moon and a small lamp, with the
+  month deciding what falls through the air -- rain in spring, leaves in autumn,
+  snow in winter, nothing in summer.
+
 ## Games
 
-> **Flappy Bird** is in the **More** menu. It is played on the glass, it leaves
-> the music alone, and it keeps its best score in the config file, so a record
+> All four are in the **More** menu. They are played on the glass, they leave the
+> music alone, and each one keeps its best score in the config file, so a record
 > survives a reboot.
 
 - **Flappy Bird** - the original art and physics: a tap is a flap, day and night
   trade places every ten points, and the medals are the real ones. The pictures
   live in the resource tree, so they travel inside the image.
+- **2048** - the rules everyone knows, on a board sized to the screen instead of
+  to a phone. A swipe sends every tile to that wall, two of a kind make the next
+  number, and a new tile turns up after each move. Tiles are drawn with steps of
+  the accent's own colour, so the board goes with the theme you picked. The board
+  and the score are stored when you leave the page: a puzzle left half-finished is
+  still there when you come back. One move can be taken back, because a swipe on
+  glass is easily read wrongly, and the game lets you keep going past 2048.
+- **Snake** - nineteen cells across, one apple at a time, and a snake that crawls
+  along the path it has taken instead of jumping from cell to cell. A tap on either
+  half of the board turns a quarter; a swipe says which way you mean. The card it
+  opens with offers the walls too: with them the wall ends the run, without them
+  the far side of the board is the near side.
+- **Dino** - one control. A tap jumps, a finger held down ducks, and a press in the
+  air brings the runner down sooner. Cacti come in ones, twos and threes, the birds
+  at four heights, and every hundred points it turns to night, with a moon in it.
+  The gap between obstacles is always the same distance, so what speeds up is the
+  time you get to see them coming.
+- 2048, Snake and Dino are drawn with the interface's own pieces: they add no art
+  to the image and no space on the card. Each has a glyph of its own in the icon
+  set, so the More menu shows the animal the dino game draws, the body of the
+  snake, and a board with one merge in it - cut on the same 24 grid, with the same
+  line and the same single colour as everything else there, which is what lets the
+  theme tint them the way it tints the gamepad they replaced.
 
 ## Game Boy
 
@@ -289,6 +391,17 @@ a self-signed certificate), and HLS.
 
 - **Power** - standby, LED behaviour, automatic power-off from thirty seconds to
   six hours, and a charge limit from 80 to 100 %.
+- **The screen, while music plays over Bluetooth** - the screen comes back
+  instantly and silently in that one case. Powering the panel up is what the
+  board notices: the unblank resets the glass, brings its rails back up and
+  re-initialises it, and a stream that is being encoded for a pair of headphones,
+  or decoded from a phone, is heard to stutter over it. So with a Bluetooth
+  stream playing, the screen going dark takes the backlight to zero and leaves
+  the panel powered, holding its last frame, and the wake is only the light
+  coming back. Nothing playing, nothing held: the panel goes down for real a few
+  seconds after the music stops, and before any standby. It costs a few tens of
+  milliwatts while a stream lasts, and `[screen] panel_hold = 0` in
+  `device_config.ini` turns it off for a card that would rather have them.
 - **Battery** - the last few percent are managed rather than run out. At **5 %**
   the player warns: a red card, held for eight seconds, and the panel is brought
   back up first if it was dark, because a warning nobody sees is not one. That

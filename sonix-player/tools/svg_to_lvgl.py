@@ -232,6 +232,16 @@ ICONS = [
     ("files-text.svg", "files_text", 32),
     ("files-update.svg", "files_update", 32),
     ("files-gamepad.svg", "files_game", 32),
+    # The three games in the More menu, each with a glyph of its own rather than
+    # the shared gamepad: the dino is the animal the game draws, block for block,
+    # the snake is its body, and 2048 is the board with one merge in it. Same
+    # grid, same line, same single colour, so the theme tints them as it does the
+    # rest. A compact row leaves them 18 px, which is why it is the silhouette
+    # that says which game it is; the tongue and the eye are only there when
+    # there is room for them.
+    ("game-dino.svg", "game_dino", 32),
+    ("game-snake.svg", "game_snake", 32),
+    ("game-2048.svg", "game_2048", 32),
     ("files-book.svg", "files_book", 32),
     # The bin in a file's action menu. Not icon_delete, which despite the name
     # is the keyboard's backspace arrow.
@@ -374,8 +384,11 @@ ICONS = [
     # shelf beside it. The enter glyph is the accent key while a note is being
     # written, at the size of the keyboard's other accent keys.
     # The note editor's way from reading a note to writing it, and the corner
-    # button the browser and the shelf use for the same thing.
+    # button the browser and the shelf use for the same thing. The second copy
+    # is Tag Manager's function-glyph name: an editing pencil, not the File
+    # Manager's folder, so the two rows stay distinct in a compact list.
     ("pencil.svg", "pencil", 36),
+    ("pencil.svg", "tag_manager", 36),
     ("calculator.svg", "calculator", 32),
     ("notes.svg", "notes", 32),
     # The metronome, beside them in the More list: the page header's glyph, at
@@ -446,11 +459,19 @@ COLOR_ICONS = [
     ("dac.png", "menu_dac", SECTION_ICON_SIZE),
     ("gearboy.png", "menu_gearboy", SECTION_ICON_SIZE),
     ("flappy-bird.png", "menu_flappy_bird", SECTION_ICON_SIZE),
+    ("game-2048.png", "menu_game_2048", SECTION_ICON_SIZE),
+    ("game-snake.png", "menu_game_snake", SECTION_ICON_SIZE),
+    ("game-dino.png", "menu_game_dino", SECTION_ICON_SIZE),
     ("ebook.png", "menu_books", SECTION_ICON_SIZE),
     ("file-explorer.png", "menu_file_explorer", SECTION_ICON_SIZE),
     ("calculator.png", "menu_calculator", SECTION_ICON_SIZE),
     ("notes.png", "menu_notes", SECTION_ICON_SIZE),
     ("metronome.png", "menu_metronome", SECTION_ICON_SIZE),
+    # The two newest More destinations: their own full-colour art in Dark and
+    # Light. The tag editor no longer borrows the File Manager's folder, and
+    # the pet no longer arrives as a bare white silhouette.
+    ("tag-manager.png", "menu_tag_manager", SECTION_ICON_SIZE),
+    ("pet.png", "menu_pet", SECTION_ICON_SIZE),
 
     # The service badges in the player's top right corner, where the radio puts
     # its LIVE mark. They sit over the cover art, so these are the outlined

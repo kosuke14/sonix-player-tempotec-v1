@@ -192,6 +192,30 @@ $(BUILD)/test_calculator: $(CALC_SRC) $(ROOT)/src/gui/calculator/calcmodel.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(CALC_SRC) $(LDFLAGS) $(LDLIBS)
 
+# The music pet's arithmetic: how the mood moves with the listening, what
+# idleness costs, when the goal counts, when the creature grows, and that its
+# whole state survives in device_config.ini. Plain C, no LVGL and no audio.
+PET_SRC = test_pet.c $(ROOT)/src/system/pet/pet.c $(ROOT)/src/system/core/config.c
+.PHONY: pet
+pet: $(BUILD)/test_pet
+	$(BUILD)/test_pet
+
+$(BUILD)/test_pet: $(PET_SRC) $(ROOT)/src/system/pet/pet.h $(ROOT)/src/system/core/config.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(PET_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The listening rules: audible seconds, album runs, focus and night, still with
+# no audio hardware. pet.c comes along for the volume floor and the constants.
+PETLISTEN_SRC = test_petlisten.c $(ROOT)/src/system/pet/petlisten.c $(ROOT)/src/system/pet/pet.c \
+	$(ROOT)/src/system/core/config.c
+.PHONY: petlisten
+petlisten: $(BUILD)/test_petlisten
+	$(BUILD)/test_petlisten
+
+$(BUILD)/test_petlisten: $(PETLISTEN_SRC) $(ROOT)/src/system/pet/petlisten.h $(ROOT)/src/system/pet/pet.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(PETLISTEN_SRC) $(LDFLAGS) $(LDLIBS)
+
 NOTES_SRC = test_notes.c $(ROOT)/src/system/notes/notesstore.c $(ROOT)/src/system/text/textfile.c
 .PHONY: notes
 notes: $(BUILD)/test_notes
@@ -279,6 +303,7 @@ TAGS_DECODE_SRC = $(ROOT)/src/system/decode/decode.c \
                   $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
                   $(ROOT)/src/system/core/json.c
 TAGS_SRC = test_tags.c \
+           $(ROOT)/src/system/tagmanager/tagwrite.c \
            $(ROOT)/src/system/library/metadata.c \
            $(ROOT)/src/system/library/oggtags.c \
            $(ROOT)/src/system/library/vorbischap.c \
@@ -301,6 +326,7 @@ $(BUILD)/test_tags: $(TAGS_SRC) $(TAGS_DECODE_SRC) \
 # SD-card mmap artwork (>8 MB), SIGBUS card-removal recovery, streaming Ogg and
 # APEv2 embedded covers, 1000-row JPEG player_covers cache and id_worker.
 COVERS_SRC = test_covers.c \
+             $(ROOT)/src/system/tagmanager/tagwrite.c \
              $(ROOT)/src/system/library/albumart.c \
              $(ROOT)/src/system/library/oggtags.c \
              $(ROOT)/src/system/library/cue.c \
@@ -342,6 +368,27 @@ $(BUILD)/drflac_impl.o: $(ROOT)/src/system/decode/dr_flac.h
 
 sanitize-radioflac:
 	$(MAKE) BUILD=.build/sanitize CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' radioflac
+
+# Radio favourites and recents against the real store and SQLite, including
+# URL-only stations and reopening after the database is replaced.
+.PHONY: radio-store
+radio-store: $(BUILD)/test_radio_store
+	$(BUILD)/test_radio_store
+
+$(BUILD)/test_radio_store: test_radio_store.c $(ROOT)/src/system/streaming/radio.c \
+                           $(ROOT)/src/system/streaming/radio.h $(BUILD)/sqlite3_impl.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-format-truncation -o $@ test_radio_store.c $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
+# The playback LED's stock PCM sample-rate bands and their color/pattern map.
+.PHONY: led-rate
+led-rate: $(BUILD)/test_led_rate
+	$(BUILD)/test_led_rate
+
+$(BUILD)/test_led_rate: test_led_rate.c $(ROOT)/src/system/device/led.c \
+                        $(ROOT)/src/system/device/led.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_led_rate.c $(LDFLAGS) $(LDLIBS)
 
 # The Most played list against the real library database: the play upsert
 # device_state.c runs at track start, the handle the page opens, and the
@@ -403,7 +450,8 @@ clean:
 # disabling SDL, FreeType and device drivers; no audio service is linked.
 UI_SRC = $(ROOT)/tests/ui/test_main_menu.c $(ROOT)/src/gui/shell/main_menu.c \
          $(ROOT)/src/gui/library/music.c $(ROOT)/src/gui/shell/popover.c \
-         $(ROOT)/src/gui/shell/gridpage.c $(ROOT)/src/gui/settings/appearance.c \
+         $(ROOT)/src/gui/shell/gridpage.c $(ROOT)/src/gui/pet/peticon.c \
+         $(ROOT)/src/gui/settings/appearance.c \
          $(ROOT)/src/gui/settings/bootpicpage.c \
          $(ROOT)/src/gui/shell/corners.c $(ROOT)/src/gui/shell/settingsrow.c \
          $(ROOT)/src/gui/shell/theme.c \
@@ -412,6 +460,20 @@ UI_SRC = $(ROOT)/tests/ui/test_main_menu.c $(ROOT)/src/gui/shell/main_menu.c \
          $(ROOT)/src/gui/board_profile.c \
          $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
 UI_LVGL_SRC = $(shell find $(ROOT)/lvgl/src -name '*.c' 2>/dev/null)
+UI_LVGL_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+# Control Centre layout migration: the production parser and saved lists,
+# without constructing the unrelated radio/streaming services.
+.PHONY: quickpanel-layout
+quickpanel-layout: $(BUILD)/test_quickpanel_layout
+	$(BUILD)/test_quickpanel_layout
+
+$(BUILD)/test_quickpanel_layout: test_quickpanel_layout.c $(ROOT)/src/gui/shell/quickpanel.c \
+                                $(ROOT)/src/gui/shell/quickpanel.h $(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
+		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_quickpanel_layout.c \
+		$(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+
 UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_SRC)) \
          $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 UI_CPPFLAGS = $(CPPFLAGS) -I$(ROOT)/lvgl -DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"'
@@ -443,8 +505,13 @@ SAVER_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(SAVER_SRC)) \
 # every key, every row and every note inside the panel they are drawn on.
 TOOLS_SRC = $(ROOT)/tests/ui/test_tools_pages.c \
             $(ROOT)/src/gui/calculator/calculator.c $(ROOT)/src/gui/calculator/calcmodel.c \
+            $(ROOT)/src/gui/games/games.c $(ROOT)/src/gui/games/snake.c \
+            $(ROOT)/src/gui/games/game2048.c $(ROOT)/src/gui/games/dino.c \
             $(ROOT)/src/gui/notes/notes.c $(ROOT)/src/gui/notes/noteeditor.c \
+            $(ROOT)/src/gui/tagmanager/tagmanager.c $(ROOT)/src/system/tagmanager/tagwrite.c \
             $(ROOT)/src/gui/metronome/metronome.c \
+            $(ROOT)/src/gui/pet/petpage.c $(ROOT)/src/gui/pet/peticon.c \
+            $(ROOT)/src/system/pet/pet.c \
             $(ROOT)/src/system/notes/notesstore.c $(ROOT)/src/system/text/textfile.c \
             $(ROOT)/src/gui/library/textview.c $(ROOT)/src/gui/library/pictureview.c \
             $(ROOT)/src/gui/shell/morepage.c $(ROOT)/src/gui/shell/gridpage.c \
@@ -481,8 +548,37 @@ LYRICSEARCH_SRC = $(ROOT)/tests/ui/test_lyricsearch.c \
 LYRICSEARCH_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(LYRICSEARCH_SRC)) \
                   $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 
+# The three games in the More menu on the same renderer: built on first open,
+# repainted when the palette moves while they are on screen, and caught up on
+# the next show when it moved while they were not. The shell they hide is stubbed.
+GAMES_SRC = $(ROOT)/tests/ui/test_games.c \
+            $(ROOT)/src/gui/games/games.c $(ROOT)/src/gui/games/snake.c \
+            $(ROOT)/src/gui/games/game2048.c $(ROOT)/src/gui/games/dino.c \
+            $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
+            $(ROOT)/src/gui/board_profile.c \
+            $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+GAMES_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(GAMES_SRC)) \
+            $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+# PEQ profile selection on the real page and DSP engine, with the shell and
+# network AutoEq browser stubbed. No audio device or network is needed.
+PEQPAGE_SRC = $(ROOT)/tests/ui/test_peq_profiles.c $(ROOT)/src/gui/audio/peqpage.c \
+              $(ROOT)/src/system/audio/eq.c $(ROOT)/src/gui/shell/settingsrow.c \
+              $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
+              $(ROOT)/src/gui/board_profile.c $(ROOT)/src/system/core/config.c \
+              $(ROOT)/src/system/core/lang.c
+PEQPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(PEQPAGE_SRC)) \
+              $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+.PHONY: ui peq-ui
+peq-ui: $(BUILD)/test_peq_profiles
+	$(BUILD)/test_peq_profiles ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_peq_profiles: $(PEQPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 .PHONY: ui
-ui: $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages $(BUILD)/test_wifi_pages $(BUILD)/test_chargescreen $(BUILD)/test_lyricsearch
+ui: $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages $(BUILD)/test_wifi_pages $(BUILD)/test_chargescreen $(BUILD)/test_lyricsearch $(BUILD)/test_games $(BUILD)/test_peq_profiles $(BUILD)/test_quickpanel_layout
 	$(BUILD)/test_main_menu ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_main_menu ../../sonix-packer/assets/V1/usr/resource/sonix/language saved
 	$(BUILD)/test_screensaver ../../sonix-packer/assets/V1/usr/resource/sonix/language
@@ -491,6 +587,9 @@ ui: $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages 
 	$(BUILD)/test_wifi_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_chargescreen ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_lyricsearch ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_games ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_peq_profiles ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_quickpanel_layout
 
 $(BUILD)/test_main_menu: $(UI_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -510,6 +609,9 @@ $(BUILD)/test_wifi_pages: $(WIFIPAGE_OBJ)
 $(BUILD)/test_lyricsearch: $(LYRICSEARCH_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+$(BUILD)/test_games: $(GAMES_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 $(BUILD)/ui/%.o: $(ROOT)/%.c ui/lv_conf.h $(ROOT)/lv_conf.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UI_CPPFLAGS) $(UI_CFLAGS) -c $< -o $@
@@ -519,7 +621,7 @@ $(BUILD)/ui/lvgl/%.o: $(ROOT)/lvgl/%.c ui/lv_conf.h $(ROOT)/lv_conf.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UI_CPPFLAGS) $(filter-out -Werror,$(UI_CFLAGS)) -c $< -o $@
 
--include $(sort $(UI_OBJ:.o=.d) $(SAVER_OBJ:.o=.d) $(WIFIPAGE_OBJ:.o=.d) $(LYRICSEARCH_OBJ:.o=.d))
+-include $(sort $(PEQPAGE_OBJ:.o=.d) $(UI_OBJ:.o=.d) $(SAVER_OBJ:.o=.d) $(WIFIPAGE_OBJ:.o=.d) $(LYRICSEARCH_OBJ:.o=.d) $(GAMES_OBJ:.o=.d))
 
 # Smart Mix track-count limits and traversal, with a memory-only graph fixture.
 GENIUS_SRC = test_genius.c $(ROOT)/src/system/library/genius.c
@@ -540,3 +642,16 @@ basebuild: $(BUILD)/test_sysinfo
 $(BUILD)/test_sysinfo: test_sysinfo.c $(ROOT)/src/system/device/sysinfo.c $(ROOT)/src/system/device/sysinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DHOST_BUILD -o $@ test_sysinfo.c $(ROOT)/src/system/device/sysinfo.c $(LDFLAGS) $(LDLIBS)
+
+# Lossless metadata rewrites and malformed input safety.
+.PHONY: tagwrite
+tagwrite:
+	python3 test_tagwrite.py
+
+.PHONY: artsearch
+artsearch: $(BUILD)/test_artsearch
+	$(BUILD)/test_artsearch
+
+$(BUILD)/test_artsearch: test_artsearch.c $(ROOT)/src/system/tagmanager/artsearch.c $(ROOT)/src/system/core/json.c $(ROOT)/src/system/library/jpeginfo.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)

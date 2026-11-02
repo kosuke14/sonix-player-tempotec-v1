@@ -38,6 +38,9 @@
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/gearboy/gearboysettings.h"
 #include "src/gui/flappybird/flappybird.h"
+#include "src/gui/games/dino.h"
+#include "src/gui/games/game2048.h"
+#include "src/gui/games/snake.h"
 #include "src/gui/gearboy/gearboyplay.h"
 #include "src/gui/shell/main_menu.h"
 #include "src/gui/library/medialist.h"
@@ -45,9 +48,11 @@
 #include "src/gui/library/pictureview.h"
 #include "src/gui/library/textview.h"
 #include "src/gui/calculator/calculator.h"
+#include "src/gui/pet/petpage.h"
 #include "src/gui/notes/noteeditor.h"
 #include "src/gui/metronome/metronome.h"
 #include "src/gui/notes/notes.h"
+#include "src/gui/tagmanager/tagmanager.h"
 #include "src/gui/shell/morepage.h"
 #include "src/gui/shell/popover.h"
 #include "src/gui/nowplaying/trackmenu.h"
@@ -527,6 +532,14 @@ static void modal_init(gui_config_t *cfg) {
 static void key_async_cb(void *user_data) {
 	gui_key_t key = (gui_key_t)(uintptr_t)user_data;
 
+	// The volume keys are not transport keys and belong to no page: the step
+	// itself was already taken in system.c. They are here only so the pet can
+	// answer them, and they stop here whatever the device is doing.
+	if (key == GUI_KEY_VOL_UP || key == GUI_KEY_VOL_DOWN) {
+		petpage_poke(key == GUI_KEY_VOL_UP ? PET_POKE_VOLUME_UP : PET_POKE_VOLUME_DOWN);
+		return;
+	}
+
 	// While a Game Boy is open the device's Play/Pause and skip keys are
 	// Start/Select inputs, not music transport commands.
 	if (gearboyplay_handle_key(key)) {
@@ -569,6 +582,9 @@ static void key_async_cb(void *user_data) {
 			return;
 		}
 		break;
+	case GUI_KEY_VOL_UP:
+	case GUI_KEY_VOL_DOWN:
+		break; // answered and returned at the top of this function
 	}
 
 	switch (key) {
@@ -577,10 +593,15 @@ static void key_async_cb(void *user_data) {
 		break;
 	case GUI_KEY_NEXT:
 		player_key_next();
+		petpage_poke(PET_POKE_NEXT);
 		break;
 	case GUI_KEY_PREV:
 		player_key_prev();
+		petpage_poke(PET_POKE_PREV);
 		break;
+	case GUI_KEY_VOL_UP:
+	case GUI_KEY_VOL_DOWN:
+		break; // answered at the top, before anything could claim them
 	}
 }
 
@@ -687,6 +708,7 @@ void gui_init(gui_config_t *cfg) {
 	gearboyplay_screen = lv_obj_create(NULL);
 	flappybird_screen = lv_obj_create(NULL);
 	calculator_screen = lv_obj_create(NULL);
+	petpage_screen = lv_obj_create(NULL);
 	notes_screen = lv_obj_create(NULL);
 	metronome_screen = lv_obj_create(NULL);
 	noteeditor_screen = lv_obj_create(NULL);
@@ -736,6 +758,12 @@ void gui_init(gui_config_t *cfg) {
 	gearboysettings_init(cfg); // before the page: its gear opens this
 	gearboypage_init(cfg);
 	flappybird_init(cfg);
+	// The three games in src/gui/games only keep the config here: each builds its
+	// page the first time it is opened, so a game nobody opens costs nothing at
+	// start-up. See the comment above each game's build function.
+	game2048_init(cfg);
+	snake_init(cfg);
+	dino_init(cfg);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
 	// reader.
 	ebookreader_init(cfg);
@@ -745,8 +773,12 @@ void gui_init(gui_config_t *cfg) {
 	ebookpage_init(cfg);
 	// Before morepage: the More menu points at both of them.
 	calculator_init(cfg);
+	// Also before morepage: its tile opens the pet. The page itself is built
+	// on the first visit, so a player who never looks at it pays nothing.
+	petpage_init(cfg);
 	noteeditor_init(cfg); // before notes: a row of the shelf opens it
 	notes_init(cfg);
+	tagmanager_init(cfg);
 	metronome_init(cfg); // before morepage: its tile opens it
 	morepage_init(cfg);
 	textview_init(cfg); // before filespage: a text file tapped there opens here
@@ -821,6 +853,7 @@ void gui_init(gui_config_t *cfg) {
 		btsettings_screen, btaudio_screen,	 airpodspage_screen, airplay_screen,   streaming_screen,
 		radiopage_screen,  radiolist_screen, radiosearch_screen,
 		dlna_screen,	   sonixlink_screen,	 morepage_screen,	  gearboypage_screen,
+		petpage_screen,
 	};
 	for (size_t i = 0; i < sizeof(back_swipe_screens) / sizeof(back_swipe_screens[0]); i++) {
 		switcher_attach_back_gesture(back_swipe_screens[i]);

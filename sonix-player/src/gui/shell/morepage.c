@@ -9,11 +9,17 @@
 #include "src/gui/calculator/calculator.h"
 #include "src/gui/ebook/ebookpage.h"
 #include "src/gui/flappybird/flappybird.h"
+#include "src/gui/games/dino.h"
+#include "src/gui/games/game2048.h"
+#include "src/gui/games/snake.h"
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/library/audiobooks.h"
 #include "src/gui/library/filespage.h"
 #include "src/gui/metronome/metronome.h"
 #include "src/gui/notes/notes.h"
+#include "src/gui/tagmanager/tagmanager.h"
+#include "src/gui/pet/petpage.h"
+#include "src/gui/pet/peticon.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/gridpage.h"
 #include "src/gui/shell/icons.h"
@@ -61,8 +67,22 @@ static bool more_tokyo_icon(const char *label, const lv_image_dsc_t **icon, them
 	} else if (strcmp(label, "flappy_bird") == 0) {
 		*icon = &icon_bird;
 		*tone = THEME_SEMANTIC_PURPLE;
+	} else if (strcmp(label, "2048") == 0) {
+		*icon = &icon_game_2048;
+		*tone = THEME_SEMANTIC_BLUE;
+	} else if (strcmp(label, "snake") == 0) {
+		*icon = &icon_game_snake;
+		*tone = THEME_SEMANTIC_GREEN;
+	} else if (strcmp(label, "dino") == 0) {
+		*icon = &icon_game_dino;
+		*tone = THEME_SEMANTIC_AMBER;
 	} else if (strcmp(label, "calculator") == 0) {
 		*icon = &icon_calculator;
+		*tone = THEME_SEMANTIC_CYAN;
+	} else if (strcmp(label, "Tag Manager") == 0) {
+		// Editing metadata, not opening another folder: the pencil keeps this
+		// row distinct from File Manager in the compact list too.
+		*icon = &icon_tag_manager;
 		*tone = THEME_SEMANTIC_CYAN;
 	} else if (strcmp(label, "notes") == 0) {
 		*icon = &icon_notes;
@@ -70,6 +90,9 @@ static bool more_tokyo_icon(const char *label, const lv_image_dsc_t **icon, them
 	} else if (strcmp(label, "metronome") == 0) {
 		*icon = &icon_metronome;
 		*tone = THEME_SEMANTIC_GREEN;
+	} else if (strcmp(label, "pet") == 0) {
+		*icon = &icon_pet;
+		*tone = THEME_SEMANTIC_PURPLE;
 	} else {
 		return false;
 	}
@@ -145,8 +168,19 @@ static const grid_entry_t MORE_ENTRIES[] = {
 	// when the page is entered, so a card that changed under the player
 	// shows what is on it now.
 	{"file_explorer", &icon_menu_file_explorer, NULL, filespage_open},
+	// Its own tile: two destinations that share a picture look like one
+	// destination typed twice, and the tag editor does not browse folders.
+	{"Tag Manager", &icon_menu_tag_manager, NULL, tagmanager_open},
 	// An action: the artwork is read from the resource tree on the way in.
 	{"flappy_bird", &icon_menu_flappy_bird, NULL, flappybird_open},
+	// The three games take the same route as Flappy Bird: an action rather than
+	// a screen, because a run is read back from the config on the way in. 2048
+	// picks up where its board was left, and the other two agree with the best
+	// score on the card. Each has a drawing of what it is about, so the picture
+	// says which game it is before the caption does.
+	{"2048", &icon_menu_game_2048, NULL, game2048_open},
+	{"snake", &icon_menu_game_snake, NULL, snake_open},
+	{"dino", &icon_menu_game_dino, NULL, dino_open},
 	// Both of these are actions rather than screens for the file
 	// manager's reason: the calculator repaints its display from the sum
 	// it was left holding, and the notes shelf reads the card.
@@ -156,9 +190,16 @@ static const grid_entry_t MORE_ENTRIES[] = {
 	// from the settings as they were left, and the page repaints them on the
 	// way in.
 	{"metronome", &icon_menu_metronome, NULL, metronome_open},
+	// The pet is an action for the same reason, and one more: it is built the
+	// first time it is opened, so a player who never visits it pays nothing for
+	// it. What it knows about the music comes from a one-second tick that runs
+	// whether or not the page is up (petwatch.c), which is why it is not simply
+	// a screen with a timer of its own. Dark/Light show its own coloured tile;
+	// the white shape in peticon.h belongs to the function-glyph themes.
+	{"pet", &icon_menu_pet, NULL, petpage_open},
 };
 
-#define MORE_ENTRIES_MAX 12
+#define MORE_ENTRIES_MAX 13
 
 // The page's destinations for the settings in force now.
 //

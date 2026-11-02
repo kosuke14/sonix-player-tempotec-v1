@@ -7,18 +7,26 @@ make -C sonix-player/tests test
 make -C sonix-player/tests sanitize
 make -C sonix-player/tests swvolume
 make -C sonix-player/tests eq
+make -C sonix-player/tests peq-ui
+make -C sonix-player/tests quickpanel-layout
 make -C sonix-player/tests calculator
 make -C sonix-player/tests notes
+make -C sonix-player/tests tagwrite
+make -C sonix-player/tests artsearch
 make -C sonix-player/tests tagdate
 make -C sonix-player/tests genius
 make -C sonix-player/tests mostplayed
+make -C sonix-player/tests radio-store
+make -C sonix-player/tests led-rate
 make -C sonix-player/tests aamlayout
 make -C sonix-player/tests extractkeys
 ```
 
-These require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). They **do not require LVGL, ALSA, a MIPS toolchain, a music server, a real account, or downloaded audio**.
+The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `peq-ui`, `quickpanel-layout` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
 
 `run_subsonic_tests.py` starts a temporary threaded localhost HTTP server plus three HTTPS servers carrying the certificates in `tls_fixtures.py`, runs the C binary with a private temporary config directory, verifies its requests, then shuts down. All account values are synthetic. Build products live in ignored `.build/`; response/PCM fixtures are generated in memory rather than added to Git, and the three test certificates are pasted into that Python file rather than downloaded.
+
+The `tagwrite` suite checks FLAC and ID3 rewrites, artwork/audio preservation, validation and refusal of unsafe layouts. The `artsearch` suite uses a mocked network to test catalog parsing, URL validation and download limits. The aggregate `ui` suite exercises the Tag Manager browser, editor and cover selection at the V1 resolution with a mocked service.
 
 ## Coverage
 
@@ -75,7 +83,24 @@ for low-bitrate HE-AAC and speech streams as well as the usual 44.1 and
 48 kHz, each with the all-off no-op checked alongside it. A mono station is
 widened to an identical stereo pair before the chain, exactly as
 `radio_push_pcm()` does, and the tuned output has to stay identical on both
-channels. The config store is a temporary file; nothing else is stubbed.
+channels. It also checks both PEQ profiles across restarts from either slot,
+including their enable states and preamps; scoped preset import/export/reset;
+legacy `[peq]` migration; and unchanged graphic EQ/MSEB when PEQ changes.
+The config store is a temporary file; nothing else is stubbed.
+
+`make -C sonix-player/tests peq-ui` links the real PEQ page and DSP engine to
+LVGL's headless renderer. It checks the profile pills at 240×320 in all eleven
+languages and five themes, selection and back-drag guarding, refresh of an open
+band editor after a quick switch, and profile-scoped reset. The shell and network
+AutoEq browser are stubbed.
+
+`make -C sonix-player/tests quickpanel-layout` uses the production Control
+Centre list parser, accessors and move operations with headless LVGL. It checks
+that the new PEQ profile control does not displace existing defaults, fills an
+empty place in a saved v4 layout, waits in Settings when the grid is full, and
+keeps every control when moved into the first eight and reloaded. Unrelated
+playback/radio handlers are removed by linker section GC; no sheet is built.
+The full `ui` target includes both PEQ-related suites.
 
 ## Wi-Fi hidden networks
 
@@ -240,6 +265,23 @@ no date in it -- including a day-first date, which this reader will not guess
 at -- comes back empty. The fuller of two dates wins whatever order they
 arrive in, and each date resolves to one moment for sorting with the parts it
 left out settled on the first of January, and of the month.
+
+## Radio favourites and recents
+
+`make -C sonix-player/tests radio-store` includes the real radio module and
+SQLite store, with a temporary card directory. It checks that URL-only stations
+can be added, found, removed and reopened as favourites without exposing the
+synthetic storage key as a station UUID; that a repeated URL replaces its
+Recently Played row; that the ten-row limit and newest-first order hold; that a
+clean card gets its `.local` directory; and that replacing `radio.db` causes the
+open store to be reopened.
+
+## Playback LED sample-rate bands
+
+`make -C sonix-player/tests led-rate` checks the stock PCM bands at and around
+48 kHz and 192 kHz, along with the corresponding yellow, aqua and orange LED
+patterns. It also checks that a 176.4 kHz DoP carrier stays in the PCM band
+unless DSD is identified, and that DSD maps to white.
 
 ## Most played, against the real database
 
