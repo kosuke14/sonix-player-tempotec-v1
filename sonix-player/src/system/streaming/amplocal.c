@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -245,7 +246,10 @@ static bool daemon_spawn_locked(amp_channel_t *ch, bool auth_mode) {
 	// are the difference between a bug report and a shrug.
 	char diag_path[400];
 	snprintf(diag_path, sizeof(diag_path), "%.280s/qemu-arm-diag", s_local.guest_root);
-	if (access(diag_path, X_OK) == 0) {
+	if (access(diag_path, F_OK) == 0) {
+		// A copy that arrived over MTP lost its exec bit; restore it, since
+		// the whole point of this binary is that it runs.
+		chmod(diag_path, 0755);
 		snprintf(qemu_path, sizeof(qemu_path), "%s", diag_path);
 	}
 
