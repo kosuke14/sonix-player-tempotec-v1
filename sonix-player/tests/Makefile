@@ -159,6 +159,20 @@ $(BUILD)/test_gsa: $(GSA_SRC) $(ROOT)/src/system/account/gsa.h \
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(GSA_SRC) $(LDFLAGS) $(LDLIBS)
 
+# The guest catalog: the token-free iTunes search, the lookup and the
+# preview fetch, against a local socket that serves the answers. The card is
+# a directory in /tmp; nothing here touches the network.
+ITUNES_SRC = test_ampitunes.c support.c $(ROOT)/src/system/streaming/ampitunes.c \
+             $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
+             $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c
+.PHONY: ampitunes
+ampitunes: $(BUILD)/test_ampitunes
+	$(BUILD)/test_ampitunes
+
+$(BUILD)/test_ampitunes: $(ITUNES_SRC) $(ROOT)/src/system/streaming/ampitunes.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(ITUNES_SRC) $(LDFLAGS) $(LDLIBS)
+
 # The Apple Music source: the whole producer pipeline -- the playback dispatch,
 # the playlist walk, the fMP4 slicing, the wrapper batches and the ADTS
 # re-emission -- against the same local fakes, plus the queue's pseudo-path

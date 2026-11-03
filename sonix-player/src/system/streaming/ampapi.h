@@ -16,6 +16,7 @@ typedef struct {
 	char artist[256];
 	char album[256];
 	char artwork[512]; // a JPEG/PNG URL template; {w}x{h} in the middle
+	char preview[512]; // a DRM-free preview m4a; the guest catalog only, empty elsewhere
 	int duration_ms;
 } ampapi_song_t;
 

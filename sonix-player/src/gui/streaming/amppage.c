@@ -14,10 +14,12 @@
 #include "src/system/core/json.h"
 #include "src/system/core/lang.h"
 #include "src/system/core/utils.h"
+#include "src/system/device/system.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/ampapi.h"
 #include "src/system/streaming/ampguest.h"
+#include "src/system/streaming/ampitunes.h"
 #include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/amplocal.h"
 #include "src/system/streaming/streamturn.h"
@@ -54,12 +56,14 @@ static char pending_user[128], pending_pass[128]; // wiped once the outcome is i
 // The same single-mailbox worker shape the other streaming pages use: results
 // own their memory until the GUI takes them, and a late worker can never
 // overwrite a list the GUI is reading.
-typedef enum { JOB_SEARCH, JOB_ALBUM, JOB_ME, JOB_LOGIN, JOB_2FA, JOB_LOGOUT } job_kind_t;
+typedef enum { JOB_SEARCH, JOB_ALBUM, JOB_PREVIEW, JOB_ME, JOB_LOGIN, JOB_2FA, JOB_LOGOUT }
+	job_kind_t;
 typedef struct {
 	unsigned serial;
 	job_kind_t kind;
 	char term[64];
 	char album_id[32]; // the catalog album a JOB_ALBUM page lists
+	ampapi_song_t song; // the row a JOB_PREVIEW fetches its preview for
 	char username[128]; // the Apple ID, and its password for a sign-in
 	char password[128];
 	char code[8]; // the 2FA code, when the flow asks for one
@@ -71,6 +75,7 @@ typedef struct {
 	int count;
 	bool signed_in;   // the daemon's session state, read with every job
 	char apple_id[128];
+	char file[768];   // the preview a JOB_PREVIEW put on the card
 	char error[192];
 } result_t;
 
@@ -138,49 +143,96 @@ static void *worker_main(void *arg) {
 				memset(job.code, 0, sizeof(job.code));
 			} else if (job.kind == JOB_LOGOUT) {
 				result->count = amplocal_logout(result->error, sizeof(result->error)) ? 0 : -1;
+		} else if (job.kind == JOB_PREVIEW) {
+			// The guest catalog: the row's thirty-second preview, fetched
+			// to the card and then handed to the queue like any local
+			// file. One track per tap -- the whole page would mean
+			// downloading twenty files to hear one.
+			if (ampitunes_fetch(&job.song, result->error, sizeof(result->error)) &&
+				ampitunes_ready(&job.song, result->file, sizeof(result->file))) {
+				result->count = 0;
 			} else {
-				amplocal_me_t me;
-				// The tokens rotate whenever the daemon re-authenticates, so
-				// every job reads them fresh; they are wiped before the result
-				// is sent.
-				if (!amplocal_me(&me, result->error, sizeof(result->error))) {
-					result->count = -1;
-				} else {
-					result->signed_in = me.authenticated;
-					snprintf(result->apple_id, sizeof(result->apple_id), "%s", me.apple_id);
-					if (job.kind == JOB_ME) {
-						result->count = 0; // the state snapshot is the whole answer
-					} else if (!me.authenticated) {
-						result->count = -1;
-						snprintf(result->error, sizeof(result->error), "amp_not_authenticated");
-					} else if (job.kind == JOB_ALBUM) {
-						char storefront[32];
-						snprintf(storefront, sizeof(storefront), "%.20s",
-								 config_get("applemusic", "storefront", ampapi_default_storefront()));
-						result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
-						result->count =
-							result->songs
-								? ampapi_album_tracks(me.dev_token, me.music_user_token,
-													  storefront, job.album_id, result->songs,
-													  AMP_PAGE, result->error,
-													  sizeof(result->error))
-								: -1;
-					} else {
-						char storefront[32];
-						snprintf(storefront, sizeof(storefront), "%.20s",
-								 config_get("applemusic", "storefront", ampapi_default_storefront()));
-						result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
-						result->count = result->songs
-							? ampapi_search_songs(me.dev_token, me.music_user_token, storefront,
-												  job.term, result->songs, AMP_PAGE,
-												  result->error, sizeof(result->error))
-							: -1;
-					}
-					memset(&me, 0, sizeof(me));
+				result->count = -1;
+				if (!result->error[0]) {
+					snprintf(result->error, sizeof(result->error), "ampitunes_failed");
 				}
 			}
-			// A sign-in hop changes the session behind the flow, so the
-			// account row is refreshed from a fresh snapshot inside the job.
+		} else {
+			amplocal_me_t me;
+			// The tokens rotate whenever the daemon re-authenticates, so
+			// every job reads them fresh; they are wiped before the result
+			// is sent. The daemon may be missing altogether -- that is the
+			// not-signed-in case, and the search still answers from the
+			// token-free catalog.
+			bool have_me = amplocal_me(&me, result->error, sizeof(result->error));
+if (job.kind == JOB_SEARCH) {
+				char storefront[32];
+				snprintf(storefront, sizeof(storefront), "%.20s",
+						 config_get("applemusic", "storefront",
+									ampapi_default_storefront()));
+				result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
+				if (result->songs) {
+					if (have_me && me.authenticated) {
+						result->count =
+							ampapi_search_songs(me.dev_token, me.music_user_token,
+												storefront, job.term, result->songs,
+												AMP_PAGE, result->error,
+												sizeof(result->error));
+					} else {
+						result->count = ampitunes_search(job.term, result->songs, AMP_PAGE,
+														 result->error, sizeof(result->error));
+					}
+				} else {
+					result->count = -1;
+				}
+			} else if (!have_me) {
+				result->count = -1; // the /me failure is already the message
+			} else if (job.kind == JOB_ME) {
+				result->count = 0; // the state snapshot is the whole answer
+			} else if (!me.authenticated) {
+				result->count = -1;
+				snprintf(result->error, sizeof(result->error), "amp_not_authenticated");
+			} else if (job.kind == JOB_ALBUM) {
+				char storefront[32];
+				snprintf(storefront, sizeof(storefront), "%.20s",
+						 config_get("applemusic", "storefront",
+									ampapi_default_storefront()));
+				result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
+				if (result->songs) {
+					if (have_me && me.authenticated) {
+						result->count =
+							ampapi_album_tracks(me.dev_token, me.music_user_token,
+												storefront, job.album_id, result->songs,
+												AMP_PAGE, result->error,
+												sizeof(result->error));
+					} else {
+						result->count = ampitunes_album_tracks(job.album_id, result->songs,
+															   AMP_PAGE, result->error,
+															   sizeof(result->error));
+					}
+				} else {
+					result->count = -1;
+				}
+			} else {
+				char storefront[32];
+				snprintf(storefront, sizeof(storefront), "%.20s",
+						 config_get("applemusic", "storefront",
+									ampapi_default_storefront()));
+				result->songs = calloc(AMP_PAGE, sizeof(*result->songs));
+				result->count = result->songs
+					? ampapi_search_songs(me.dev_token, me.music_user_token, storefront,
+										  job.term, result->songs, AMP_PAGE,
+										  result->error, sizeof(result->error))
+					: -1;
+			}
+			if (have_me) {
+				result->signed_in = me.authenticated;
+				snprintf(result->apple_id, sizeof(result->apple_id), "%s", me.apple_id);
+				memset(&me, 0, sizeof(me));
+			}
+		}
+		// A sign-in hop changes the session behind the flow, so the
+		// account row is refreshed from a fresh snapshot inside the job.
 			if (job.kind == JOB_LOGIN || job.kind == JOB_2FA || job.kind == JOB_LOGOUT) {
 				if (result->count >= 0) {
 					amplocal_me_t me;
@@ -235,8 +287,9 @@ static bool submit(job_t *job) {
 	pthread_cond_signal(&job_ready);
 	pthread_mutex_unlock(&job_lock);
 	busy = true;
-	job_owner = (job->kind == JOB_SEARCH || job->kind == JOB_ALBUM) ? list_screen
-																   : settings_screen;
+	job_owner = (job->kind == JOB_SEARCH || job->kind == JOB_ALBUM || job->kind == JOB_PREVIEW)
+					? list_screen
+					: settings_screen;
 	toast_busy("loading");
 	return true;
 }
@@ -812,7 +865,9 @@ static void run_search(const char *term) {
 // The album page: the catalog album's tracks in the list the search uses.
 // Called from the track menu on a playing Apple Music track.
 bool amppage_open_album(const char *album_id, const char *title) {
-	if (!album_id || !album_id[0] || busy || !configured()) {
+	// The album answers with or without the guest tree: MusicKit when signed
+	// in, the iTunes lookup when not.
+	if (!album_id || !album_id[0] || busy) {
 		return false;
 	}
 	free(shown);
@@ -839,13 +894,10 @@ static void search_cb(lv_event_t *e) {
 	if (busy || switcher_back_drag_active()) {
 		return;
 	}
-	if (!configured()) {
-		draft_load();
-		settings_refresh();
-		switch_screen(settings_screen);
-		toast_error("amp_not_configured");
-		return;
-	}
+	// No gate on the guest tree: the search answers with or without it.
+	// Signed in, the MusicKit catalog; not, the token-free iTunes one whose
+	// rows play their previews. This is what the page does before any
+	// sign-in, which is the whole point of the guest catalog.
 	searching = true; // the shared keyboard field is the search term here
 	lv_label_set_text(edit_title, tr("applemusic_search"));
 	lv_textarea_set_text(edit_field, "");
@@ -861,6 +913,16 @@ static void row_cb(lv_event_t *e) {
 	}
 	int index = (int)(intptr_t)lv_event_get_user_data(e);
 	if (index < 0 || index >= shown_count) {
+		return;
+	}
+	// The guest rows have no stream behind them: what plays is the
+	// thirty-second preview, fetched to the card first and then handed to
+	// the queue like any local file. One track per tap -- the whole page
+	// would mean downloading twenty files to hear one.
+	if (!session_signed_in) {
+		job_t job = {.kind = JOB_PREVIEW};
+		job.song = shown[index];
+		submit(&job);
 		return;
 	}
 	// Paths are small, fixed and credential-free. The playlist takes copies
@@ -945,6 +1007,7 @@ void amppage_init(gui_config_t *cfg) {
 	config = cfg;
 	device_state_add_prepare_cb(ampstream_prepare);
 	streamturn_register_abandon(ampstream_cancel);
+	ampitunes_set_root(storage_sd_root());
 
 	amp_screen = screen();
 	lv_obj_t *home = settingsrow_page(amp_screen, cfg, "applemusic");
@@ -1073,6 +1136,17 @@ static void poll_cb(lv_timer_t *timer) {
 					lv_label_set_text(list_title, result->job.term);
 				}
 				rebuild_list();
+			} else if (result->job.kind == JOB_PREVIEW) {
+				if (result->file[0]) {
+					// A queue of exactly one: the guest catalog has no
+					// next track to advance to, and stopping beats picking
+					// something at random from the user's library.
+					const char *one[1] = {result->file};
+					streamturn_abandon_all();
+					device_state_play_list(one, 1, 0);
+					player_refresh_now_playing();
+					player_sheet_open(true);
+				}
 			} else if (result->job.kind == JOB_LOGIN) {
 				if (result->count == 1) {
 					apply_state(result);
