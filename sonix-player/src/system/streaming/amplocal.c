@@ -381,7 +381,10 @@ static bool daemon_round_trip(amp_channel_t *ch, int opcode, const uint8_t *payl
 							  char *error, size_t error_size) {
 	if (ch->pid <= 0) {
 		if (!daemon_spawn_locked(ch, opcode != 7 && opcode != 9 && opcode != 10)) {
-			snprintf(error, error_size, "amp_guest_spawn_failed");
+			// The specific failure (tree missing, data dir, pipes, fork)
+			// reaches the settings page instead of a generic wrapper.
+			snprintf(error, error_size, "%s",
+					 s_local.last_error[0] ? s_local.last_error : "amp_guest_spawn_failed");
 			return false;
 		}
 	}
