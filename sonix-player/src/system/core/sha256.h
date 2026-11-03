@@ -23,4 +23,7 @@ void sha256_update(sha256_ctx *c, const void *data, size_t len);
 // Writes the digest as lower-case hex. The context is spent afterwards.
 void sha256_final_hex(sha256_ctx *c, char out[SHA256_HEX_LEN]);
 
+// The same, as the 32 raw bytes. The context is spent afterwards.
+void sha256_final_raw(sha256_ctx *c, uint8_t out[SHA256_DIGEST_LEN]);
+
 #endif /* SHA256_H */

@@ -94,6 +94,29 @@ void sha256_update(sha256_ctx *c, const void *data, size_t len) {
 	c->have = len;
 }
 
+void sha256_final_raw(sha256_ctx *c, uint8_t out[SHA256_DIGEST_LEN]) {
+	uint64_t bits = c->bits;
+
+	c->block[c->have++] = 0x80;
+	if (c->have > 56) {
+		memset(c->block + c->have, 0, 64 - c->have);
+		sha256_block(c, c->block);
+		c->have = 0;
+	}
+	memset(c->block + c->have, 0, 56 - c->have);
+	for (int i = 0; i < 8; i++) {
+		c->block[56 + i] = (unsigned char)(bits >> (56 - 8 * i));
+	}
+	sha256_block(c, c->block);
+
+	for (int i = 0; i < 8; i++) {
+		out[i * 4] = (uint8_t)(c->h[i] >> 24);
+		out[i * 4 + 1] = (uint8_t)(c->h[i] >> 16);
+		out[i * 4 + 2] = (uint8_t)(c->h[i] >> 8);
+		out[i * 4 + 3] = (uint8_t)c->h[i];
+	}
+}
+
 void sha256_final_hex(sha256_ctx *c, char out[SHA256_HEX_LEN]) {
 	uint64_t bits = c->bits;
 
