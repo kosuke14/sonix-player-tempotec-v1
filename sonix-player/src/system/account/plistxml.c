@@ -355,6 +355,26 @@ static int parse_value(plist_t *pl, const char **p, const char *end, int parent,
 		*p = ve;
 		return expect_close(p, end, "string") ? node : -1;
 	}
+	// The booleans the catalog and sign-in answers carry: self-closing, no
+	// body, and read as the integers 1 and 0.
+	if (strncmp(tag, "true/>", 6) == 0) {
+		*p += 7;
+		int node = add_node(pl, parent, key, PLIST_INT);
+		if (node < 0) {
+			return -1;
+		}
+		pl->nodes[node].i = 1;
+		return node;
+	}
+	if (strncmp(tag, "false/>", 7) == 0) {
+		*p += 8;
+		int node = add_node(pl, parent, key, PLIST_INT);
+		if (node < 0) {
+			return -1;
+		}
+		pl->nodes[node].i = 0;
+		return node;
+	}
 	if (strncmp(tag, "integer>", 8) == 0) {
 		*p += 9;
 		char num[32];

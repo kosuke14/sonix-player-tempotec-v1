@@ -159,6 +159,22 @@ $(BUILD)/test_gsa: $(GSA_SRC) $(ROOT)/src/system/account/gsa.h \
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(GSA_SRC) $(LDFLAGS) $(LDLIBS)
 
+# The anisette assembly: the state the card keeps and the ten headers the
+# GrandSlam calls consume, against a local socket that plays the v3 server.
+# Provisioning needs a live websocket; it is not covered here.
+ANISETTE_SRC = test_anisette.c support.c $(ROOT)/src/system/streaming/anisette.c \
+               $(ROOT)/src/system/account/plistxml.c $(ROOT)/src/system/core/sha256.c \
+               $(ROOT)/src/system/core/base64.c $(ROOT)/src/system/net/http.c \
+               $(ROOT)/src/system/net/tls.c $(ROOT)/src/system/core/json.c \
+               $(ROOT)/src/system/core/config.c
+.PHONY: anisette
+anisette: $(BUILD)/test_anisette
+	$(BUILD)/test_anisette
+
+$(BUILD)/test_anisette: $(ANISETTE_SRC) $(ROOT)/src/system/streaming/anisette.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(ANISETTE_SRC) $(LDFLAGS) $(LDLIBS)
+
 # The guest catalog: the token-free iTunes search, the lookup and the
 # preview fetch, against a local socket that serves the answers. The card is
 # a directory in /tmp; nothing here touches the network.

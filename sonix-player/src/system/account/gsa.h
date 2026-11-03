@@ -9,10 +9,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// The anisette headers every GrandSlam request carries. For now they come
-// from a provider the caller fills (a remote anisette server's answer, or
-// user-supplied machine data); the native ADI dance is a later slab.
-#define GSA_ANISETTE_MAX 8
+// The anisette headers every GrandSlam request carries. They come from the
+// anisette module, which assembles the full ten the protocol wants: the
+// machine data fetched from the configured anisette server, and the rest
+// derived on the device.
+#define GSA_ANISETTE_MAX 12
 
 typedef struct {
 	char key[64];

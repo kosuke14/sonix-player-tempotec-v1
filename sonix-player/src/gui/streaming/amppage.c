@@ -21,6 +21,7 @@
 #include "src/system/streaming/ampguest.h"
 #include "src/system/streaming/ampitunes.h"
 #include "src/system/streaming/ampstream.h"
+#include "src/system/streaming/anisette.h"
 #include "src/system/streaming/amplocal.h"
 #include "src/system/streaming/streamturn.h"
 
@@ -1008,6 +1009,8 @@ void amppage_init(gui_config_t *cfg) {
 	device_state_add_prepare_cb(ampstream_prepare);
 	streamturn_register_abandon(ampstream_cancel);
 	ampitunes_set_root(storage_sd_root());
+	anisette_set_root(storage_sd_root());
+	anisette_set_server(config_get("applemusic", "anisette_url", ""));
 
 	amp_screen = screen();
 	lv_obj_t *home = settingsrow_page(amp_screen, cfg, "applemusic");
