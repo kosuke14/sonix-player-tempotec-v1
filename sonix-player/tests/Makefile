@@ -141,6 +141,24 @@ $(BUILD)/test_ampwrapper: $(AMPW_SRC) $(ROOT)/src/system/streaming/ampwrapper.h 
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(AMPW_SRC) $(LDFLAGS) $(LDLIBS)
 
+# The native GrandSlam sign-in: the SRP and PBKDF2 vectors, the plist framing
+# roundtrip, and the AES decode of the spd blob. The live server is not
+# touched: the protocol shapes are checked offline.
+GSA_SRC = test_gsa.c support.c $(ROOT)/src/system/account/srp.c \
+           $(ROOT)/src/system/account/bignum.c $(ROOT)/src/system/account/pbkdf2.c \
+           $(ROOT)/src/system/account/plistxml.c $(ROOT)/src/system/account/gsa.c \
+           $(ROOT)/src/system/core/sha256.c \
+           $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
+           $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c
+.PHONY: gsa
+gsa: $(BUILD)/test_gsa
+	$(BUILD)/test_gsa
+
+$(BUILD)/test_gsa: $(GSA_SRC) $(ROOT)/src/system/account/gsa.h \
+                   $(ROOT)/src/system/account/srp.h $(ROOT)/src/system/account/plistxml.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(GSA_SRC) $(LDFLAGS) $(LDLIBS)
+
 # The Apple Music source: the whole producer pipeline -- the playback dispatch,
 # the playlist walk, the fMP4 slicing, the wrapper batches and the ADTS
 # re-emission -- against the same local fakes, plus the queue's pseudo-path
