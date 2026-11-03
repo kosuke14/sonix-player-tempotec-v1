@@ -101,9 +101,24 @@ bool ampguest_present(void) {
 	if (!card_root(root, sizeof(root))) {
 		return false;
 	}
-	snprintf(marker, sizeof(marker), "%s/.ampguest/system/bin/linker", root);
-	struct stat st;
-	return stat(marker, &st) == 0 && S_ISREG(st.st_mode);
+	// The tree is whole only when every piece the spawn needs exists: the
+	// emulator (either build), the linker and both daemons. A partial tree --
+	// a broken MTP session, a half-refetch -- must read as absent, so the
+	// setup row returns and the fetch replaces the whole thing.
+	static const char *const parts[] = {
+		"system/bin/linker",
+		"system/bin/ampdaemon-auth",
+		"system/bin/ampdaemon-static",
+		"qemu-arm",
+	};
+	for (size_t i = 0; i < sizeof(parts) / sizeof(*parts); i++) {
+		snprintf(marker, sizeof(marker), "%s/.ampguest/%s", root, parts[i]);
+		struct stat st;
+		if (stat(marker, &st) != 0 || !S_ISREG(st.st_mode)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 // rm -rf, bounded to the tree: a stale generation's libraries must not linger
