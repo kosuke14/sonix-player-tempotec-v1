@@ -10,6 +10,7 @@
 #include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/gestures.h"
+#include "src/gui/shell/edge_lock.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/settings/musicsettings.h"
@@ -39,6 +40,7 @@
 #include "src/system/core/config.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/core/lang.h"
+#include "src/system/addons/addons.h"
 #include "src/system/library/library.h"
 #include "src/system/audio/eq.h"
 #include "src/system/playback/playlist.h"
@@ -304,6 +306,7 @@ static lv_obj_t *np_prev_icon;
 static lv_obj_t *np_next_icon;
 static lv_obj_t *np_star_btn;
 static lv_obj_t *np_repeat_btn;
+static lv_obj_t *np_transport;
 static lv_obj_t *np_star_icon;
 static lv_timer_t *poll_timer;
 
@@ -346,7 +349,53 @@ static void refresh_repeat_icon(void) {
 	lv_obj_set_style_image_recolor_opa(np_repeat_icon, LV_OPA_COVER, 0);
 }
 
+static bool dac_mode_owns_output(void) {
+	usbdac_state_t state;
+	usbdac_get_state(&state);
+	return state.active || state.starting;
+}
+
+static void refresh_dac_card(const usbdac_state_t *state) {
+	lv_obj_set_clickable(np_title, false);
+	lv_obj_set_clickable(np_artist, false);
+	lv_obj_set_hidden(np_transport, true);
+	scrolltext_set(np_title, tr("dac"));
+
+	if (state->error[0]) {
+		scrolltext_set(np_artist, state->error);
+	} else if (state->starting) {
+		scrolltext_set(np_artist, tr("dac_turning_on_2"));
+	} else if (!state->streaming) {
+		scrolltext_set(np_artist, tr("dac_waiting"));
+	} else {
+		char format[64];
+		char text[192];
+		if (state->dsd) {
+			snprintf(format, sizeof(format), "DSD  %d Hz", state->sample_rate);
+		} else if (state->sample_rate % 1000 == 0) {
+			snprintf(format, sizeof(format), "%d kHz", state->sample_rate / 1000);
+		} else {
+			snprintf(format, sizeof(format), "%.1f kHz", state->sample_rate / 1000.0);
+		}
+		snprintf(text, sizeof(text), "%s · %s", format, tr("dac_playing"));
+		scrolltext_set(np_artist, text);
+	}
+}
+
 static void refresh_now_playing_card(void) {
+	usbdac_state_t dac_state;
+	usbdac_get_state(&dac_state);
+	if (dac_state.active || dac_state.starting) {
+		refresh_dac_card(&dac_state);
+		return;
+	}
+
+	// When DAC mode is off, restore the normal card and its route into Now
+	// Playing, including the transport again after DAC mode ends.
+	lv_obj_set_clickable(np_title, true);
+	lv_obj_set_clickable(np_artist, true);
+	lv_obj_set_hidden(np_transport, false);
+
 	device_state_t state;
 	device_state_get(&state);
 
@@ -833,16 +882,16 @@ static void panel_prepare(void) {
 	topbar_bring_to_front();
 }
 
-// While the device is acting as a USB sound card, a Wi-Fi file server or a
-// Bluetooth receiver it is not playing anything, and those pages are meant to
-// stay in front, so the control centre would show transport buttons for a
-// transport that is not running. It refuses to open instead.
+// A USB DAC is still a useful place for the Control Centre: its transport card
+// becomes DAC status instead, and EQ, gain, output and level controls remain
+// live. A Wi-Fi file server or Bluetooth receiver still owns the screen, so the
+// sheet stays shut for those modes.
 bool quickpanel_blocked(void) {
 	// The transfer answers with the switch rather than with the server: killing
 	// thttpd takes a moment and the answer about the process is cached on top of
 	// that, so asking the process left the control centre refusing to open for
 	// seconds after the page said the transfer was off.
-	return usbdac_is_active() || wifitransfer_get_enabled() || btreceiver_is_active();
+	return wifitransfer_get_enabled() || btreceiver_is_active();
 }
 
 void quickpanel_open(void) {
@@ -1057,9 +1106,9 @@ static void panel_drag_cb(lv_event_t *e) {
 // bottom, because such a strip would be an object of the interface sitting over
 // the last few pixels of every page and taking the taps that land there -- a
 // list's last row, the player's transport, a key of the keyboard. The device
-// sees every press and every release whatever is under the finger, so nothing is
-// taken from anybody, and the panel only starts to move once the finger has
-// travelled upwards.
+// sees every press whatever is under the finger. While its direction is
+// undecided, the pressed object cannot scroll itself or its ancestors. A tap or
+// a different swipe is handed back; an upward pull belongs to the sheet alone.
 //
 // Two rules keep it out of the way. The press has to land within QP_EDGE_H of
 // the bottom edge, and it has to land on the PAGE: the top layer carries the
@@ -1073,6 +1122,7 @@ static lv_point_t edge_start;
 static bool edge_armed;   // the press landed in the band: watch what it does
 static bool edge_engaged; // the pull has been handed to the sheet
 static lv_timer_t *edge_timer;
+static edge_lock_t edge_lock;
 
 static bool edge_may_open(void) {
 	// One sheet at a time, and never over a page that owns the device.
@@ -1101,12 +1151,32 @@ static void edge_poll_cb(lv_timer_t *timer) {
 	lv_indev_get_point(edge_indev, &p);
 	int dy = p.y - edge_start.y;
 	int dx = p.x - edge_start.x;
+
+	// Once claimed, LVGL waits for release instead of dispatching this press to
+	// the page. The timer still sees the last point and the actual release.
+	if (edge_engaged && lv_indev_get_state(edge_indev) == LV_INDEV_STATE_RELEASED) {
+		edge_armed = false;
+		edge_engaged = false;
+		lv_timer_pause(edge_timer);
+		edge_lock_release(&edge_lock);
+		quickpanel_drag_update(dy);
+		quickpanel_drag_end();
+		return;
+	}
 	if (!edge_engaged) {
 		int adx = dx < 0 ? -dx : dx;
 		if (dy > -QP_EDGE_COMMIT_PX || -dy <= adx) {
-			return; // not a pull yet, or a sideways one
+			// Clearly not the upward edge gesture: give scrolling back without
+			// waiting for release. Small movements remain eligible for a pull.
+			if (adx >= QP_EDGE_COMMIT_PX || dy >= QP_EDGE_COMMIT_PX) {
+				edge_armed = false;
+				lv_timer_pause(edge_timer);
+				edge_lock_release(&edge_lock);
+			}
+			return;
 		}
 		edge_engaged = true;
+		lv_indev_wait_release(edge_indev);
 		quickpanel_drag_begin();
 	}
 	quickpanel_drag_update(dy);
@@ -1132,6 +1202,7 @@ static void edge_indev_cb(lv_event_t *e) {
 		edge_armed = gestures_stock() && edge_may_open() && p.y >= panel_h - QP_EDGE_H &&
 					 edge_on_page((lv_obj_t *)lv_event_get_param(e));
 		if (edge_armed) {
+			edge_lock_acquire(&edge_lock, (lv_obj_t *)lv_event_get_param(e));
 			lv_timer_resume(edge_timer);
 		}
 		return;
@@ -1146,6 +1217,7 @@ static void edge_indev_cb(lv_event_t *e) {
 
 	edge_armed = false;
 	lv_timer_pause(edge_timer);
+	edge_lock_release(&edge_lock);
 
 	if (edge_engaged) {
 		edge_engaged = false;
@@ -1165,6 +1237,8 @@ static void edge_indev_cb(lv_event_t *e) {
 	int dx = p.x - edge_start.x;
 	int adx = dx < 0 ? -dx : dx;
 	if (code == LV_EVENT_RELEASED && dy <= -QP_EDGE_FLICK_PX && -dy > adx) {
+		// This release belongs to the flick, not to a button underneath it.
+		lv_indev_reset(indev, NULL);
 		quickpanel_open();
 	}
 }
@@ -1209,6 +1283,9 @@ static void level_released_cb(lv_event_t *e) {
 
 static void play_cb(lv_event_t *e) {
 	(void)e;
+	if (dac_mode_owns_output()) {
+		return; // never start local playback over the USB DAC stream
+	}
 	player_key_play_pause();
 	refresh_now_playing_card();
 }
@@ -1218,12 +1295,18 @@ static void play_cb(lv_event_t *e) {
 // changing episode, which stays with the physical side keys.
 static void next_cb(lv_event_t *e) {
 	(void)e;
+	if (dac_mode_owns_output()) {
+		return;
+	}
 	player_screen_next();
 	refresh_now_playing_card();
 }
 
 static void prev_cb(lv_event_t *e) {
 	(void)e;
+	if (dac_mode_owns_output()) {
+		return;
+	}
 	player_screen_prev();
 	refresh_now_playing_card();
 }
@@ -1244,6 +1327,9 @@ static void prev_cb(lv_event_t *e) {
 // no Now Playing to show, only an empty player over the page.
 static void np_open_player_cb(lv_event_t *e) {
 	(void)e;
+	if (dac_mode_owns_output()) {
+		return;
+	}
 	device_state_t state;
 	device_state_get(&state);
 	if (!state.live && !state.current_file[0]) {
@@ -2509,10 +2595,12 @@ void quickpanel_init(gui_config_t *cfg) {
 	mseb_btn = make_circle_button(row, &icon_mseb);
 	lv_obj_add_event_cb(mseb_btn, mseb_clicked_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_add_event_cb(mseb_btn, open_page_cb, LV_EVENT_LONG_PRESSED, musicsettings_mseb_screen());
+	lv_obj_set_hidden(mseb_btn, !addons_enabled("mseb")); // a module off has no button
 
 	eq_btn = make_circle_button(row, &icon_equalizer);
 	lv_obj_add_event_cb(eq_btn, eq_clicked_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_add_event_cb(eq_btn, open_page_cb, LV_EVENT_LONG_PRESSED, musicsettings_eq_screen());
+	lv_obj_set_hidden(eq_btn, !addons_enabled("eq"));
 
 	// Crossfade, same contract: tap switches it, hold opens its page.
 	fade_btn = make_circle_button(row, &icon_fade_track);
@@ -2541,6 +2629,7 @@ void quickpanel_init(gui_config_t *cfg) {
 	peq_btn = make_circle_button(row, &icon_peq_quick);
 	lv_obj_add_event_cb(peq_btn, peq_clicked_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_add_event_cb(peq_btn, open_page_cb, LV_EVENT_LONG_PRESSED, peqpage_screen());
+	lv_obj_set_hidden(peq_btn, !addons_enabled("peq"));
 
 	peq_profile_btn = make_circle_button(row, &icon_peq_quick);
 	lv_obj_t *profile_icon = lv_obj_get_child(peq_profile_btn, 0);
@@ -2551,6 +2640,7 @@ void quickpanel_init(gui_config_t *cfg) {
 	lv_obj_align(profile_number, LV_ALIGN_BOTTOM_MID, 0, qp_compact ? -2 : -8);
 	lv_obj_add_event_cb(peq_profile_btn, peq_profile_clicked_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_add_event_cb(peq_profile_btn, open_page_cb, LV_EVENT_LONG_PRESSED, peqpage_screen());
+	lv_obj_set_hidden(peq_profile_btn, !addons_enabled("peq"));
 
 	dlna_btn = make_circle_button(row, &icon_dlna_quick);
 	lv_obj_add_event_cb(dlna_btn, dlna_clicked_cb, LV_EVENT_CLICKED, NULL);
@@ -2716,7 +2806,8 @@ void quickpanel_init(gui_config_t *cfg) {
 	scrolltext_apply(np_artist);
 	make_np_open_line(np_artist);
 
-	lv_obj_t *transport = lv_obj_create(np_card);
+	np_transport = lv_obj_create(np_card);
+	lv_obj_t *transport = np_transport;
 	lv_obj_set_size(transport, lv_pct(100), qp_compact ? 52 : 96);
 	lv_obj_set_style_bg_opa(transport, 0, 0);
 	lv_obj_set_style_border_width(transport, 0, 0);

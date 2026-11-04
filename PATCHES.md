@@ -1465,6 +1465,12 @@ or the shape of the settings file beyond its own section.
 
 ## The pet, second pass: your animal, your name
 
+> **Superseded.** The three animals, the chooser that picked between them and
+> everything that drew them -- this pass, *drawn again*, *drawn as itself*,
+> *three of it* and the animal parts of *on a 240 MHz budget* -- were replaced by
+> one Pikachu; see *The pet, one Pikachu* below. They stay as the record of how
+> the first animals were built, and why.
+
 The first pet was a fixed creature called Momo, in an egg for its first half
 hour, drawn on a page of outlined cards. Three of those were the user's first
 three remarks: they wanted to pick the animal, they wanted to name it, and they
@@ -1908,6 +1914,9 @@ What a sprite sheet *would* buy is detail -- outlines that curve, a face that is
 drawn rather than composed. If that is what is wanted, it is an art problem with
 an art budget, not an optimisation, and it should be decided as one.
 
+> **Revisited.** With one animal the multiplication above is gone: see *What it
+> costs* under *The pet, one Pikachu*.
+
 ### Turned down: sampling the player every 10-30 seconds
 
 The watcher already does no polling of its own: it is one LVGL timer at 1 Hz
@@ -1958,6 +1967,9 @@ The file has a shape version now. `pet_save()` writes `state_version = 2`;
 two -- three was a dragon, four was a fish -- and a dragon's owner is offered the
 cat rather than a fish. The test sets the key to 1 by hand and asserts all three
 readings, because this is the one part of the change with no way back.
+
+> Since removed along with the species itself: nothing reads or writes
+> `state_version` or `species` any more (see *One animal, so no species*).
 
 ### Grey
 
@@ -2241,6 +2253,321 @@ the page already draws. The page asks for the hour every second and
 animal has changed -- so a card with nothing falling costs nothing at all.
 
 Fourteen new strings, in eleven languages.
+
+## The pet, one Pikachu
+
+The pet was a choice of three animals, each assembled out of discs, bars and
+triangles. It is one animal now, and that animal is a Pikachu, drawn as the pixel
+art it was taken from: a front-facing figure on a 37 x 40 grid in six colours,
+with a zig-zag tail on the left and a tall black-tipped ear at the top right. The
+cat, the dog and the fish, the chooser that picked between them, the aquarium, the
+cat's room, the dog's yard and every shape they were built from are gone. In their
+place the card behind the animal is a small Pokémon-style route -- sky, hills,
+trees, tall grass and a Poké Ball -- and the More menu's tile is the Pikachu's head.
+
+### The picture, exactly
+
+`src/gui/pet/pikachu.c` holds the picture as forty rows of thirty-seven letters --
+`K` ink, `Y` yellow, `O` orange, `R` red, `N` brown, `W` white, `_` nothing -- read
+off the source image cell by cell and checked against it pixel for pixel. It has
+one yellow and six colours in all (`pikachu.h`: ink `252923`, yellow `F4D601`,
+orange `F5901B`, red `F40202`, brown `82440A`, white `F4FBF3`). The background and
+the eight cells of gap in the tail are transparent, so the card shows through
+them, and the only white in it is the glint in each eye.
+
+The preprocessor expands the letters at compile time into two ARGB8888 arrays:
+`pikachu_2x` (74 x 80, two pixels a cell) and `pikachu_3x` (111 x 120, three),
+23,680 and 53,280 bytes -- 76,960 together, in read-only data and nothing in RAM.
+A hatchling is drawn from the first and everybody else from the second, so the
+same picture starts small and round and has room to stand up in later.
+
+It is two arrays, rather than one that is scaled, because LVGL's own scaler is not
+exact and exactness is the whole of pixel art. Measured: asked for double the size
+of the 37 x 40 picture it produced 73 x 78, and for triple, 109 x 117, resampled
+between the pixels in both. The page never scales the picture: it sets one of the
+two as an image and the image is blitted 1:1. `check_pet_picture()` in the page
+test holds the page to that. It compares every solid pixel of the real render, at
+both sizes, with the array it was made from, so a scaler creeping back in -- even
+one that asks for 250/256 -- fails the suite.
+
+### What is over it
+
+The face is the picture's and stays the picture's, except while the pet is being
+fed (*Fed, he is surprised*, below). What the pet feels and what it
+wears are cells drawn on the same grid by one more object, a plain child of the
+root with a draw callback (`gear_draw_cb`). A *stamp* is a few strings of letters
+in the picture's alphabet and the wardrobe's; a run of one letter is one
+`lv_draw_rect`; and the cells are as big as the picture's, two or three pixels, so
+a stamp lands on the picture the way a sticker lands on graph paper. Nothing is
+rotated, scaled or smoothed. What is stamped is decided when the animal is painted
+and the callback only draws that list. A stamp can have a second place on the
+animation's other frame, which is how the stars shift and the small heart floats,
+and it can be there on one frame and gone on the other, which is how the mouth
+chews and the sparks take turns.
+
+| state | drawn |
+|---|---|
+| asleep | shut eyes -- a black line with yellow above and below, which is the one mood that changes the picture itself, the glints going with the eyes -- and a "z z" over the ear |
+| sad | a blue sweat drop at the temple |
+| dizzy | three gold stars between the ears; two drift and one sits in the notch beside the far ear, clear of the wallet's note in the corner of the card |
+| blissful | a big heart and a small one that floats |
+| fed (music is audible, awake) | the surprised face: round, wide eyes with a glint each, a mouth open on a pink tongue and a narrower one in turn, a spark and a bolt either side that swap places |
+| wardrobe | party hat, crown, headphones or scarf, one at a time |
+| genre | mirror shades, a chain with a pendant, a studded collar, or a cup of coffee on the floor |
+| a dark card | the black tip of the far ear, which stands above the sky, in true black |
+
+The scarf owns the neck, so a chain or a collar gives way to it, and the shades sit
+under a hat. The hearts that pop over a tapped head and fill under a held finger are
+the shell's own heart, recoloured to the picture's red.
+
+The crown is seven cells wide where the hat is nine. At the grown size the wallet's
+note, in the corner of the card, stands over the right of the gap between the ears,
+and a crown nine wide covered a quarter of it; the third dizzy star sits in the notch
+beside the far ear for the same reason.
+
+Dropped on purpose: the volume faces (wide eyes past eighty per cent, a heavy lid
+between twenty and forty) and the brows. Each is a different face, and the face is
+the thing that is meant to be exactly the picture. `petwatch_volume()`, which only
+the volume faces read, went with them, and there is no arm to wave with, so the wave
+reaction shakes the animal a few pixels from side to side. Listening shows in the
+notes that drift up beside the animal, in the equalizer under it and, since the
+pet is fed by it, in the face (next).
+
+### Fed, he is surprised
+
+"Fed" is the page's own word for music being audible -- `petwatch_listening()`, the
+reason the line at the foot of the card says *Feeding on ...*. The Poké Ball, the
+note game and the taps are not feeding. While it is so and the pet is awake,
+`paint_creature()` stamps the surprised Pikachu of the meme over the picture:
+
+- two eyes, five cells square and round, over the picture's own, with a white glint
+  at the top left of each;
+- a mouth at (18, 18) that hides the picture's own (a yellow cell at each end of its
+  first row covers the ends of it) and opens on a pink tongue: wide, with a dark red
+  inside, on one frame; narrow, with the tongue and a lip, on the other. They take
+  turns, so he chews. No cell of a mouth is on row 23, where the chest's orange is;
+- a spark and a bolt of electricity either side of the animal, in the sky beside the
+  head and the tail, which swap on the two frames. A sad pet has the right side
+  for its sweat drop, so it has only the left;
+- the root steps two pixels to one side on one frame and to the other on the next
+  (`apply_frame()`): a dance, on top of the breath. A reaction under way owns the
+  root instead, and a jump leaves its shadow on the floor.
+
+A scarf, a chain or a collar is over the chin, and would hide the lower rows of the
+wide mouth, so those pets get the narrow one on both frames. Shades are drawn
+after the face and cover the eyes whatever the eyes are doing, so with shades the
+mouth and the sparks are all there is to see. A sleeper is not fed: its eyes are
+shut, and it keeps them shut.
+
+### The shades
+
+The shades are one stamp, `stamp_shades`, seventeen cells wide: two mirror lenses --
+a dark blue, with the sky's blue under a white glint that runs from the top right
+to the bottom left -- in a black frame, the bridge between them, and an arm to
+each side that reaches the outline of the head. They are big enough to cover the
+eyes of every face the pet can have, so no eye shows round the edge of a lens.
+Shades cannot blink, so when a blink is due the glint grows a cross.
+
+### The far ear
+
+The black tip of the far ear stands above the sky, on the card itself. The picture's
+black is `#252923`, a dark grey, and a dark card is about as light as that (OLED's
+black with the Meadow room's wash over it is `#1F2B23`): the tip could not be seen
+and the ear ended in the air. On the dark themes the tip's nineteen cells are drawn
+again over the picture's own, in true black (`PET_TIP`, `#000000`), which is darker
+than the card on every theme and room, though only just on OLED in the Night room,
+where the card is about `#0D111B`; on Light they stay the picture's black, and the
+hatchling, whose ear is inside the sky, has none. `check_pet_picture()`, which holds
+the render to the stored array, knows about it: every solid pixel is the array's,
+except on those cells, where it asks for the black.
+
+The first try was a light grey (`#858B88`): it could be seen, but it read as a grey
+ear and not a black tip. Other tips were drawn and thrown out: a cloud behind it,
+which kept the ink black but looked like a white flag and ran into a four- or
+five-digit wallet value in the corner of the card; and rings and halos of other
+colours round the black tip, which read as a hollow outline. A one-pixel light edge
+round a black tip would hold up on the darkest card; it was left off because the
+plain black is cleaner.
+
+### Alive between the breaths
+
+Two things happen that nobody asked for, both on the page's own tick
+(`life_tick()`, called from `advance_frame()`), with a small linear generator for
+the dice, seeded the same way each time so the tests can count on it:
+
+- **A blink**, every three to six seconds: a line where each eye was, no glint --
+  the wide eyes of a feeding pet shut the same way, and shades glint instead -- for
+  140 milliseconds. That is quicker than the tick, so the blink has a one-shot
+  timer of its own, made when the lids go down and gone when they come up (and
+  deleted with the rest of the page's animation when the page is left). A sleeper
+  does not blink.
+- **A fidget**, every eight to fourteen seconds, when nothing else is asking for
+  him -- awake, not fed, no reaction under way, no finger down and no sheet open: a
+  hop, a lean to one side or a shake, for two seconds. They are the reactions the
+  keys and the taps start, started by the animal.
+
+Together with the dance, that is the whole of it. Nothing runs more than once a
+second but the blink, which redraws one object the size of the picture twice every
+few seconds.
+
+`petpage_blinking()` is there for the tests, since a blink lasts a tenth of a
+second. `SONIX_PAGE_FILM=<prefix>` makes `test_tools_pages` write a film of the
+grown animal -- fed in shades, fed bare, and left alone for forty seconds -- as one
+PPM every tenth of a second; nothing is asserted on it.
+
+### One animal, so no species
+
+`pet_species_t`, `pet_species()`, `pet_set_species()`, `pet_species_tag()`,
+`petwatch_set_species()` and the `[pet] species` key are gone, with the chooser's
+tiles and caption, the sheet that opened by itself on a pet nobody had chosen, and
+five language keys in all eleven language files (`pet_species`, `pet_species_cat`,
+`_dog`, `_fish` and `pet_choose_pet`). The sheet behind the pencil is the name row
+and nothing else, and the page opens straight onto the pet. The default name is
+now Pikachu rather than Momo -- one constant, `PET_DEFAULT_NAME` in `pet.h`, used
+by `pet_name()`, `pet_set_name()` and the page's first label -- and a name someone
+has already given their pet, Momo included, is theirs and stays.
+
+Nothing reads or writes `species` or `state_version` any more: the first said which
+animal and the second said how to renumber it. A settings file from an older build
+keeps both lines untouched -- the store keeps every key it loads and writes them
+back, in a table with room for three times what is used -- so a player who goes
+back to an older firmware finds its animal where it left it.
+
+The cat's rug, plant and yarn, the fish's tank, the dog's yard -- grass along the
+foot of the card, a darker strip under it and a picket fence at the side -- and the
+colours they used (`PET_WATER_*`, `PET_SAND*`, `PET_PEBBLE`, `PET_WEED*`,
+`PET_BUBBLE*`, `PET_CAT_*`, `PET_PLANT`, `PET_YARN`, `PET_GRASS*`, `PET_FENCE`,
+`PET_INK`, `PET_CHEEK`) are gone, and so is `PET_SCENE_PARTS`, the table of two
+dozen loose shapes the three of them were kept in. The first find was still called
+a bone in the code: `PET_DROP_BONE` is `PET_DROP_NOTE` now, as it has been drawn
+for a while, and its value is unchanged, so a shelf already filled keeps its count.
+
+### The route behind it
+
+The card behind the animal is a piece of a Pokémon game's overworld, in the same
+flat pixel style as the animal: a sky that comes up out of the card, two ranges of
+hills, a round tree and a pine, a field in three bands with tufts and three flowers,
+tall grass in front of it, and a platform under the feet where the shadow lies. It
+is **one object** (`scenery`, with a draw callback), 37 rows of three-pixel cells
+from the animal's line down to the line of words, drawn from the same kind of
+stamps as the overlay -- the cells are the picture's own size, so the route's
+pixels and the animal's are the same pixels. What the yard needed a dozen shapes
+for is one callback and some tables.
+
+What it shows is decided in one place, `scene_refresh()`, from three facts: the
+room worn, the hour, and the month.
+
+| when | sky | in it |
+|---|---|---|
+| a day from June to February | blue, four bands | a sun, two clouds |
+| the sunset room | violet to orange | a low orange sun, behind the hills |
+| after eight in the evening, or the night room | navy | a moon, stars (two of them twinkle) and, from eight to seven by the clock, a lit lamp |
+| March to May, by day | grey | a rain cloud, no sun, and the rain falling |
+
+The hills, the ground and the trees take a tint of the light they are in -- navy at
+night, orange at sunset, grey in the rain -- while the sun, the moon, the stars and
+the lamp keep their own colours, so a lamp is lit and a moon is bright. The dark of
+the evening is a wash under the scenery, over the card the name and the words are
+on, not over the route and not over the animal. The top six rows of the route fade
+from the card's own colour into the sky, which is why the same page sits as well on
+the Light theme's white card as on the black one and on Tokyo Night's blue.
+
+The tests read it back off the screen: a cell of sky, of the sun, of the grass and of
+the platform by day; a dark sky, a moon, no sun and a warm lamp at night; a grey sky
+and no sun in the rain; both rooms; and the same cells under the other four themes.
+Each of the three scenes has a snapshot (`-night`, `-spring`, `-sunset`), and so
+does each theme (`-light`, `-tokyo`, `-amber`, `-oled`).
+
+A redraw of any part of the band -- the animal's two frames, a falling flake --
+queues the whole route again: about three hundred small rectangles, whether or not
+the dirty area touches them, because a draw callback cannot see the dirty area
+(`lv_layer_t`'s clip is private) and so cannot skip what lies outside it; the
+renderer clips each one. That is negligible on the host and has not been measured
+on the device.
+
+### The Poké Ball
+
+The box in the corner is a Poké Ball now, on the grass in the same place: seven
+cells wide, a red top, a black band and a button. It is the same button -- a tap
+opens the fortune, the tap-along and the shelf -- and it says what the box said by
+colour: the button is white, and it is gold with a three-cell sparkle while
+something is in it, which is today's fortune not yet carried out, a find on the
+floor or the hour's game still to play. The find that turns up beside it is
+unchanged.
+
+### The More menu's tile
+
+The tile had a generic pet glyph. It is a Pikachu's head now, drawn by
+`tools/pet_icon.py` in the picture's own six colours (`assets/icons/pet.svg`) and put
+on the violet tile that Dark and Light show by `tools/make_more_tiles.py`, a little
+larger on it than a line glyph would be because the ears would be lost otherwise.
+The same drawing, as one white shape with the face cut out of it, is `icon_pet` in
+`peticon.c`, for the themes that show function glyphs. `icon_menu_pet_data` in
+`icons.c` was replaced in place -- `svg_to_lvgl.py` needs cairo and would rewrite the
+whole file for one picture -- with the new tile resampled to 112 pixels the way the
+old array was made from the old tile (checked: the old array equals that resample of
+the old `pet.png`). `screenshots/more.png` is a photograph of a device and still
+shows the old glyph.
+
+### What it costs
+
+| | before | after |
+|---|---|---|
+| the animal | 48 objects, about 6 KB of RAM | 4 objects: the picture, the overlay, the shadow and the sleeper's "z z" |
+| `petpage.c`, object code (with the route) | 60.8 KB | 42.1 KB |
+| `petpage.c`, static RAM | 6.8 KB | 4.1 KB |
+| `petpage.c`, source | 4,055 lines | 3,661 lines |
+| the pictures | none | 76,960 bytes of read-only data |
+
+(Host `-O2` build of the one file; the arm code is denser and the pictures are not.
+The surprised face, the shades, the ear tip, the blink and the fidget are 3.6 KB
+of that code and 0.6 KB of the RAM.) Still one callback a second and two frames, no
+`lv_anim`, and nothing redrawn that has not changed -- but for the blink, one timer
+of 140 milliseconds every few seconds.
+
+The earlier entry that turned down a pre-baked sprite sheet -- about a megabyte,
+for four species x four stages x two frames x five wardrobe states -- is made moot
+rather than contradicted. With one species the multiplication is gone: the stage is
+a size, the two frames are the root's own movement, and the wardrobe is drawn over
+the picture instead of being baked into it. What is baked is two pictures, and
+that is 75 KB.
+
+### Tests
+
+`test_tools_pages` no longer opens a chooser. The page opens onto the pet, the name
+sheet is hidden until the pencil is pressed, and `check_pet_picture()` holds the
+render to the stored picture at both sizes, under all five themes. Every mood, garment and accessory has a
+snapshot (`-sleeping`, `-sad`, `-dizzy`, `-blissful`, `-hat`, `-crown`, `-phones`,
+`-scarf`, `-scarf-chain`, `-adult` and `-name`, beside the ones that were there) and
+one cell that only it paints is read back off the screen by its place in the grid,
+so a stamp that drifts off the grid, or never appears, fails. `test_pet` loses its
+species tests and the migration's.
+
+The surprised face, the dance, the blink and the fidget are read back the same way,
+with the page run a second at a time (`pet_second()`). The feeding face is asserted
+on both frames -- the two mouths, the sparks swapping, the glints and the edges of
+the eyes -- bare, in shades, in a scarf, a chain and a collar (the narrow mouth) and
+asleep (no face at all). The dance must be two pixels either way and alternate;
+the shadow must stay on the floor in a jump; a blink must come within ten seconds in
+each of the three kinds of eyes and be over two hundred milliseconds later; and a
+fidget must come, between four and twenty-four seconds of it in a minute. Move the
+tip a cell, take the neck rule out, stop the blink or the dance, or shift a lid by one
+cell, and the page test stops. `pet_view_take()` lets the layout catch up with a
+step before it reads where the picture is.
+
+All of the moods, garments and accessories are done twice, once as a hatchling and
+once as an adult (`-adult-sleeping`, `-adult-crown` and so on), because the grown
+animal is the one that reaches the wallet's note. The note's pixels are the only
+light grey in a window above the head, so the test records them from the plain
+adult and asserts that every mood and garment leaves each one as it was. (Put the
+nine-wide crown back and it stops there.)
+
+### What did not change
+
+Everything else about the pet -- what feeds it, the meters, the notes and the
+wardrobe's prices, the fortune, the tap-along and the shelf behind the ball, and the
+dizzy rule -- is as it was. The other More tiles' pictures, which is the rest of
+`icons.c`, are untouched, and so is `petlisten.c`.
 
 ## The charger, with the player off## The charger, with the player off
 
@@ -2548,3 +2875,315 @@ performs inside a live JVM plus the server-side machine provisioning — has
 run; `KDGenMovieId` then fails with `-42792`. The full probe trail, the
 recovered obfuscated entry points and the fake-JVM experiment are recorded
 in `wrapper-arm/docs/fairplay-activation.md`.
+Three details make it a state and not a hack:
+
+- **It follows the stream, not the backlight.** The state is re-read on every
+  power tick (`panel_hold_tick()`): if a stream starts behind a panel that was
+  already blanked — resuming from the headphones with the screen dark, which is
+  the same bug one press later — the panel is brought up then and there, behind
+  a backlight at zero, so that the wake the user is about to ask for does not
+  have to. If the music stops (a pause, the end of the album, the headphones
+  walking away) the panel is powered down for real again, `PANEL_HOLD_QUIET_MS`
+  (4 s) later, so a track change, a skip or the gap between two gapless tracks
+  is not a power cycle.
+- **The wake skips the parts that exist for a blanked panel.** A held panel was
+  never reset and never lost a frame, so `power_screen_on()` repaints once — the
+  page underneath may have changed while nobody was watching — waits a single
+  scan-out rather than the two the blanked path waits for, and fades up. The
+  white-flash machinery is not merely unnecessary there, it would be wrong: it
+  re-arms a mode that was never torn down.
+- **It is a trade, made on purpose.** An unblanked panel, its controller and a
+  touch controller that stays awake behind it cost a few tens of milliwatts that
+  a blanked one would not — for as long as the stream lasts, and not one tick
+  longer. A card that would rather have the milliwatts than the steady stream
+  sets `[screen] panel_hold = 0` in `device_config.ini` and gets the old
+  behaviour back, stutter and all. The suspend path puts a held panel down
+  before it writes `mem` regardless, so nothing about standby changes.
+
+One smaller thing rides along: the wake no longer rewrites the CS43198's volume
+when the sound is leaving over the air. There is no register of the DAC's in that
+path at all — it is the one output with nothing to put back — and the call ends
+in a write to bluealsa's PCM object, through the same daemon that is encoding the
+track, which is the last thing a wake should be doing while the music plays. The
+Bluetooth *receiver* is not that case: there the DAC is playing, and the rewrite
+stays exactly where it was.
+
+The log says which of the two wakes a card took — `power: screen on
+(brightness=…, wake …ms)` with `, panel kept` appended for the held one, and a
+`power: screen off with the panel kept powered for the Bluetooth stream` line
+when the hold goes in. A held wake is that one repaint and a fade against the
+quarter second the blanked one spends holding a dark panel through its own
+power-up, which is the difference the listener hears.
+
+## Two PEQ profiles and the Control Centre quick switch
+
+Issue #187 asks for different corrections for wired IEMs and Bluetooth earbuds
+without replacing one curve every time the headphones change. PEQ now has two
+persistent profiles. The PEQ page selects either one; the numbered Control
+Centre button cycles between them, and a long press opens the PEQ page. The
+button's fill follows the selected profile's own enable state. It appends to
+the existing button list: an empty grid place is used as-is, while a full grid
+keeps the new control in Settings → More → Control centre until room is made.
+No saved button order is rewritten on upgrade.
+
+Each profile owns all ten bands, preamp and the PEQ enable switch. The active
+settings stay in `[peq]`, with `profile = 1` or `2`; the other curve lives in
+its own numbered `[peq_profile_*]` section. An existing `[peq]` becomes Profile
+1 without a boot-time write, and Profile 2 starts flat and off. Switching
+archives the outgoing curve under its own number before publishing the other,
+so restarting from either profile preserves both. Older builds can still read
+the last active curve from `[peq]`. APO preset files remain shared, but import,
+export and reset operate on the selected profile; switching never enables PEQ
+on the user's behalf. Graphic EQ and MSEB are unchanged.
+
+The audio path takes a coherent profile snapshot under a short mutex, outside
+disk I/O. It uses a try-lock and retains the previous coefficients for a buffer
+when an edit is in progress, rather than blocking playback. The settings table
+has room for the inactive profile's 52 additional keys. Both PEQ screens
+refresh after a quick switch, including an open band editor. The two new
+translation keys are present in all eleven shipped languages.
+
+Host coverage: `make -C sonix-player/tests eq` checks profile persistence from
+either slot, independent enable/preamp/bands, scoped presets/reset, legacy
+upgrade and actual PCM processing. `make -C sonix-player/tests peq-ui` checks
+the real page in eleven languages and five themes at 240×320; `quickpanel-layout`
+checks the production layout migration and moves. Both are included in `ui`.
+These host tests do not replace an on-device listening and touch check.
+
+## USB DAC controls in the Control Centre
+
+Issue #209 asks to restore access to the audio controls while the player is a
+USB DAC. The Control Centre can now be pulled over DAC mode. Its now-playing
+card becomes a DAC status card (waiting/starting, or the host's PCM/DSD rate)
+and hides the local transport, so a play tap cannot start a second audio
+source over the USB stream. The regular quick controls remain available,
+including graphic EQ, MSEB, PEQ/profile, gain and line-out; the DAC page's own
+back guard still asks before leaving DAC mode. Cover Flow remains unavailable
+while the DAC owns the page.
+
+The USB audio thread now runs incoming 32-bit PCM through the same live EQ
+engine as decoded tracks, so the existing GEQ, PEQ and MSEB toggles change what
+is sent to the internal DAC. Native DSD is not PCM and bypasses the filters
+byte-for-byte. `make -C sonix-player/tests usbdac-eq` checks the production
+format gate against the DSP engine, including the DSD no-op; the quickpanel
+layout suite also checks that DAC no longer blocks the Control Centre while
+file-transfer and Bluetooth-receiver modes remain blocked. The tests do not
+replace an on-device touch and listening check.
+
+## Bluetooth drop-outs with Wi-Fi joined, and a USB-C DAC that was never found
+
+Two reports from one test session on a V1. Neither could be reproduced here --
+there is no board in this environment -- and the log that goes with them was not
+attached, so both changes below are reasoned from the code and the description,
+and both need a listening / plug-in check on the device.
+
+### Bluetooth stutters only while Wi-Fi is *associated*
+
+The session: Wi-Fi joined and Bluetooth streaming, drop-outs; Wi-Fi on but not
+joined, clean; Wi-Fi off, clean. The lock-screen blip in the same session is
+issue #188, already handled by the held panel.
+
+What the Bluetooth log of that session (14:56-15:08) shows: the player was the
+**receiver** (an iPad streaming AAC 44.1 kHz to it, player is the piconet master),
+and the loss is upstream of the player's decoded-audio path. The RTP warnings
+alone do not distinguish RF loss from controller, UART, or host loss.
+`bluealsa: Missing RTP packets` appears ten times in the two minutes with Wi-Fi
+joined (14:59:27-15:01:28), and not once in the two clean stretches that follow
+(15:01:45-15:03:06, 15:03:19-15:05:00). The events do not fall on a two-second
+beat, so the status poll is not what drops them. The controller is a Broadcom
+BCM4343A1 -- the same chip carries the Wi-Fi radio, with one antenna -- and it
+reports that it supports Set AFH Host Channel Classification.
+
+So the change that matters is `btafh.c`: while an A2DP link is up and Wi-Fi is
+joined on a 2.4 GHz channel, the power tick (`bt_afh_follow_wifi()`) sends that
+HCI command requesting that Bluetooth channels under the access point's channel
+(centre +-12 MHz, `freq=` from `wpa_cli status`) be avoided. It is resent every
+fifteen seconds while in force and cleared when the link or the Wi-Fi join goes.
+A 5 GHz network or an unknown channel masks nothing. A successful write only
+sends the request; check the controller's Command Complete in the Bluetooth log.
+The piconet master controls the hop set, and controller support and role affect
+whether the request is used. `make -C sonix-player/tests btafh` checks the map.
+
+Alongside it, the smaller change from the first pass stays: with an A2DP link up
+the Wi-Fi worker polls at the standby period whatever the screen is doing and does
+not ask for `signal_poll` (the driver reading the link from the chip, only to move
+the bars). It removes the player's own traffic from the link and cannot hurt;
+`make -C sonix-player/tests wifi` checks it. The log does not show it to be the
+cause.
+
+Neither is verified on a board. Check: stream from the phone with Wi-Fi joined and
+count `Missing RTP packets` in a Bluetooth log over a couple of minutes against the
+same song with Wi-Fi off; the log also carries the `bluetooth: AFH:` line and the
+controller's reply to the command.
+
+### USB-C: a JCally did not enumerate on the TempoTec V1
+
+The `0311-sonix_player-neu.log` report does **not** establish the earlier theory
+that a three-second sink write cut off a slow JCally. At 23:52:47-48 it reports
+`NormalDRP`, `otg_id -1`, VBUS present, and no device on the host bus. There is
+no USB VID/PID, ALSA USB card, `snd-usb-audio` error or logged sink write for
+that attempt. VBUS is also raised by a charger or computer; it identifies
+neither the accessory nor the data role. The cause of the missing enumeration
+and whether another DAC works on this exact build remain unproven.
+
+The V1 1.3 kernel bundled in the repository was inspected, not the running
+kernel on the reporting device. It exposes a PHY `sw_switch_hsotg` control with
+`host`, `device` and `none` commands and uses `dwc2_new`; the old `jz-dwc2`
+`otg_id` path is not present in that image. The live sysfs path, role behavior,
+and electrical effect still need hardware confirmation. Related R1 drivers
+are not evidence of what the V1 actually does.
+
+- Automatic arbitration treats an unreadable ID as unknown, avoids a startup
+  role change when VBUS/port use is ambiguous, protects an enumerated audio
+  interface or card even when Bluetooth owns playback, and logs ID, TCS mode,
+  VBUS, UDC state and enumerated host devices. It does **not** force host/source
+  merely because VBUS is high. A detected USB sound card is not reset by
+  reasserting dual mode.
+- Developer options offers **Try external USB DAC**, an experimental, explicit
+  opt-in. It requests TCS `Source` and the compatible x1600 PHY's `host` mode;
+  this is a diagnostic attempt, **not a proven JCally fix**. Connect **only**
+  a confirmed bus-powered DAC: unplug computers and chargers and turn ADB off.
+  Never plug a computer or charger into the port while the trial is active. The
+  action is refused for unsupported/ambiguous PHYs, an unknown or connected UDC,
+  ADB, DAC mode, storage export or another owner. Only the player's own idle,
+  disconnected storage gadget is parked and later rebound.
+- If no ALSA USB card appears, the previous TCS setting and PHY automatic mode
+  are restored after 20 seconds (45 seconds if an audio interface was seen).
+  A detected card keeps the override until unplugged; the same menu action
+  changes to **Stop USB DAC host** for manual cancellation. A failed restore
+  retains the controller reservation and retries; no Sonix gadget is allowed to
+  claim it meanwhile. A strictly validated journal on `/usr/data` records the
+  previous setting before any override and is synced with its parent directory.
+  Recovery runs before Sonix starts ADB, after player crashes or reboots; stock
+  init scripts may nevertheless claim the port earlier, in which case recovery
+  waits rather than disturbing them. Invalid journals or failed restoration
+  fail closed; keep computers and chargers disconnected until the port is
+  reported restored. Shutdown attempts restoration, and factory reset/firmware
+  update are refused if the role remains unresolved. Recovery relies on the
+  settings partition being mounted when Sonix starts; V1 mount order, filesystem
+  durability and power-cycle behavior still need hardware verification.
+- Storage export independently no longer sends a mounted or lazily-detached
+  card to a PC. It requires a matching visible mount, a normal unmount, an
+  exclusive block claim and no remaining raw-device fd (including a FUSE
+  daemon). On failure it restores services or lets the card supervisor recover,
+  and waits for a cable replug rather than repeatedly interrupting playback.
+  A LUN must be verified empty before remounting. ADB keeps the card mounted;
+  the old stale-ADB composite fallback is not used. External privileged programs
+  could still bypass these process-local checks; actual gadget, card and FUSE
+  behavior on V1 must be tested.
+- Shutdown now checks for open card descriptors before reopening its suspended
+  log. The earlier log listed the log fds only *after* reopening the log, so it
+  did not prove the cause of the busy unmount. The warning that mentioned an
+  MP2731 charger is now generic: V1 has a separate AXP2101 charging path.
+- The log's `input: registered devices` section was blank. The shared file
+  reader assumed everything supports seeking to a meaningful end, which fails
+  for procfs and some configfs files. It now reads to EOF and treats read errors
+  as errors, also making USB gadget-attribute reads more reliable.
+- `geniusbuild: result 3, 4096 tracks` is the existing intentional Smart Mix
+  input limit, not proof of out-of-memory. Supporting this 26k-track library
+  requires a separate bounded large-library design; this patch does not change
+  that limit. The logged Bluetooth underruns predate the separate coexistence
+  changes and still need on-device verification.
+
+Host tests: `make -C sonix-player/tests usbhost readfile`, using private mocked
+sysfs, mount/claim and LUN fixtures, and real non-seekable procfs/pipe reads,
+plus the regular regression suites. These do not model the V1's electrical
+behavior, kernel driver timing, real card export or
+USB enumeration. Test on hardware with a known-good USB-C OTG adapter and a new
+full log including the `usbaudio:`, `usbhost:` and `kernel:` lines.
+
+## Bluetooth reconnect after the adapter was left powered off
+
+A bug-report log (`bluetooth-neu.log`, TempoTec V1) shows the controller being
+reset and powered off about eight seconds after the stack comes up, with nothing
+on the player's side asking for it (`New Settings: 0x0ad4`, Powered clear). The
+reconnect to the last headphones then ran three times and was refused each time
+with `org.bluez.Error.NotReady` -- this side, not the headphones -- and nothing
+turned the adapter back on. The headphones were not the problem in that session.
+
+`reconnect_last()` now checks `Powered` through `ensure_adapter_powered()` before
+the grace period and before every attempt, and powers the adapter back on (waiting
+up to five seconds for bluez to confirm) when it is off. The log says which of
+the three happened: `the adapter is not powered; powering it back on`, then
+`the adapter is powered again after N ms`, or `the adapter did not power on`.
+
+The log does not identify the process which sent the power-off. Inspection of
+the bundled V1 1.3 image now shows that the stock `bt_init` explicitly sets the
+adapter Powered Off near the end of its background run, making it a plausible
+source; the log alone does not prove it. The startup changes below prevent that
+script racing Sonix in newly packed firmware. This does not touch the separate
+"Host is down" / page-timeout failures to the headphones, which are the
+headphones not answering.
+
+Needs an on-device check: power the player on with the headphones on and off,
+and confirm the reconnect either lands or logs one of the three lines above.
+
+## Bluetooth receiver coexistence and startup ownership
+
+The later V1 log (`0311-bluetooth-neu.log`) has 17 BlueALSA missing-RTP
+warnings (23 packets in total) during received audio, and no Set AFH Host
+Channel Classification command. It also shows two `bluetoothd` launches, one
+refused the D-Bus name, followed by an adapter power-off and a `NotReady`
+reconnect. The RTP warnings locate loss before local DAC output, but do not
+identify whether RF, the controller, UART or host is responsible. The log alone
+does not prove that Wi-Fi was joined or that AFH would cure the loss.
+
+- `bluetooth_a2dp_link_active()` counts either a headphone PCM or an incoming
+  receiver PCM, including paused links. It drives Wi-Fi polling, radio parking
+  and the AFH follower. The existing `bluetooth_audio_active()` remains
+  output-only, so a phone sending audio cannot redirect local playback to a
+  nonexistent headphone. The cross-thread Wi-Fi streaming flag is atomic.
+- The follower retries failed restrictions **and clears**, refreshes a sent
+  restriction every 15 seconds, and reasserts or clears it after a radio park
+  rather than assuming a reset. It logs requests, not claimed controller
+  acceptance. Change-only diagnostics record whether Wi-Fi is associated and
+  its frequency (not the SSID); repeated HCI errors are suppressed.
+- Closing the D-Bus connection now clears both PCM directions, transport and
+  media state after the reader has stopped, preventing a late signal or a
+  previous receiver link from being resurrected after a stack restart.
+- Startup waits for a running stock `bt_init` to finish, including when a shell
+  invoked it, and will not start a second patchram while an existing one is
+  still alive. A switch-off can cancel the waits. Boot-time teardown shares the
+  Bluetooth worker with power jobs, so a quick switch-on cannot be torn down by
+  a separate cleanup thread.
+- Newly packed V1 firmware overlays `S80_bt_init` with a no-op. In the bundled
+  V1 1.3 stock image that hook only launches `bt_init` on start and `bt_done` on
+  stop; the separate S30 D-Bus init and the original binaries are preserved.
+  The stock initializer also creates `/usr/data/alsa.conf`: Sonix now creates
+  the same default when needed without replacing an existing template; the
+  existing per-device rewrite is unchanged. Stock `bt_init`'s `/tmp/bt_init_ok`
+  marker and legacy HiByLink SDP record are not
+  created by the replacement; Sonix uses its own Bluetooth stack and SonixLink.
+  Other stock revisions and any external consumers of those artifacts need an
+  on-device check.
+
+Host tests: `make -C sonix-player/tests bluetooth btafh wifi basebuild` and
+address/undefined-behavior-sanitized versions of Bluetooth, AFH and Wi-Fi. The
+actual V1 1.3 archive's init scripts were also checked against the tar overlay;
+MIPS32r2 cross-compilation of the changed translation units succeeded with an
+independent Clang-based toolchain. This is not a complete linked firmware build.
+
+**Still needs hardware:** test cold boot with Bluetooth on and off, rapid toggles,
+headphone and phone-receiver connections, reconnect after sleep, and Wi-Fi
+joined versus off with the same source. In `btmon`, inspect Command Complete for
+Set AFH Host Channel Classification and compare loss counts; even an accepted
+command does not by itself prove a changed hop set or an audible improvement.
+
+## A happier music pet
+
+The dark ring on Pikachu's chest was the hip-hop chain's pendant, not a hole in
+his sprite. The pendant is gone; the chain is lower and ends in gold links, so
+it no longer interrupts the face or resembles a hole. The accessory now also
+updates when the track's genre changes without leaving the page.
+
+An awake pet listening to music now has an open, upturned smile and a pink
+tongue instead of the surprised chewing face. A scarf or collar gets a compact
+smile above the neckwear; sleep and shades still work as before. The two music
+notes were created but never shown: they now appear behind the pet when music
+is audible and disappear when it stops, drifting on the existing frame timer.
+
+A tap or completed hold now gives a small hop and bobbing heart instead of a
+text toast, including during the reward cooldown. The existing petting and
+once-daily grooming rules are unchanged. The headless page test checks the
+smile, pendant-free chain, playback transitions, and the visual petting
+feedback on the V1 renderer; the appearance should also be checked on device.

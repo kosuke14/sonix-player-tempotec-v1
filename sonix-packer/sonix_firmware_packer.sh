@@ -25,10 +25,10 @@
 #
 # assets/V1/ is the complete overlay. It carries the model-independent Sonix
 # resource and web trees, the V1's own system-info.json, the boot screens and
-# its fonts, and deliberately nothing kernel-facing: the stock touch, audio,
-# boot and init files of the official firmware stay in place. That is why the
-# TempoTec V1 update is a small overlay on a real TempoTec image rather than a
-# port of another player's rootfs.
+# its fonts. It leaves the stock touch, audio and boot drivers in place, but
+# replaces S80_bt_init with a no-op: Sonix owns Bluetooth startup itself and
+# the stock background script would race it. The TempoTec V1 update remains a
+# small overlay on a real TempoTec image rather than another player's rootfs.
 #
 # No questions asked: run it and it does the lot.
 #
@@ -254,15 +254,12 @@ build_image() {
 	say ""
 
 	# Capture the vendor release version before applying the Sonix overlay.
-	# A known official package is named by its v1.upt SHA-256 -- the 1.3
-	# archive's own product metadata still says 1.2 -- anything else falls
-	# back to the product section of the stock config.json, not the schema
-	# version, dates or library versions.
-	BASE_BUILD="$(python3 "$SCRIPT_DIR/stock_release.py" "$SOURCE_UPT" "$SQUASH_DIR/usr/resource/config.json")"
+	# Use the product section, not the schema version, dates or library versions.
+	BASE_BUILD="$(python3 "$SCRIPT_DIR/extract_base_build.py" "$SQUASH_DIR/usr/resource/config.json")"
 	if [ -n "$BASE_BUILD" ]; then
 		say "    TempoTec base version = $BASE_BUILD"
 	else
-		warn "no known release package and no unambiguous product version; About will show a dash"
+		warn "stock config has no unambiguous TempoTec V1 release version; About will show a dash"
 	fi
 
 	# ==========================================================================

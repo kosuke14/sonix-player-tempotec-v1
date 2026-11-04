@@ -24,6 +24,15 @@ CORE = $(ROOT)/src/system/streaming/subsonic.c \
 test: $(BUILD)/test_subsonic
 	python3 run_subsonic_tests.py $(BUILD)/test_subsonic
 
+# Pseudo-files (procfs/configfs) can have zero size or reject seeking.
+.PHONY: readfile
+readfile: $(BUILD)/test_read_file_content
+	$(BUILD)/test_read_file_content
+
+$(BUILD)/test_read_file_content: test_read_file_content.c $(ROOT)/src/system/core/utils.c $(ROOT)/src/system/core/utils.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_read_file_content.c $(ROOT)/src/system/core/utils.c $(LDFLAGS) $(LDLIBS)
+
 # The stock-firmware credential extractor and its ini/seal round-trips. Plain
 # Python, no compiler: the fixtures reproduce hiby_player's string layout.
 extractkeys:
@@ -105,7 +114,7 @@ $(BUILD)/test_swvolume: $(SWVOL_SRC) $(ROOT)/src/system/audio/swvolume.h \
 
 # The graphic EQ, PEQ and MSEB on stereo PCM -- the same eq_process() radio
 # stations go through. Plain C, no ALSA and no LVGL.
-EQ_SRC = test_eq.c $(ROOT)/src/system/audio/eq.c $(ROOT)/src/system/core/config.c
+EQ_SRC = test_eq.c $(ROOT)/src/system/audio/eq.c $(ROOT)/src/system/core/config.c $(ROOT)/src/system/addons/addons.c
 .PHONY: eq
 eq: $(BUILD)/test_eq
 	$(BUILD)/test_eq
@@ -113,6 +122,61 @@ eq: $(BUILD)/test_eq
 $(BUILD)/test_eq: $(EQ_SRC) $(ROOT)/src/system/audio/eq.h $(ROOT)/src/system/core/config.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(EQ_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The explicit V1 external-DAC host trial against a private fake sysfs tree.
+# Exercises the real role writes, bounded wait, rollback and crash recovery.
+.PHONY: usbhost
+usbhost: $(BUILD)/test_usbhostprobe $(BUILD)/test_usbhost_reset $(BUILD)/test_usb_ownership $(BUILD)/test_usbexport $(BUILD)/test_usb_storage $(BUILD)/test_usbaudio_arbitration
+	$(BUILD)/test_usbhostprobe
+	$(BUILD)/test_usbhost_reset
+	$(BUILD)/test_usb_ownership
+	$(BUILD)/test_usbexport
+	$(BUILD)/test_usb_storage
+	$(BUILD)/test_usbaudio_arbitration
+
+$(BUILD)/test_usbhost_reset: test_usbhost_reset.c $(ROOT)/src/system/device/factoryreset.c \
+                             $(ROOT)/src/system/audio/usbhostprobe.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_usbhost_reset.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_usbaudio_arbitration: test_usbaudio_arbitration.c $(ROOT)/src/system/audio/usbaudio.c \
+                                   stubs/lvgl/lvgl.h stubs/alsa/asoundlib.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usbaudio_arbitration.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_usb_storage: test_usb_storage.c $(ROOT)/src/system/device/usb.c \
+                           $(ROOT)/src/system/device/usbexport.h stubs/lvgl/lvgl.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usb_storage.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_usbexport: test_usbexport.c $(ROOT)/src/system/device/usbexport.c \
+                         $(ROOT)/src/system/device/usbexport.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_usbexport.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_usb_ownership: test_usb_ownership.c $(ROOT)/src/system/device/usb.c \
+                             $(ROOT)/src/system/device/usb.h stubs/lvgl/lvgl.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usb_ownership.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_usbhostprobe: test_usbhostprobe.c $(ROOT)/src/system/audio/usbhostprobe.c \
+                            $(ROOT)/src/system/audio/usbhostprobe.h $(ROOT)/src/system/device/usb.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_usbhostprobe.c $(LDFLAGS) $(LDLIBS)
+
+# USB DAC PCM uses the same DSP chain while the DSD stream remains untouched.
+# The test includes usbdac.c to exercise its real format gate without building
+# the gadget or opening an audio device.
+.PHONY: usbdac-eq
+usbdac-eq: $(BUILD)/test_usbdac_eq
+	$(BUILD)/test_usbdac_eq
+
+$(BUILD)/test_usbdac_eq: test_usbdac_eq.c $(ROOT)/src/system/audio/usbdac.c \
+                         $(ROOT)/src/system/audio/eq.c $(ROOT)/src/system/audio/eq.h \
+                         $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/config.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usbdac_eq.c \
+		$(ROOT)/src/system/audio/eq.c $(ROOT)/src/system/core/config.c $(ROOT)/src/system/addons/addons.c $(LDFLAGS) $(LDLIBS)
 
 # The Wi-Fi worker's hidden-network join: the real wifi.c against a fake
 # wpa_cli on PATH (see test_wifi.c). Plain C, no LVGL and no radio.
@@ -226,6 +290,38 @@ $(BUILD)/test_ampguest: $(AG_SRC) $(ROOT)/src/system/streaming/ampguest.h
 		-DAMPGUEST_SHA256='"588a6cf87db24f5e8c8e45e70d117287e5e49051b6e7702c42a105b35efaf783"' \
 		-DAMPGUEST_ARCHIVE_BYTES=245ULL -DAMPGUEST_UNPACKED_BYTES=8192ULL \
 		-o $@ $(AG_SRC) $(LDFLAGS) $(LDLIBS)
+# Bluetooth's real A2DP-direction decision, startup wait policy and D-Bus
+# signal cache, with fake controller/process state. No radio or ALSA required.
+.PHONY: bluetooth
+bluetooth: $(BUILD)/test_bluetooth $(BUILD)/test_btstack
+	$(BUILD)/test_bluetooth
+	$(BUILD)/test_btstack
+
+$(BUILD)/test_bluetooth: test_bluetooth.c $(ROOT)/src/system/bluetooth/bluetooth.c \
+                         $(ROOT)/src/system/bluetooth/bluetooth.h $(ROOT)/src/system/bluetooth/btafh.c \
+                         $(ROOT)/src/system/bluetooth/btafh.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_bluetooth.c $(ROOT)/src/system/bluetooth/btafh.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_btstack: test_btstack.c $(ROOT)/src/system/bluetooth/btstack.c \
+                       $(ROOT)/src/system/bluetooth/btstack.h $(ROOT)/src/system/bluetooth/dbuslite.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_btstack.c $(LDFLAGS) $(LDLIBS)
+
+# The AFH map, follow policy and actual HCI packet, using fake sockets.
+.PHONY: btafh
+btafh: $(BUILD)/test_btafh $(BUILD)/test_btafh_socket
+	$(BUILD)/test_btafh
+	$(BUILD)/test_btafh_socket
+
+$(BUILD)/test_btafh: test_btafh.c $(ROOT)/src/system/bluetooth/btafh.c $(ROOT)/src/system/bluetooth/btafh.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_btafh.c $(ROOT)/src/system/bluetooth/btafh.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_btafh_socket: test_btafh_socket.c $(ROOT)/src/system/bluetooth/btafh.c \
+                            $(ROOT)/src/system/bluetooth/btafh.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_btafh_socket.c $(LDFLAGS) $(LDLIBS)
 
 # The Calculator page's arithmetic and the notes folder's rules: the two new
 # pages' plain-C halves, with no LVGL and no screen. The calculator model and
@@ -505,10 +601,22 @@ UI_SRC = $(ROOT)/tests/ui/test_main_menu.c $(ROOT)/src/gui/shell/main_menu.c \
          $(ROOT)/src/gui/shell/theme.c \
          $(ROOT)/src/gui/shell/icons.c $(ROOT)/src/gui/shell/main_menu_icons.c \
          $(ROOT)/src/gui/shell/gestures.c \
+         $(ROOT)/src/system/addons/addons.c \
          $(ROOT)/src/gui/board_profile.c \
          $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
 UI_LVGL_SRC = $(shell find $(ROOT)/lvgl/src -name '*.c' 2>/dev/null)
 UI_LVGL_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+# Stock edge presses must not scroll the page beneath the sheet.
+.PHONY: edge-lock
+edge-lock: $(BUILD)/test_edge_lock
+	$(BUILD)/test_edge_lock
+
+$(BUILD)/test_edge_lock: test_edge_lock.c $(ROOT)/src/gui/shell/edge_lock.h $(UI_LVGL_OBJ)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
+		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_edge_lock.c \
+		$(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+
 # Control Centre layout migration: the production parser and saved lists,
 # without constructing the unrelated radio/streaming services.
 .PHONY: quickpanel-layout
@@ -516,11 +624,12 @@ quickpanel-layout: $(BUILD)/test_quickpanel_layout
 	$(BUILD)/test_quickpanel_layout
 
 $(BUILD)/test_quickpanel_layout: test_quickpanel_layout.c $(ROOT)/src/gui/shell/quickpanel.c \
-                                $(ROOT)/src/gui/shell/quickpanel.h $(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ)
+                                $(ROOT)/src/gui/shell/quickpanel.h $(ROOT)/src/gui/shell/edge_lock.h \
+                                $(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
 		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_quickpanel_layout.c \
-		$(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+		$(ROOT)/src/system/core/config.c $(ROOT)/src/system/addons/addons.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
 
 UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_SRC)) \
          $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
@@ -558,11 +667,12 @@ TOOLS_SRC = $(ROOT)/tests/ui/test_tools_pages.c \
             $(ROOT)/src/gui/notes/notes.c $(ROOT)/src/gui/notes/noteeditor.c \
             $(ROOT)/src/gui/tagmanager/tagmanager.c $(ROOT)/src/system/tagmanager/tagwrite.c \
             $(ROOT)/src/gui/metronome/metronome.c \
-            $(ROOT)/src/gui/pet/petpage.c $(ROOT)/src/gui/pet/peticon.c \
+            $(ROOT)/src/gui/pet/petpage.c $(ROOT)/src/gui/pet/peticon.c $(ROOT)/src/gui/pet/pikachu.c \
             $(ROOT)/src/system/pet/pet.c \
             $(ROOT)/src/system/notes/notesstore.c $(ROOT)/src/system/text/textfile.c \
             $(ROOT)/src/gui/library/textview.c $(ROOT)/src/gui/library/pictureview.c \
             $(ROOT)/src/gui/shell/morepage.c $(ROOT)/src/gui/shell/gridpage.c \
+            $(ROOT)/src/system/addons/addons.c \
             $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/keyboard.c \
             $(ROOT)/src/gui/shell/popover.c $(ROOT)/src/system/input/kblayout.c \
             $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
@@ -611,7 +721,8 @@ GAMES_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(GAMES_SRC)) \
 # PEQ profile selection on the real page and DSP engine, with the shell and
 # network AutoEq browser stubbed. No audio device or network is needed.
 PEQPAGE_SRC = $(ROOT)/tests/ui/test_peq_profiles.c $(ROOT)/src/gui/audio/peqpage.c \
-              $(ROOT)/src/system/audio/eq.c $(ROOT)/src/gui/shell/settingsrow.c \
+              $(ROOT)/src/system/audio/eq.c $(ROOT)/src/system/addons/addons.c \
+              $(ROOT)/src/gui/shell/settingsrow.c \
               $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
               $(ROOT)/src/gui/board_profile.c $(ROOT)/src/system/core/config.c \
               $(ROOT)/src/system/core/lang.c

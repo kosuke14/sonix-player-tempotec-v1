@@ -18,6 +18,7 @@
 #include "src/system/core/config.h"
 #include "src/system/device/factoryreset.h"
 #include "src/system/audio/headset.h"
+#include "src/system/audio/usbhostprobe.h"
 #include "src/system/core/lang.h"
 #include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
@@ -76,7 +77,11 @@ static void firmware_clicked_cb(lv_event_t *e) {
 
 static void factory_second_confirmed(void *user) {
 	(void)user;
-	// Point of no return: factoryreset_run() does not return, it reboots.
+	// The stock reset removes the recovery journal with the rest of /data.
+	if (!usbhostprobe_cancel()) {
+		gui_notify_popup_long("usbhost_restore_failed");
+		return;
+	}
 	factoryreset_run();
 }
 
@@ -402,7 +407,7 @@ static void build_sysinfo_page(gui_config_t *cfg) {
 	const char *os = sysinfo_os_version();
 	const char *build = sysinfo_build_version();
 	char os_display[128];
-	// The V1 release channel is stored as "beta" in system-info.json.
+	// The V1 release channel is stored in system-info.json.
 	snprintf(os_display, sizeof(os_display), "%s", os);
 	lv_label_set_text(os_value, os_display[0] ? os_display : "\xE2\x80\x94"); // em dash
 	easteregg_attach(os_row);

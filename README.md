@@ -1,23 +1,14 @@
-![Sonix Player for TempoTec Variations V1 with the Tokyo Night main menu](screenshots/readme-banner.png)
+![Sonix Player for TempoTec Variations V1 cycling through the Tokyo Night, Amber on Black and OLED main menus](screenshots/readme-banner.gif)
 
-This repository is a community port of the original **[Sonix Player](https://github.com/Jepl4r/sonix-player)** project by **[Jepl4r](https://github.com/Jepl4r)** — a replacement music player for the HiBy R3 Pro II and HiBy R1 — to the **TempoTec Variations V1**. The player and the firmware packer come from that project; this fork adds the V1 board profile, the V1 packaging path and the V1 documentation. The HiBy builds that upstream carries are not part of this fork: one tree, one board, one image. See [Credits](#credits).
+This repository is a community port of the original **[Sonix Player](https://github.com/Jepl4r/sonix-player)** project by **[Jepl4r](https://github.com/Jepl4r)** for the Tempotec Variations V1. 
+
+/!\ It's currently not working on stock firmware 1.3, be patient since the firmware is not publicly released yet. /!\
 
 The firmware builder starts with an official V1 update package, replaces the stock music player and its interface with Sonix, then repackages the update as `v1.upt`.
 
-**Settings → System → About → TempoTec base version** shows the official
-firmware release the image is based on: the bundled V1 1.3 archive is labelled
-`1.3` by its SHA-256 during packaging (that package's own product metadata
-still reads `1.2`), and any other stock image reports the version from its
-product configuration. No date or time is shown. This is separate from the
-Sonix build number; unknown images or missing metadata show a dash.
-
-
-This is not an official TempoTec or HiBy release. **The port has been tested on physical TempoTec Variations V1 hardware and works perfectly on the tested device.** It targets the **TempoTec Variations V1 only**; compatibility with the V1-A or other players in the Variations family is not established.
-
-
 ## Previews
 
-Interface previews of the stock UI of Sonix, rendered at the V1's native 240 × 320 resolution. Click any picture to open it full size. (This is not the default font neither the color)
+Showcase of the default theme. Click any picture to open it full size. (This is not the default font neither the color)
 
 <table>
   <tr>
@@ -60,8 +51,7 @@ Interface previews of the stock UI of Sonix, rendered at the V1's native 240 × 
 
 ### Tokyo Night theme
 
-Showcase of **Tokyo Night** appearance: a blue-black palette with function-matched icons, chosen in Settings → Appearance → Theme. It is available on the V1 alongside Dark and Light.
-
+Showcase of **Tokyo Night** appearance: a blue-black palette with function-matched icons.
 <table>
   <tr>
     <td align="center">
@@ -146,7 +136,7 @@ Showcase of **Amber** appearance: fiery orange accents on a pure black backgroun
 
 ### OLED theme
 
-Showcase of **OLED** appearance: true black backgrounds with white as the accent, on the same V1 layouts as Tokyo Night and Amber. Nothing is filled grey: cards, rows and buttons are as black as the page, and Now Playing sets the sleeve on black instead of on a blurred copy of it. The main menu leaves out the title and tagline, so its six tiles start right under the status bar. Rendered by the host simulator with the V1 profile.
+Showcase of **OLED** appearance: true black backgrounds with white as the accent, on the same V1 layouts as Tokyo Night and Amber.
 
 <table>
   <tr>
@@ -174,7 +164,7 @@ Showcase of **OLED** appearance: true black backgrounds with white as the accent
     </td>
     <td align="center">
       <a href="screenshots/oled/now-playing.png"><img src="screenshots/oled/now-playing.png" width="180" alt="OLED now playing: Gold BBS'S by The Alchemist &amp; Conway The Machine"></a>
-      <br><sub><b>Now Playing — Gold BBS'S (LULU)</b></sub>
+      <br><sub><b>Now Playing</b></sub>
     </td>
     <td align="center">
       <a href="screenshots/oled/file-browser.png"><img src="screenshots/oled/file-browser.png" width="180" alt="OLED file browser"></a>
@@ -198,6 +188,7 @@ Showcase of **OLED** appearance: true black backgrounds with white as the accent
   - [Tokyo Night theme](#tokyo-night-theme)
   - [Ember theme](#ember-theme)
   - [OLED theme](#oled-theme)
+- [Music pet](#music-pet)
 - [Build a firmware image](#build-a-firmware-image)
 - [Install or restore firmware](#install-or-restore-firmware)
 - [Streaming credentials](#streaming-credentials)
@@ -226,21 +217,55 @@ The player UI is built with LVGL 9.6 and adapted for the V1's small display. The
 
 ## Features
 
-The project includes a local music library and file browser, album artwork, playlists, lyrics, audiobooks, DSP controls, an EPUB reader, and a Gearboy Game Boy / Game Boy Color emulator. The player also contains code for streaming and network features such as Bluetooth audio, AirPlay, DLNA and Wi-Fi file transfer.
+This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-player) for the V1. The items below are **new in this fork**; everything else is shared with upstream. The complete list is in [FEATURES.md](FEATURES.md).
 
-Local audio decoder inputs include WAV, FLAC, MP3, Ogg Vorbis, Opus, M4A/M4B/MP4, AAC, ALAC, WavPack, APE, AIFF/AIFC, CAF and DSD (DSF/DFF) files. DSP features include a 10-band graphic equalizer, parametric EQ, MSEB, crossfeed, channel balance and ReplayGain. The graphic EQ, PEQ and MSEB also run on internet radio stations. PEQ has two independent profiles for different headphones, with a numbered quick-switch button in Control Centre; see [Audio features](FEATURES.md#audio).
+### New in this fork
 
-The interface font is a setting (Settings → Appearance → Font): MiSans, Neon 80s and Roboto, plus any `.ttf`/`.otf` file put in the `Fonts` folder on the card. Whatever a face is missing — Cyrillic, Greek, Hangul, kanji, Arabic — is drawn by MiSans behind it, so the whole interface stays legible in every language. The added family is under the SIL Open Font License; see [`sonix-player/assets/fonts/FONT-LICENSES.txt`](sonix-player/assets/fonts/FONT-LICENSES.txt) for the copyright notices and the exact files.
+- **Music pet** - a Pikachu that grows from the music you hear. See [Music pet](#music-pet).
+- **Calculator, Notes, Metronome** - a pocket calculator, text notes from the card, and a metronome with tap tempo, all under More.
+- **2048, Snake and Dino** - three small games under More, sized for the V1 panel.
+- **Tag Manager** - view and edit FLAC and MP3 tags and cover art, and search for covers over Wi-Fi. See the [usage and safety notes](docs/tag-manager.md).
+- **Subsonic / Gonic** - stream from your own server. See [Subsonic / Gonic](#subsonic--gonic).
+- **V1 themes** - **Tokyo Night**, **Amber on Black** and **OLED**, designed for the V1 panel, beside Dark and Light. Make your own with a [custom colour theme](docs/custom-themes.md).
+- **Boot screens** - Retrospace (the default), Space, Travelling in space, Stock, or your own picture.
+- **Player layouts** - **Immersive**, **Poster** and **Album Art Max**, beside Standard, Waveform and Alternative.
+- **Interface fonts** - choose MiSans, Neon 80s or Roboto, or any `.ttf`/`.otf` in the card's `Fonts` folder. Missing glyphs fall back to MiSans, so every language stays readable.
+- **Dual Scrobbler Suite** (Last.fm & ListenBrainz) — Native background scrobbling for both services with independent toggles, token-based setup, and offline queue caching when disconnected from Wi-Fi.
+- **Over-The-Air (OTA) Updates** — Check for and download new releases directly over Wi-Fi from GitHub Releases with one click in Settings → System → Firmware update.
 
-Custom colour themes are supported too: copy the [editable template](sonix-player/examples/custom-theme.ini) to `Themes/custom.ini` at the root of the SD card, change its hex colours, and select **Custom** under Settings → Appearance → Theme. See the [custom-theme guide](docs/custom-themes.md) for the format, reload behaviour and limitations.
+### Shared with Sonix Player
 
-The boot screen is a setting too (Settings → Appearance → Boot screen): **Retrospace**, the default, **Space**, **Travelling in space**, **Stock**, the firmware's own light and dark pictures, or **Custom** — a JPEG or PNG of your own from the `Bootlogo` folder at the root of the card, chosen from the list under **Custom picture**. It is scaled to fill the panel and cropped where it overflows, and copied into the player, so it boots even with the card out. The choice cannot live in the config — the script that draws the logo runs before any filesystem holding a config is mounted — so it is written to the same flash marker the theme uses, and appears from the next power-on.
+- **Music**: a local library with a file browser, albums, artists, genres, playlists, favourites and most played, plus gapless playback, fades, ReplayGain and sleep timers.
+- **Sound**: a 10-band graphic EQ, parametric EQ, AutoEq, MSEB, crossfeed, DSD and a DAC page.
+- **Lyrics**: read from the file or fetched from LRCLIB.
+- **Streaming and podcasts**: Tidal, Qobuz, internet radio, Last.fm, and podcasts with downloads.
+- **Audiobooks and e-books**: chapters, bookmarks and speed control, plus an EPUB reader.
+- **Wireless**: Wi-Fi, Bluetooth headphones and speakers, a Bluetooth receiver, AirPlay, DLNA, Wi-Fi file transfer and SonixLink.
+- **Tools and games**: a file manager, a Game Boy / Game Boy Color emulator, and Flappy Bird.
+- **Screen and power**: rounded corners, brightness, a screensaver, standby, a low-battery warning and a battery screen when off.
 
-Rounded screen corners are optional (Settings → Appearance → Rounded corners), off by default. On the V1 the arc is 16 px, sized to the 2" 240×320 panel's glass.
+Local audio decoder inputs include WAV, FLAC, MP3, Ogg Vorbis, Opus, M4A/M4B/MP4, AAC, ALAC, WavPack, APE, AIFF/AIFC, CAF and DSD (DSF/DFF). Streaming services require valid credentials and may depend on third-party availability.
 
-The battery is looked after at both ends. At **5 %** the player says so — a red card, and the panel comes back up for it if it was dark — and at **1 %** it switches itself off the ordinary way, position written and card unmounted, instead of letting the cell drop out from under it; below 10 % it also stays out of standby, because a sleeping player cannot watch its own gauge. A player that was **switched off and is then put on a charger** comes up on a battery screen instead of the library: the level, the percentage and what the charger is doing, going dark after ten seconds, with a **press** of the power button to bring it back and a **hold** to start the player after all.
+## Music pet
 
-See [FEATURES.md](FEATURES.md) for a longer feature list. Streaming services also require valid credentials and may depend on third-party service availability.
+Open **More → Pet** to meet a small Pikachu that is fed by the music you listen to.
+
+<p align="center">
+  <img src="screenshots/pet.png" width="240" alt="Pet page on the V1: Pikachu named Pikachu, sprout stage, with its meters, Musical Notes, daily listening goal and streak">
+</p>
+
+How it works:
+
+- **Feeding:** the pet grows from listening to something it can actually hear: a local track, a stream, internet radio, or a phone over Bluetooth, at a volume of 10 % or more. Paused or silent playback feeds nothing.
+- **Stages:** there is no egg. Pikachu is there from the first minute and grows through four stages: hatchling, child, teen and adult.
+- **Meters:** the card shows a heart meter for the pet's mood, an energy meter, and its Musical Notes total. Below them, a line says whether it is hearing music.
+- **Daily goal and streak:** a 15-minute daily goal builds a streak. A bought streak freeze covers one missed day.
+- **Musical Notes:** the pet earns notes for the minutes it hears, plus bonuses for listening late, finishing an album, five genres in a day, and half an hour without a pause. Spend them in the wardrobe on hats, headphones, a scarf, a crown, room themes and streak freezes.
+- **Character:** after about a month of listening, the genres you play give it a character. Pop and dance make it Upbeat, jazz and classical make it Calm, and indie, alternative and metal make it Curious.
+- **Tap-along:** once a day it offers a sixteen-beat tap-along using the metronome.
+- **Naming:** it starts as Pikachu. Use the pencil in the corner to rename it.
+
+The full rules are in [FEATURES.md](FEATURES.md).
 
 ## Install or restore firmware
 
@@ -336,28 +361,4 @@ For bug reports, include the exact model, the firmware build/commit and relevant
 
 This port exists because of the original **[Sonix Player](https://github.com/Jepl4r/sonix-player)** project. Almost everything in `sonix-player/` and `sonix-packer/` is that project's work, carried here and adapted; what this fork adds is the TempoTec V1 support and the documentation for it. The original is licensed under the GPL-3.0, and so is this fork.
 
-- **[Jepl4r](https://github.com/Jepl4r)** — author and maintainer of Sonix Player, and the source of the player, the packer and the interface this port is built on.
-- **[Tartarus6](https://github.com/Tartarus6)**, **[noisetta](https://github.com/noisetta)**, **[endgame47](https://github.com/endgame47)**, **[hkhrithik007](https://github.com/hkhrithik007)** — the people named in the original project's own "Special thanks" list.
-- **[Hinatai](https://github.com/Hinatai)**, **[KrajzegaX](https://github.com/KrajzegaX)**, **[noemdespertis](https://github.com/noemdespertis)** and everyone else on the upstream [contributor list](https://github.com/Jepl4r/sonix-player/graphs/contributors), whose commits this fork inherits.
-- The HiBy and TempoTec communities — the people who test, report, translate and explain both projects — who do the work no commit log shows.
-
-Third-party components carried in the tree, or fetched by the build, keep their own authors and licences:
-
-| component | used for |
-|---|---|
-| [LVGL](https://github.com/lvgl/lvgl) 9.6 | the whole interface |
-| [Gearboy](https://github.com/drhelius/Gearboy) by Ignacio Sanchez | the Game Boy core in `sonix-player/src/gb/core/`, kept verbatim |
-| [dr_libs](https://github.com/mackron/dr_libs) by David Reid | FLAC and MP3 decoding |
-| [stb](https://github.com/nothings/stb) by Sean Barrett | cover art and image read/write |
-| [miniz](https://github.com/richgel999/miniz) (RAD Game Tools, Valve, Rich Geldreich) | inflate for covers and EPUB |
-| TJpgDec by ChaN | JPEG decoding on the target |
-| [SQLite](https://sqlite.org) | the library index |
-| [FreeType](https://freetype.org) | fonts at runtime |
-| [libogg, libopus and opusfile](https://opus-codec.org) (Xiph.Org) | Opus playback |
-| [WavPack](https://www.wavpack.com) by David Bryant | WavPack playback |
-| [BlueALSA](https://github.com/arkq/bluez-alsa) by Arkadiusz Bokowy | Bluetooth audio in the V1 overlay tree, inherited from upstream |
-| [Lucide](https://lucide.dev) | the Wi-Fi transfer page glyphs |
-| the [Rockbox](https://rockbox.org) toolchain scripts in `sonix-player/rockboxdev/` | the MIPS cross-compiler |
-
-The licence notice for each component sits with it in the source tree; [LICENSE](LICENSE) covers the project as a whole. The official TempoTec V1 firmware used as the base of a build is not part of this repository, and TempoTec, HiBy and the other vendors own their names and firmware.
 

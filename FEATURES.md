@@ -55,7 +55,10 @@
   compensation from 0 to 6 dB.
 - **Line out** - drives the jack at a fixed level for an amplifier, refuses
   volume changes while on, and puts your level back on the way out.
-- **USB DAC** - the player becomes a USB sound card, 32 kHz to 384 kHz.
+- **USB DAC** - the player becomes a USB sound card, 32 kHz to 384 kHz. The
+  Control Centre remains available for EQ, PEQ, MSEB, gain and output controls;
+  the graphic EQ, PEQ and MSEB process incoming PCM, while DSD passes through
+  untouched.
 - **USB audio out** - a DAC or USB-C headphones driven with the player as host.
 - **In-line remote** - the three-button cable remote: one click play/pause, two
   next, three previous.
@@ -253,12 +256,13 @@ a self-signed certificate), and HLS.
 
 - **Pet** - a small creature fed by the music it can actually be heard by: a
   local track, a stream, internet radio or a phone over Bluetooth, at a volume
-  at or above 10 percent. The first time the page opens it asks which animal to
-  raise -- **a grey cat, a sandy dog or a goldfish** -- and what to call it; the name can be
-  changed whenever you like from the pencil in the corner. There is no egg: the
-  animal you choose is the animal from the first minute, and it grows through
-  four stages (hatchling, child, teen, adult). A fish lives in an aquarium --
-  water, sand, weeds and slow bubbles -- instead of the room the others sit in.
+  at or above 10 percent. The pet is a **Pikachu**, drawn as pixel art in the
+  six colours of the picture it was taken from, and it answers to a name you
+  give it (it starts as Pikachu); the name can be changed whenever you like from
+  the pencil in the corner. There is no egg: it is there from the first minute,
+  and it grows through four stages (hatchling, child, teen, adult) -- the
+  hatchling is drawn at two pixels a cell and the rest at three, so the same
+  picture starts small and round and has room to stand up in later.
   It keeps a daily streak, earns **Musical Notes** for the minutes it heard and
   spends them in a wardrobe on hats, headphones, a scarf, a crown, two room
   themes and streak freezes. A **15-minute daily goal** builds the streak and a
@@ -284,43 +288,55 @@ a self-signed certificate), and HLS.
   name and stage top left, **hearts and energy top right**, the animal in the
   middle -- **pat it by touching it** -- the track it is feeding on along the
   bottom, a close corner bottom right, and the day's minutes and the streak in
-  two lines under the card. A pencil opens the name and the animal, a star the
+  two lines under the card. A pencil opens the name, a star the
   wardrobe; both are sheets over the page, and the chevron closes them in turn.
   Its state lives in the settings file and survives a reboot; the only cost is
   one callback a second in the interface loop that is already running, and
-  nothing at all when the page is not open. The creature is drawn from the
-  interface's own shapes -- a flat fill inside the same heavy ink line the icons
-  use -- and each animal is its own silhouette, so it adds no art to the image.
+  nothing at all when the page is not open. The creature is one picture, in two
+  sizes -- 75 KB of read-only data in all -- drawn pixel for pixel and never
+  scaled; what it feels and what it wears are a few cells drawn over it on the
+  same grid, and the route behind it is one more object drawn from stamps.
   It moves in two frames rather than in an interpolation, and the page redraws
   only what changed: a meter that has not moved is not touched between one
   second and the next. While music plays, the line at the foot of the card says
-  what it is feeding on beside a three-bar equalizer. Each animal has a shape of
-  its own -- a cat's ears and whiskers, a dog's rounded ears and snout, a fish's
-  forked tail, dorsal fin and gill -- and a few flat things of its own behind
-  it: a rug and a plant, a fence and a bone, or the tank the fish swims in,
-  furnished down to the weeds -- a fan of grass and a leafy plant on each side
-  of the sand. The face carries the mood too: round eyes and a smile when it is
-  happy, eyes shut in a smile at the top of it, brows and a tear when it is sad,
-  and, while music is playing, an open mouth and a pair of notes in the air
-  beside its head. **It answers the keys as well as the glass**: a step up on
+  what it is feeding on beside a three-bar equalizer. It stands on a route --
+  a sky that comes up out of the card, hills, a round tree and a pine, tall
+  grass and flowers, a platform under its feet -- and its face is the
+  picture's own, except when it is fed. **While music plays it smiles**:
+  its eyes go round and bright, its mouth opens on a pink tongue, it steps from
+  side to side and sparks fly off its cheeks. (A scarf or collar is over its
+  chin, so there the smile stays small.)
+  The rest of the time the mood is something added beside the picture: eyes
+  shut and a little "z z" when it is asleep, a blue sweat drop when it is sad,
+  three gold stars when it is dizzy, hearts over it when it is blissful, and,
+  while music is playing, a pair of notes in the air beside it. **It is alive
+  between its breaths as well**: it blinks every few seconds, and when nobody
+  is touching it, it hops, leans or shakes of its own accord every ten seconds
+  or so. On a dark card the black tip of its far ear, which stands above the
+  sky, is drawn in true black, a shade darker than the card, because the
+  picture's own black is as light as the card there. **It
+  answers the keys as well as the glass**: a step up on
   the volume and it jumps, a step down and it ducks, Previous and Next and it
-  leans the way they go, and a tap picks one of three tiny reactions -- a heart,
-  a hop or a wave -- on the pat's own cooldown. **Hold a finger on it for two
+  leans the way they go, and a tap makes it hop with a bobbing heart, even
+  during the pat's reward cooldown. **Hold a finger on it for two
   seconds** and three hearts fill under it; the third pays the day's groom,
-  once a day. A genre tag dresses it for the track it is hearing -- shades for
-  the electronic family, a gold chain for hip hop, a studded collar for rock, a
-  cup on the floor for the calm ones -- and the volume shows on its face, wide
-  eyes past eighty per cent and a heavy-lidded rest between twenty and forty.
-  **A box sits in the corner of the card**: in it are the day's fortune, one of
+  once a day. A genre tag dresses it for the track it is hearing -- mirror
+  shades for the electronic family, a gold chain for hip hop, a studded collar
+  for rock, a cup on the floor for the calm ones. What the wardrobe has put on it -- a party
+  hat, a crown, headphones or a scarf -- is drawn over the picture the same way,
+  one thing at a time.
+  **A Poké Ball sits in the corner**: in it are the day's fortune, one of
   six drawn from the date and worth fifty notes once it has been carried out; an
   hourly note game -- one note crossing one line, six times, five notes for
   turning up and one for each note caught; and the shelf, where what the
-  listening turns up goes: every half hour of audible music finds a bone, a
-  cassette, a sticker or a record on the floor, and a tap puts it on the shelf,
-  three at most. The card also knows what time it is: a sun on it by day, and
-  after eight in the evening a darker card, a moon and a small lamp, with the
-  month deciding what falls through the air -- rain in spring, leaves in autumn,
-  snow in winter, nothing in summer.
+  listening turns up goes: every half hour of audible music finds a gold note,
+  a cassette, a sticker or a record on the floor, and a tap puts it on the
+  shelf, three at most; the ball's button is gold, with a sparkle, while
+  something is waiting in it. The card also knows what time it is: a sun in its
+  sky by day, and after eight in the evening a night sky with a moon, stars and
+  a small lamp, with the month deciding what falls through the air -- rain in
+  spring, under a grey sky, leaves in autumn, snow in winter, nothing in
+  summer. The two room themes are skies of their own, a sunset and a night.
 
 ## Games
 
@@ -385,7 +401,7 @@ a self-signed certificate), and HLS.
 - **Screen** - brightness (5% to 100%), screen-off timeout, double-tap to wake, screensaver,
   and 180° rotation with the touch rotated with it.
 - **Screen → Volume in control centre** - what the slider under the control centre's round buttons does. Off, the default, it is the brightness bar, exactly where the stock firmware has it and where this player has always had it. On, the same bar sets the output volume instead: the sun becomes a speaker that changes with the level (silent, quiet, loud) and the bar turns red past 55%, the warning colour the volume pill over the player uses. It is the same level the volume keys, the status bar and the pill carry. The switch takes effect at the next pull, with no restart.
-- **Screensaver visualizer** - in Settings → Screen, enable Screensaver visualizer to replace Album artwork with a live spectrum. Two styles, picked with pills under the switch: **Neon** draws eight wide segmented bars in the theme’s accent colour on black over a matching rail; **LED** draws the classic bench analyzer — sixteen narrower bars of horizontal segments on a dark red field that glows toward the floor. Every slot of every bar is drawn all the time: unlit ones as dark red ghosts of the segment to come, lit ones blazing orange, the bottom few brightening to white where the light pools at the floor, with a warm glow behind each lit stack that shows in the gaps between its segments and a bright cap riding each bar’s peak and falling behind it as the music moves on. The bars are weighted perceptually, so the bass end keeps the movement the treble has, however the mix leans. The track information and clock remain visible. Pictures mode is unchanged. The bars rest when audio is paused or silent.
+- **Screensaver visualizer** - in Settings → Screen, enable Screensaver visualizer to replace Album artwork with a live spectrum. Two styles, picked with pills under the switch: **Neon** draws eight wide segmented bars in the theme’s accent colour on black over a matching rail; **LED** draws the classic bench analyzer — sixteen narrower bars of horizontal segments on a dark red field that glows toward the floor. Every slot of every bar is drawn all the time: unlit ones as dark red ghosts of the segment to come, lit ones blazing orange, the bottom few brightening to white where the light pools at the floor, with a warm glow behind each lit stack that shows in the gaps between its segments and a bright cap riding each bar’s peak and falling behind it as the music moves on. The bars are weighted perceptually, so the bass end keeps the movement the treble has, however the mix leans. The track information and clock remain visible. Pictures mode is unchanged. The bars rest when audio is paused or silent, and while nothing is playing the rail is replaced by a musical note in the theme's accent colour, centred in the field — the line comes back when playback resumes.
 - **Screensaver** - choose to show the cover of the current playing track or pictures from the `Screensaver` folder. On the V1's Tokyo Night, Amber on Black and OLED themes the artwork fills the whole panel and the title, artist and clock are read on a translucent field of the palette's own colour over its foot; Dark and Light keep the blurred strip. Under **Album art**, **Fill** keeps that full-bleed look (the default). **Framed** shows the whole cover instead, at its own resolution, in a rounded frame with margins round it, above the title, artist and clock. That frame is 160 px on the V1. The cover is decoded for exactly that size and never enlarged, so it never turns into blocks.
   > Pictures must be baseline (not progressive) JPEGs, portrait, and no larger than 480x800. The V1 crops and scales them to fill its 240x320 screen. For the sharpest result with nothing cropped, make them 240x320 or 480x640, the screen's own 3:4 shape.
 

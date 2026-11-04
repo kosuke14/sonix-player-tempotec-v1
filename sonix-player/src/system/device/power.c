@@ -41,11 +41,14 @@
 #include "src/system/lastfm/lastfm.h"
 #include "src/system/listenbrainz/listenbrainz.h"
 #include "src/system/bluetooth/bluetooth.h"
+#include "src/system/bluetooth/btafh.h"
 #include "src/system/bluetooth/btreceiver.h"
 #include "src/system/core/config.h"
 #include "src/system/core/logging.h"
 #include "src/system/device/usb.h"
 #include "src/system/audio/usbdac.h"
+#include "src/system/audio/usbaudio.h"
+#include "src/system/audio/usbhostprobe.h"
 #include "src/system/gearboy/gearboy.h"
 #include "src/system/device/led.h"
 #include "src/system/device/sysinfo.h"
@@ -604,7 +607,11 @@ static void find_charge_node(void) {
 	searched = true;
 
 	if (access(STEP_CHARGING_NODE, W_OK) != 0) {
-		printf("power: %s is not writable; the charge limit cannot be enforced\n", STEP_CHARGING_NODE);
+		if (axpcharge_applies()) {
+			printf("power: no writable MP2731 charge node; AXP2101 charge settings are managed separately\n");
+		} else {
+			printf("power: %s is not writable; the MP2731 percentage limit cannot be enforced\n", STEP_CHARGING_NODE);
+		}
 		return;
 	}
 
@@ -893,7 +900,7 @@ static void park_wifi_now(void) {
 // SonixLink switched on counts, as it does for the Wi-Fi radio: a phone can
 // reach it over Bluetooth, and a parked radio is one the phone cannot find.
 static bool bluetooth_in_use(void) {
-	return bluetooth_audio_active() || bluetooth_connected_device(NULL) || bluetooth_scan_running() ||
+	return bluetooth_a2dp_link_active() || bluetooth_connected_device(NULL) || bluetooth_scan_running() ||
 		   bluetooth_busy() || sonixlink_get_enabled();
 }
 
@@ -947,7 +954,7 @@ static void park_bluetooth_now(void) {
 // the Wi-Fi radio staying associated while headphones are connected and quiet;
 // the alternative is dropping the link the user is wearing.
 static bool wifi_wanted(void) {
-	return wifi_in_use() || bluetooth_busy() || bluetooth_audio_active() || bluetooth_connected_device(NULL);
+	return wifi_in_use() || bluetooth_busy() || bluetooth_a2dp_link_active() || bluetooth_connected_device(NULL);
 }
 
 // A minute after a radio stops being wanted, it goes off. Not "unless something
@@ -962,6 +969,41 @@ static bool wifi_wanted(void) {
 // so that a pause somebody is about to undo does not cost a reassociation.
 static uint32_t g_wifi_idle_since;
 static uint32_t g_bt_idle_since;
+
+// Follow the associated Wi-Fi channel while either A2DP direction is linked.
+// Failed clears are retried; after a radio park, a previously sent restriction
+// is reasserted or cleared instead of assuming the controller reset it.
+static void bt_afh_follow_wifi(uint32_t now, bool a2dp_link) {
+	static btafh_follow_t state;
+	static bool last_link;
+	static bool last_joined;
+	static int last_freq;
+	bool joined = false;
+	int freq = 0;
+	if (a2dp_link) {
+		wifi_status_t st;
+		wifi_get_status(&st);
+		joined = st.state == WIFI_STATE_CONNECTED;
+		if (joined) {
+			freq = st.freq_mhz;
+		}
+	}
+	// The Bluetooth log otherwise cannot distinguish "no AFH command" because
+	// Wi-Fi was not associated from "frequency unknown" or a failed write.
+	// Log only changes, and never the network name.
+	if (a2dp_link && (!last_link || joined != last_joined || freq != last_freq)) {
+		if (joined && freq > 0) {
+			fprintf(stderr, "bluetooth: coexistence: A2DP linked, Wi-Fi at %d MHz\n", freq);
+		} else {
+			fprintf(stderr, "bluetooth: coexistence: A2DP linked, %s\n",
+					joined ? "Wi-Fi frequency unknown" : "Wi-Fi not associated");
+		}
+	}
+	last_link = a2dp_link;
+	last_joined = joined;
+	last_freq = freq;
+	btafh_follow_wifi(&state, now, bluetooth_get_enabled(), a2dp_link, freq, btafh_apply_for_wifi);
+}
 
 static void park_radios_if_idle(uint32_t now) {
 	// Held at now for as long as there is a reason to keep them, so `since`
@@ -1527,8 +1569,9 @@ static void suspend_if_idle(uint32_t now, bool playing) {
 	// And what the cable is carrying: the card exported over USB, or a computer
 	// feeding the DAC, both of which the suspend would cut. Below the cable
 	// itself now, and kept because a host can hold the port without VBUS.
-	if (usb_storage_active() || usbdac_is_active()) {
-		mem_skip("the USB cable is transferring something");
+	if (usb_storage_active() || usbdac_is_active() || usbaudio_active() ||
+		usbaudio_handover_pending() || usbhostprobe_active()) {
+		mem_skip("the USB controller is in use or its host role is being restored");
 		return;
 	}
 	// And ADB, which is the same cable carrying something. adbd survives the
@@ -2217,6 +2260,13 @@ static void power_timer_cb(lv_timer_t *timer) {
 	//           what they buy is that the power-up does not land on the stream,
 	//           and the milliwatts are only spent while it lasts.
 	panel_hold_tick(now);
+
+	// 4a-bis-1b. Both the Wi-Fi polling mitigation and AFH need to see an
+	// incoming receiver link as well as outgoing headphone audio. Keep the
+	// output-only bluetooth_audio_active() contract for routing callers.
+	bool a2dp_link = bluetooth_a2dp_link_active();
+	wifi_set_bluetooth_streaming(a2dp_link);
+	bt_afh_follow_wifi(now, a2dp_link);
 
 	// 4a-bis-2. the radios, a minute after the screen goes dark
 	park_radios_if_idle(now);

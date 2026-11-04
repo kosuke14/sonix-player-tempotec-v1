@@ -29,6 +29,7 @@
 #include "src/gui/shell/topbar.h"
 #include "src/system/device/sysinfo.h"
 #include "src/system/playback/sleeptimer.h"
+#include "src/system/addons/addons.h"
 #include "src/system/audio/audio.h"
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/audio/eq.h"
@@ -167,13 +168,28 @@ static void gain_toggle_cb(lv_event_t *e) {
 
 // ---------------------------------------------------------------------------
 // MSEB: the stock player's MageSound tuning (see eq.c for the engine and the
-// mapping); nine character sliders, -10..+10 around flat.
+// mapping); ten character sliders around flat.
 // ---------------------------------------------------------------------------
 
 static lv_obj_t *mseb_screen;
 static lv_obj_t *mseb_enable_switch;
 static lv_obj_t *mseb_sliders[MSEB_BANDS];
 static lv_obj_t *mseb_values[MSEB_BANDS];
+
+// Negative and positive ends, in the same order as mseb_band_name. The
+// vocal and instrument treble controls affect sibilance/brightness.
+static const char *const mseb_ends[MSEB_BANDS][2] = {
+	{"mseb_cool_bright", "mseb_warm_dark"},
+	{"mseb_light", "mseb_deep"},
+	{"mseb_fast", "mseb_thumpy"},
+	{"mseb_crisp", "mseb_thick"},
+	{"mseb_recessed", "mseb_forward"},
+	{"mseb_detoxed", "mseb_intoxicating"},
+	{"mseb_soft", "mseb_crisp"},
+	{"mseb_soft", "mseb_crisp"},
+	{"mseb_soft", "mseb_crisp"},
+	{"mseb_soft", "mseb_crisp"},
+};
 
 static lv_obj_t *mseb_reset_btn;
 static lv_obj_t *eq_reset_btn;
@@ -224,6 +240,46 @@ static void mseb_slider_cb(lv_event_t *e) {
 	int value = (int)lv_slider_get_value(mseb_sliders[band]);
 	mseb_set_value(band, value);
 	lv_label_set_text_fmt(mseb_values[band], "%+d", value);
+}
+
+// LVGL counts short clicks even after a slider drag, and its click streak is
+// shared across objects. Require two stationary taps on the same knob too.
+static lv_point_t mseb_press_point;
+static bool mseb_tap_moved;
+static int mseb_last_tap_band = -1;
+static bool mseb_double_tap_valid;
+
+static void mseb_tap_cb(lv_event_t *e) {
+	int band = (int)(intptr_t)lv_event_get_user_data(e);
+	lv_event_code_t code = lv_event_get_code(e);
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev || band < 0 || band >= MSEB_BANDS || !mseb_sliders[band] ||
+		lv_obj_has_state(mseb_sliders[band], LV_STATE_DISABLED)) {
+		return;
+	}
+	if (code == LV_EVENT_PRESSED) {
+		lv_indev_get_point(indev, &mseb_press_point);
+		mseb_tap_moved = false;
+	} else if (code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED) {
+		lv_point_t point;
+		lv_indev_get_point(indev, &point);
+		int dx = point.x - mseb_press_point.x, dy = point.y - mseb_press_point.y;
+		if (dx * dx + dy * dy > 64) {
+			mseb_tap_moved = true;
+			mseb_last_tap_band = -1;
+		}
+	} else if (code == LV_EVENT_PRESS_LOST) {
+		mseb_last_tap_band = -1;
+	} else if (code == LV_EVENT_SHORT_CLICKED) {
+		mseb_double_tap_valid = !mseb_tap_moved && mseb_last_tap_band == band;
+		mseb_last_tap_band = mseb_tap_moved ? -1 : band;
+	} else if (code == LV_EVENT_DOUBLE_CLICKED && mseb_double_tap_valid) {
+		lv_slider_set_value(mseb_sliders[band], 0, LV_ANIM_OFF);
+		mseb_set_value(band, 0);
+		lv_label_set_text_fmt(mseb_values[band], "%+d", 0);
+		mseb_save();
+		mseb_last_tap_band = -1;
+	}
 }
 
 static void mseb_released_cb(lv_event_t *e) {
@@ -864,7 +920,7 @@ static void build_mseb_page(gui_config_t *cfg) {
 	for (int i = 0; i < MSEB_BANDS; i++) {
 		lv_obj_t *card = lv_obj_create(container);
 		lv_obj_set_width(card, lv_pct(100));
-		lv_obj_set_height(card, bp_pick(70, 104));
+		lv_obj_set_height(card, bp_pick(100, 138));
 		lv_obj_add_style(card, &theme_style_card, 0);
 		lv_obj_set_style_radius(card, bp_pick(bp_tile_radius(), 12), 0);
 		lv_obj_set_style_border_width(card, 0, 0);
@@ -889,7 +945,7 @@ static void build_mseb_page(gui_config_t *cfg) {
 		lv_obj_t *slider = lv_slider_create(card);
 		lv_obj_set_width(slider, bp_pick(lv_pct(92), lv_pct(96)));
 		lv_obj_set_height(slider, 10);
-		lv_obj_align(slider, LV_ALIGN_BOTTOM_MID, 0, bp_pick(-6, -10));
+		lv_obj_align(slider, LV_ALIGN_BOTTOM_MID, 0, bp_pick(-27, -34));
 		lv_slider_set_range(slider, -mseb_get_range(), mseb_get_range());
 		// MSEB sliders are bipolar: zero sits in the middle and the coloured
 		// bar grows from there, forwards for positives and backwards for
@@ -921,6 +977,24 @@ static void build_mseb_page(gui_config_t *cfg) {
 		lv_obj_set_ext_click_area(slider, 18);
 		lv_obj_add_event_cb(slider, mseb_slider_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)i);
 		lv_obj_add_event_cb(slider, mseb_released_cb, LV_EVENT_RELEASED, NULL);
+		lv_obj_add_event_cb(slider, mseb_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)i);
+		lv_obj_add_event_cb(slider, mseb_tap_cb, LV_EVENT_PRESSING, (void *)(intptr_t)i);
+		lv_obj_add_event_cb(slider, mseb_tap_cb, LV_EVENT_RELEASED, (void *)(intptr_t)i);
+		lv_obj_add_event_cb(slider, mseb_tap_cb, LV_EVENT_PRESS_LOST, (void *)(intptr_t)i);
+		lv_obj_add_event_cb(slider, mseb_tap_cb, LV_EVENT_SHORT_CLICKED, (void *)(intptr_t)i);
+		lv_obj_add_event_cb(slider, mseb_tap_cb, LV_EVENT_DOUBLE_CLICKED, (void *)(intptr_t)i);
+
+		// Keep the ends below the track and out of the knob's drag area.
+		for (int end = 0; end < 2; end++) {
+			lv_obj_t *hint = lv_label_create(card);
+			lv_label_set_text(hint, tr(mseb_ends[i][end]));
+			lv_obj_set_width(hint, lv_pct(49));
+			lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
+			lv_obj_set_style_text_align(hint, end == 0 ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_RIGHT, 0);
+			lv_obj_add_style(hint, &theme_style_text_dim, 0);
+			lv_obj_set_style_text_font(hint, bp_is_tempotec_v1() ? &font_ui_14 : &font_ui_18, 0);
+			lv_obj_align(hint, end == 0 ? LV_ALIGN_BOTTOM_LEFT : LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+		}
 
 		mseb_sliders[i] = slider;
 	}
@@ -1213,15 +1287,22 @@ void musicsettings_set_mseb_enabled(bool enabled) {
 // and a grey one on an enabled fade is not a nuance, it is a lie.
 static lv_obj_t *eq_row, *peq_row, *mseb_row, *soundfield_row, *crossfeed_row, *fade_row, *balance_row, *vlimit_row;
 
+// A row whose module is off was never built, so there is no row to paint.
+static void chevron_if(lv_obj_t *row, bool active) {
+	if (row) {
+		settingsrow_chevron_active(row, active);
+	}
+}
+
 static void refresh_active_chevrons(void) {
-	settingsrow_chevron_active(eq_row, eq_get_enabled());
-	settingsrow_chevron_active(peq_row, peq_get_enabled());
-	settingsrow_chevron_active(mseb_row, mseb_get_enabled());
-	settingsrow_chevron_active(soundfield_row, soundfield_get_enabled());
-	settingsrow_chevron_active(crossfeed_row, crossfeed_get_enabled());
+	chevron_if(eq_row, eq_get_enabled());
+	chevron_if(peq_row, peq_get_enabled());
+	chevron_if(mseb_row, mseb_get_enabled());
+	chevron_if(soundfield_row, soundfield_get_enabled());
+	chevron_if(crossfeed_row, crossfeed_get_enabled());
 	settingsrow_chevron_active(fade_row, musicsettings_fade_enabled());
-	settingsrow_chevron_active(balance_row, balance_get_enabled());
-	settingsrow_chevron_active(vlimit_row, volume_limit_enabled());
+	chevron_if(balance_row, balance_get_enabled());
+	chevron_if(vlimit_row, volume_limit_enabled());
 }
 
 static void screen_loaded_cb(lv_event_t *e) {
@@ -2398,10 +2479,12 @@ static void build_display_page(gui_config_t *cfg) {
 	// not a replacement for the list, and the covers it draws are decoded at a
 	// size the lists never ask for -- so switching it on fills the thumbnail
 	// database with rather bigger pictures the first time it is flicked through.
-	settingsrow_toggle(container, "cover_flow", &coverflow_switch, coverflow_cb);
-	option_note(container, "cover_flow_note");
-	if (coverflow_enabled()) {
-		lv_obj_add_state(coverflow_switch, LV_STATE_CHECKED);
+	if (addons_enabled("coverflow")) {
+		settingsrow_toggle(container, "cover_flow", &coverflow_switch, coverflow_cb);
+		option_note(container, "cover_flow_note");
+		if (coverflow_enabled()) {
+			lv_obj_add_state(coverflow_switch, LV_STATE_CHECKED);
+		}
 	}
 
 	// How the now-playing page is arranged.
@@ -2544,9 +2627,11 @@ static void build_playback_page(gui_config_t *cfg) {
 	fade_row = settingsrow_add(container, "fade", NULL, switch_screen_cb, fade_screen);
 
 	// Both channels as one, for a single earbud or one ear.
-	settingsrow_toggle(container, "musicsettings_mono_audio", &mono_switch, mono_cb);
-	if (mono_get_enabled()) {
-		lv_obj_add_state(mono_switch, LV_STATE_CHECKED);
+	if (addons_enabled("mono")) {
+		settingsrow_toggle(container, "musicsettings_mono_audio", &mono_switch, mono_cb);
+		if (mono_get_enabled()) {
+			lv_obj_add_state(mono_switch, LV_STATE_CHECKED);
+		}
 	}
 
 	// Which of the two shuffles "Play in random order" starts. The mode button
@@ -2624,38 +2709,56 @@ void musicsettings_init(gui_config_t *cfg) {
 	settingsrow_add(container, "musicsettings_display_options", NULL, switch_screen_cb, display_screen);
 	settingsrow_add(container, "musicsettings_library", NULL, switch_screen_cb, library_screen);
 
-	lastfmsettings_init(cfg);
-	settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
+	if (addons_enabled("lastfm")) {
+		lastfmsettings_init(cfg);
+		settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
+	}
 
-	listenbrainzsettings_init(cfg);
-	settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
+	if (addons_enabled("listenbrainz")) {
+		listenbrainzsettings_init(cfg);
+		settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
+	}
 
-	build_eq_page(cfg);
-	eq_row = settingsrow_add(container, "equaliser", NULL, switch_screen_cb, eq_screen);
+	if (addons_enabled("eq")) {
+		build_eq_page(cfg);
+		eq_row = settingsrow_add(container, "equaliser", NULL, switch_screen_cb, eq_screen);
+	}
 
 	// PEQ right below: the same thing said more precisely, so whoever comes
 	// looking for the equaliser finds the slider one first and the parametric
 	// one next to it.
-	peqpage_init(cfg);
-	peq_row = settingsrow_add(container, "peq", NULL, switch_screen_cb, peqpage_screen());
+	if (addons_enabled("peq")) {
+		peqpage_init(cfg);
+		peq_row = settingsrow_add(container, "peq", NULL, switch_screen_cb, peqpage_screen());
+	}
 
-	build_mseb_page(cfg);
-	mseb_row = settingsrow_add(container, "mseb", NULL, switch_screen_cb, mseb_screen);
+	if (addons_enabled("mseb")) {
+		build_mseb_page(cfg);
+		mseb_row = settingsrow_add(container, "mseb", NULL, switch_screen_cb, mseb_screen);
+	}
 
-	build_soundfield_page(cfg);
-	soundfield_row = settingsrow_add(container, "musicsettings_soundfield", NULL, switch_screen_cb, soundfield_screen);
+	if (addons_enabled("soundfield")) {
+		build_soundfield_page(cfg);
+		soundfield_row = settingsrow_add(container, "musicsettings_soundfield", NULL, switch_screen_cb, soundfield_screen);
+	}
 
 	// Crossfeed sits next to soundfield because they are relatives: one widens
 	// the stereo image, the other pulls it back inside the head. Anyone looking
 	// for one wants to see the other.
-	build_crossfeed_page(cfg);
-	crossfeed_row = settingsrow_add(container, "musicsettings_crossfeed", NULL, switch_screen_cb, crossfeed_screen);
+	if (addons_enabled("crossfeed")) {
+		build_crossfeed_page(cfg);
+		crossfeed_row = settingsrow_add(container, "musicsettings_crossfeed", NULL, switch_screen_cb, crossfeed_screen);
+	}
 
-	build_balance_page(cfg);
-	balance_row = settingsrow_add(container, "musicsettings_channel_balance", NULL, switch_screen_cb, balance_screen);
+	if (addons_enabled("channel_balance")) {
+		build_balance_page(cfg);
+		balance_row = settingsrow_add(container, "musicsettings_channel_balance", NULL, switch_screen_cb, balance_screen);
+	}
 
-	build_volume_limit_page(cfg);
-	vlimit_row = settingsrow_add(container, "musicsettings_volume_limit", NULL, switch_screen_cb, vlimit_screen);
+	if (addons_enabled("volume_limit")) {
+		build_volume_limit_page(cfg);
+		vlimit_row = settingsrow_add(container, "musicsettings_volume_limit", NULL, switch_screen_cb, vlimit_screen);
+	}
 
 	// The gain step: off = low gain (the stock default), on = +6 dB.
 	settingsrow_toggle(container, "musicsettings_high_gain", &gain_switch, gain_toggle_cb);

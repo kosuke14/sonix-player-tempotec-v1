@@ -7,8 +7,16 @@ make -C sonix-player/tests test
 make -C sonix-player/tests sanitize
 make -C sonix-player/tests swvolume
 make -C sonix-player/tests eq
+make -C sonix-player/tests usbdac-eq
+make -C sonix-player/tests usbhost
+make -C sonix-player/tests readfile
+make -C sonix-player/tests bluetooth
+make -C sonix-player/tests btafh
+make -C sonix-player/tests wifi
+make -C sonix-player/tests basebuild
 make -C sonix-player/tests peq-ui
 make -C sonix-player/tests quickpanel-layout
+make -C sonix-player/tests edge-lock
 make -C sonix-player/tests calculator
 make -C sonix-player/tests notes
 make -C sonix-player/tests tagwrite
@@ -22,7 +30,7 @@ make -C sonix-player/tests aamlayout
 make -C sonix-player/tests extractkeys
 ```
 
-The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `peq-ui`, `quickpanel-layout` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
+The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `peq-ui`, `quickpanel-layout`, `edge-lock` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
 
 `run_subsonic_tests.py` starts a temporary threaded localhost HTTP server plus three HTTPS servers carrying the certificates in `tls_fixtures.py`, runs the C binary with a private temporary config directory, verifies its requests, then shuts down. All account values are synthetic. Build products live in ignored `.build/`; response/PCM fixtures are generated in memory rather than added to Git, and the three test certificates are pasted into that Python file rather than downloaded.
 
@@ -44,6 +52,50 @@ Checks include:
 - cancellation during HTTP header setup, a stalled body, and reader starvation, followed by generation-safe reuse;
 - nonmutating playlist next-track look-ahead across repeat/shuffle/ordered modes;
 - exclusive decoder leases, both handoff/teardown orders, failed pre-cache retry suppression, repeat-one starting at byte zero, account-change invalidation with an outstanding lease, metadata lookup and unsupported raw codecs.
+
+## Bluetooth startup, receive links and coexistence
+
+`make -C sonix-player/tests bluetooth btafh wifi basebuild` needs no Bluetooth
+hardware. The Bluetooth test compiles the production decisions with fake
+process/controller state: it checks both A2DP directions, stock-init wait and
+cancellation, shell-invoked init detection, refusal to duplicate a live UART
+transport, and the serialized cleanup/switch-on queue. It also checks that a
+missing ALSA template is created without replacing an existing one (the separate
+per-device rewrite still runs when a sink connects). The real
+D-Bus signal cache is driven with a late simulated signal to check that a close
+clears incoming and outgoing PCMs, transport state and media state.
+
+The AFH tests check channel maps and timing for link/frequency changes, retry of
+failed sends and clears, radio parks, refreshes and timer wrap. Fake HCI syscalls check the
+actual command packet, its hci0 binding and socket/bind/short-write failures.
+The Wi-Fi test covers the associated Wi-Fi worker, and `basebuild` uses the
+packer's tar-merge method against a fake stock init hook. The tests cannot prove
+that the radio accepts or uses the classification, that a stock script behaves
+the same on every firmware revision, or that receiver packet loss is fixed.
+
+## USB host arbitration and storage safety
+
+`make -C sonix-player/tests usbhost` exercises the production host-trial state
+machine against private fake sysfs files. It checks unsupported/ambiguous PHYs,
+manual start and cancel, timeout, slow ALSA probing, audio disappearance,
+failed PHY/Type-C restoration and retry, directory-sync failures, a stale or
+corrupt journal, and crash recovery. A separate fixture confirms that the
+first-start stock-data cleanup preserves the journal. The USB ownership fixture
+checks unknown or connected UDCs, idle unknown gadgets, ADB/DAC/storage
+conflicts and parking/rebinding the one known storage gadget. The arbitration
+fixture checks missing OTG-ID plus ambiguous VBUS, a live USB card, a pending
+audio interface and the active trial.
+
+The storage fixtures mock normal unmounts, mount tables, block claims, a FUSE
+process holding a raw fd, LUN writes and service restoration. They verify that
+failed handover is rolled back and an unverified LUN is never remounted. The
+fixtures do not power a real port, exercise a kernel gadget or prove safety on a
+real V1: test the full connection and card-export workflow on hardware.
+
+`make -C sonix-player/tests readfile` tests the shared file reader with empty
+and larger regular files, real procfs, a non-seekable pipe and a read error.
+The USB sysfs/configfs consumers rely on this reader; actual V1 attributes are
+not modeled by this test.
 
 ## Album Art Max's rows
 
@@ -88,6 +140,12 @@ including their enable states and preamps; scoped preset import/export/reset;
 legacy `[peq]` migration; and unchanged graphic EQ/MSEB when PEQ changes.
 The config store is a temporary file; nothing else is stubbed.
 
+`make -C sonix-player/tests usbdac-eq` includes the production USB DAC input
+handler and links the real DSP engine. It checks that signed 32-bit PCM changes
+with GEQ, PEQ or MSEB enabled, off-state PCM is unchanged, and DSD words remain
+bit-for-bit intact with all three effects enabled. It builds no gadget and
+opens no ALSA device.
+
 `make -C sonix-player/tests peq-ui` links the real PEQ page and DSP engine to
 LVGL's headless renderer. It checks the profile pills at 240×320 in all eleven
 languages and five themes, selection and back-drag guarding, refresh of an open
@@ -96,11 +154,12 @@ AutoEq browser are stubbed.
 
 `make -C sonix-player/tests quickpanel-layout` uses the production Control
 Centre list parser, accessors and move operations with headless LVGL. It checks
-that the new PEQ profile control does not displace existing defaults, fills an
-empty place in a saved v4 layout, waits in Settings when the grid is full, and
-keeps every control when moved into the first eight and reloaded. Unrelated
-playback/radio handlers are removed by linker section GC; no sheet is built.
-The full `ui` target includes both PEQ-related suites.
+that DAC mode no longer blocks the sheet while Wi-Fi transfer and Bluetooth
+receiver mode still do, and that the PEQ profile control does not displace
+existing defaults, fills an empty place in a saved v4 layout, waits in Settings
+when the grid is full, and survives a move into the first eight and a reload.
+Unrelated playback/radio handlers are removed by linker section GC; no sheet is
+built. The full `ui` target includes both PEQ-related suites.
 
 ## Wi-Fi hidden networks
 
