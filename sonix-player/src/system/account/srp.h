@@ -23,10 +23,12 @@ typedef struct {
 void srp_public_a(const uint8_t *a, size_t a_len, uint8_t out[256]);
 
 // Processes the server's reply (salt, B), deriving the session key and the
-// proofs. `password` is the PBKDF2 output, not the raw password. False on a
-// malicious B (B ≡ 0 mod N).
-bool srp_process_reply(const uint8_t *a, size_t a_len, const uint8_t *password, size_t password_len,
-					   const uint8_t *salt, size_t salt_len, const uint8_t *b_pub,
-					   size_t b_pub_len, srp_session_t *out);
+// proofs. `password` is the PBKDF2 output, not the raw password, and
+// `username` is what M1 hashes -- the proof binds the account name even
+// though the key derivation does not. False on a malicious B (B ≡ 0 mod N).
+bool srp_process_reply(const uint8_t *a, size_t a_len, const char *username,
+					   const uint8_t *password, size_t password_len, const uint8_t *salt,
+					   size_t salt_len, const uint8_t *b_pub, size_t b_pub_len,
+					   srp_session_t *out);
 
 #endif /* SRP_H */

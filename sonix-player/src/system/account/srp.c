@@ -65,9 +65,11 @@ static void compute_k(bn_t *k) {
 	bn_from_bytes_be(k, g_pad, 32);
 }
 
-// M1 = H(H(g_pad) XOR H(N) | H("") | salt | A | B | K)
+// M1 = H(H(g_pad) XOR H(N) | H(username) | salt | A | B | K) -- the proof
+// binds the account name, even though the key derivation does not.
 static void compute_m1(const uint8_t *a_pub, const uint8_t *b_pub, const uint8_t *key,
-					   const uint8_t *salt, size_t salt_len, uint8_t m1[32]) {
+					   const char *username, const uint8_t *salt, size_t salt_len,
+					   uint8_t m1[32]) {
 	uint8_t g_pad[256], gh[32], nh[32];
 	memset(g_pad, 0, sizeof(g_pad));
 	g_pad[255] = 2;
@@ -79,13 +81,14 @@ static void compute_m1(const uint8_t *a_pub, const uint8_t *b_pub, const uint8_t
 		uint8_t b = gh[i] ^ nh[i];
 		sha256_update(&c, &b, 1);
 	}
-	uint8_t empty_hash[32];
+	uint8_t user_hash[32];
 	{
 		sha256_ctx e;
 		sha256_init(&e);
-		sha256_final_raw(&e, empty_hash); // H("") -- the username is empty
+		sha256_update(&e, username, strlen(username));
+		sha256_final_raw(&e, user_hash);
 	}
-	sha256_update(&c, empty_hash, 32);
+	sha256_update(&c, user_hash, 32);
 	sha256_update(&c, salt, salt_len);
 	sha256_update(&c, a_pub, 256);
 	sha256_update(&c, b_pub, 256);
@@ -118,9 +121,10 @@ void srp_public_a(const uint8_t *a, size_t a_len, uint8_t out[256]) {
 	bn_to_bytes_be(&r, out, 256);
 }
 
-bool srp_process_reply(const uint8_t *a, size_t a_len, const uint8_t *password, size_t password_len,
-					   const uint8_t *salt, size_t salt_len, const uint8_t *b_pub,
-					   size_t b_pub_len, srp_session_t *out) {
+bool srp_process_reply(const uint8_t *a, size_t a_len, const char *username,
+					   const uint8_t *password, size_t password_len, const uint8_t *salt,
+					   size_t salt_len, const uint8_t *b_pub, size_t b_pub_len,
+					   srp_session_t *out) {
 	bn_t N;
 	bn_from_bytes_be(&N, SRP_N, 256);
 	bnmont_t mont;
@@ -268,7 +272,7 @@ bool srp_process_reply(const uint8_t *a, size_t a_len, const uint8_t *password, 
 	sha256_final_raw(&c, key);
 	memcpy(out->key, key, 32);
 
-	compute_m1(a_pub, b_pub, key, salt, salt_len, out->m1);
+	compute_m1(a_pub, b_pub, key, username, salt, salt_len, out->m1);
 	compute_m2(a_pub, out->m1, key, out->m2);
 	return true;
 }

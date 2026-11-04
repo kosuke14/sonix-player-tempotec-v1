@@ -23,6 +23,7 @@
 #include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/anisette.h"
 #include "src/system/streaming/amplocal.h"
+#include "src/system/streaming/ampnative.h"
 #include "src/system/streaming/streamturn.h"
 
 #include <fcntl.h>
@@ -92,6 +93,8 @@ static int shown_count;
 static bool session_signed_in;  // the account row, refreshed from /me
 static char session_apple_id[128];
 
+static bool configured(void);
+
 static void free_result(result_t *result) {
 	if (result) {
 		free(result->songs);
@@ -129,20 +132,45 @@ static void *worker_main(void *arg) {
 		if (result) {
 			result->job = job;
 			if (job.kind == JOB_LOGIN) {
-				// The sign-in flow runs on the guest daemon, but every field
-				// the user types comes from this device's keyboard: the
+				// The native sign-in runs first: GrandSlam on the player
+				// itself, the anisette provisioned on demand. Every field
+				// the user types comes from this device's keyboard, so the
 				// player is the only place the password exists, and it is
-				// wiped right here.
-				amplocal_login_result_t r = amplocal_signin(job.username, job.password,
-															result->error,
-															sizeof(result->error));
+				// wiped right here. The daemon's flow stays as the fallback
+				// while the native one is young.
+				ampnative_result_t nr = ampnative_signin(job.username, job.password,
+														 result->error,
+														 sizeof(result->error));
 				memset(job.password, 0, sizeof(job.password));
-				result->count = r == AMPLOCAL_LOGIN_OK ? 0 : r == AMPLOCAL_LOGIN_2FA ? 1 : -1;
+				if (nr == AMPNATIVE_OK || nr == AMPNATIVE_2FA) {
+					result->count = nr == AMPNATIVE_OK ? 0 : 1;
+				} else if (configured()) {
+					amplocal_login_result_t r =
+						amplocal_signin(job.username, job.password, result->error,
+										sizeof(result->error));
+					result->count =
+						r == AMPLOCAL_LOGIN_OK ? 0 : r == AMPLOCAL_LOGIN_2FA ? 1 : -1;
+				} else {
+					result->count = -1;
+				}
 			} else if (job.kind == JOB_2FA) {
-				result->count = amplocal_2fa(job.code, result->error,
-											 sizeof(result->error)) == AMPLOCAL_LOGIN_OK ? 0 : -1;
+				// The native hop validates the code and signs in again with
+				// the same credentials, which are still in the pending pair.
+				ampnative_result_t nr = ampnative_2fa(pending_user, pending_pass, job.code,
+													  result->error, sizeof(result->error));
+				if (nr == AMPNATIVE_OK) {
+					result->count = 0;
+				} else if (configured()) {
+					result->count = amplocal_2fa(job.code, result->error,
+												 sizeof(result->error)) == AMPLOCAL_LOGIN_OK
+										? 0
+										: -1;
+				} else {
+					result->count = -1;
+				}
 				memset(job.code, 0, sizeof(job.code));
 			} else if (job.kind == JOB_LOGOUT) {
+				ampnative_logout(); // the native session leaves with the tap
 				result->count = amplocal_logout(result->error, sizeof(result->error)) ? 0 : -1;
 		} else if (job.kind == JOB_PREVIEW) {
 			// The guest catalog: the row's thirty-second preview, fetched

@@ -38,6 +38,12 @@ typedef struct {
 	char adsid[128];
 	char idms_token[1024]; // GsIdmsToken, the identity token for the 2FA hop
 	char pt_token[1024];   // PasswordToken from the spd, when present
+	// The session's own keys from the spd, what the app-token requests sign
+	// with. Zeroed after use by the caller that is done with them.
+	uint8_t sk[64];
+	int sk_len;
+	uint8_t c[64];
+	int c_len;
 } gsa_login_t;
 
 // The two sign-in steps. `a` is the caller's 32 random bytes; the SRP and
@@ -53,5 +59,13 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 // The second factor: the six-digit code from a trusted device.
 bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, const char *code,
 				  char *error, size_t error_size);
+
+// The app token an Apple service rides on, the "apptokens" operation: asked
+// with the session's identity (adsid + GsIdmsToken) and signed with the
+// session key, it returns the token `app_name` recognises. The music app's
+// name is what the per-account catalog token comes through.
+bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
+				   const char *app_name, char *out, size_t out_size, char *error,
+				   size_t error_size);
 
 #endif /* GSA_H */

@@ -198,6 +198,19 @@ static void anisette_to_plist(plistw_t *w, const gsa_anisette_t *an) {
 
 static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, char *error,
 					 size_t error_size) {
+	// The XML declaration and the doctype go on the front: the plist the
+	// writer emits is the bare dict, and Apple's parsers are particular.
+	char *full = malloc(strlen(body) + 256);
+	if (!full) {
+		snprintf(error, error_size, "gsa_memory");
+		return false;
+	}
+	snprintf(full, strlen(body) + 256,
+			 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+			 "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+			 "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+			 "<plist version=\"1.0\">\n%s</plist>",
+			 body);
 	char extra[2048];
 	snprintf(extra, sizeof(extra),
 			 "User-Agent: %s\r\n"
@@ -207,8 +220,9 @@ static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, cha
 	memset(&req, 0, sizeof(req));
 	req.method = "POST";
 	req.extra_headers = extra;
-	req.body = body;
-	req.body_len = strlen(body);
+	req.body = full;
+	req.body_len = strlen(full);
+	// gsa_post's caller holds the answer; the wrapper body dies here
 	req.content_type = "text/x-xml-plist";
 	req.want_error_body = true; // the Status/ec/em of a refusal is the useful part
 	char *out = NULL;
@@ -222,6 +236,7 @@ static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, cha
 	if (!ok) {
 		snprintf(error, error_size, "gsa_bad_plist");
 	}
+	free(full);
 	free(out);
 	return ok;
 }
@@ -364,7 +379,7 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 
 	srp_session_t srp;
 	memset(&srp, 0, sizeof(srp));
-	if (!srp_process_reply(a, a_len, pbk, 32, salt, salt_len, b_pub, b_len, &srp)) {
+	if (!srp_process_reply(a, a_len, username, pbk, 32, salt, salt_len, b_pub, b_len, &srp)) {
 		snprintf(out->error, sizeof(out->error), "gsa_bad_b");
 		out->result = GSA_FAILED;
 		plist_free(&reply);
@@ -448,6 +463,18 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 			if (pt >= 0 && plist_str(&spd_plist, pt)) {
 				snprintf(out->pt_token, sizeof(out->pt_token), "%s", plist_str(&spd_plist, pt));
 			}
+			// The session's own keys, what the app-token requests sign with.
+			size_t kl = 0;
+			const uint8_t *sk = plist_data(&spd_plist, plist_get(&spd_plist, "sk"), &kl);
+			if (sk && kl && kl <= sizeof(out->sk)) {
+				memcpy(out->sk, sk, kl);
+				out->sk_len = (int)kl;
+			}
+			const uint8_t *cv = plist_data(&spd_plist, plist_get(&spd_plist, "c"), &kl);
+			if (cv && kl && kl <= sizeof(out->c)) {
+				memcpy(out->c, cv, kl);
+				out->c_len = (int)kl;
+			}
 			plist_free(&spd_plist);
 		}
 		memset(plain, 0, spd_len);
@@ -473,17 +500,58 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 
 bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, const char *code,
 				  char *error, size_t error_size) {
-	(void)anisette;
-	// GET GsService2/validate with the security-code and identity-token headers
-	char extra[2048];
+	// GET GsService2/validate with the security-code and identity-token
+	// headers, plus the anisette set the other GrandSlam calls carry: the
+	// validate is what marks the identity as second-factor-passed, and it
+	// reads the machine data like everything else.
+	char anisette_h[2048] = "";
+	for (int i = 0; anisette && i < anisette->count; i++) {
+		size_t len = strlen(anisette_h);
+		snprintf(anisette_h + len, sizeof(anisette_h) - len, "%s: %s\r\n",
+				 anisette->kv[i].key, anisette->kv[i].value);
+	}
+	// the identity token is the adsid and the GsIdmsToken as one base64 pair
+	char ident_pair[1280];
+	snprintf(ident_pair, sizeof(ident_pair), "%s:%s", login->adsid, login->idms_token);
+	char ident_b64[1792];
+	{
+		static const char alphabet[] =
+			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		size_t plen = strlen(ident_pair), o = 0;
+		for (size_t i = 0; i + 2 < plen && o + 4 < sizeof(ident_b64); i += 3) {
+			uint32_t v = ((uint32_t)(uint8_t)ident_pair[i] << 16) |
+						 ((uint32_t)(uint8_t)ident_pair[i + 1] << 8) | (uint8_t)ident_pair[i + 2];
+			ident_b64[o++] = alphabet[(v >> 18) & 63];
+			ident_b64[o++] = alphabet[(v >> 12) & 63];
+			ident_b64[o++] = alphabet[(v >> 6) & 63];
+			ident_b64[o++] = alphabet[v & 63];
+		}
+		if (plen % 3 == 1 && o + 4 < sizeof(ident_b64)) {
+			uint32_t v = (uint32_t)(uint8_t)ident_pair[plen - 1] << 16;
+			ident_b64[o++] = alphabet[(v >> 18) & 63];
+			ident_b64[o++] = alphabet[(v >> 12) & 63];
+			ident_b64[o++] = '=';
+			ident_b64[o++] = '=';
+		} else if (plen % 3 == 2 && o + 4 < sizeof(ident_b64)) {
+			uint32_t v = ((uint32_t)(uint8_t)ident_pair[plen - 2] << 16) |
+						 ((uint32_t)(uint8_t)ident_pair[plen - 1] << 8);
+			ident_b64[o++] = alphabet[(v >> 18) & 63];
+			ident_b64[o++] = alphabet[(v >> 12) & 63];
+			ident_b64[o++] = alphabet[(v >> 6) & 63];
+			ident_b64[o++] = '=';
+		}
+		ident_b64[o] = '\0';
+	}
+	char extra[4096];
 	snprintf(extra, sizeof(extra),
-			 "User-Agent: Xcode\r\n"
+			 "User-Agent: %s\r\n"
 			 "Accept: text/x-xml-plist\r\n"
 			 "security-code: %s\r\n"
-			 "X-Apple-Identity-Token: %s:%s\r\n"
+			 "X-Apple-Identity-Token: %s\r\n"
 			 "Accept-Language: en-us\r\n"
-			 "Loc: en_US\r\n",
-			 code, login->adsid, login->idms_token);
+			 "Loc: en_US\r\n"
+			 "%s",
+			 GSA_USER_AGENT, code, ident_b64, anisette_h);
 	http_req_t req;
 	memset(&req, 0, sizeof(req));
 	req.method = "GET";
@@ -509,5 +577,120 @@ bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, cons
 		ok = false;
 	}
 	free(out);
+	return ok;
+}
+
+// ---------------------------------------------------------------------------
+// the app tokens: what an Apple service asks for under the session's name
+// ---------------------------------------------------------------------------
+
+// HMAC over bytes, the checksum the apptokens request signs with.
+static void hmac_bytes(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len,
+					   uint8_t out[32]) {
+	uint8_t kip[64], kop[64], inner[32];
+	memset(kip, 0, sizeof(kip));
+	memcpy(kip, key, key_len > 64 ? 64 : key_len);
+	for (int i = 0; i < 64; i++) {
+		kop[i] = kip[i] ^ 0x5c;
+		kip[i] ^= 0x36;
+	}
+	sha256_ctx c;
+	sha256_init(&c);
+	sha256_update(&c, kip, 64);
+	sha256_update(&c, msg, msg_len);
+	sha256_final_raw(&c, inner);
+	sha256_init(&c);
+	sha256_update(&c, kop, 64);
+	sha256_update(&c, inner, 32);
+	sha256_final_raw(&c, out);
+	memset(kip, 0, sizeof(kip));
+	memset(kop, 0, sizeof(kop));
+}
+
+bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
+				   const char *app_name, char *out, size_t out_size, char *error,
+				   size_t error_size) {
+	if (error && error_size) {
+		error[0] = '\0';
+	}
+	if (out && out_size) {
+		out[0] = '\0';
+	}
+	if (!anisette || !login || !app_name || !app_name[0] || !out || !out_size) {
+		snprintf(error, error_size, "gsa_bad_args");
+		return false;
+	}
+	if (!login->adsid[0] || !login->idms_token[0] || login->sk_len <= 0 || login->c_len <= 0) {
+		snprintf(error, error_size, "gsa_no_session");
+		return false;
+	}
+	// checksum = HMAC-SHA256(sk, "apptokens" | adsid | app_name)
+	size_t msg_len = strlen("apptokens") + strlen(login->adsid) + strlen(app_name);
+	uint8_t *msg = malloc(msg_len);
+	if (!msg) {
+		snprintf(error, error_size, "gsa_memory");
+		return false;
+	}
+	size_t off = 0;
+	memcpy(msg + off, "apptokens", 9);
+	off += 9;
+	memcpy(msg + off, login->adsid, strlen(login->adsid));
+	off += strlen(login->adsid);
+	memcpy(msg + off, app_name, strlen(app_name));
+	uint8_t checksum[32];
+	hmac_bytes(login->sk, (size_t)login->sk_len, msg, msg_len, checksum);
+	memset(msg, 0, msg_len);
+	free(msg);
+
+	plistw_t w;
+	plistw_init(&w);
+	plistw_dict_begin(&w, NULL);
+	plistw_dict_begin(&w, "Header");
+	plistw_string(&w, "Version", "1.0.1");
+	plistw_dict_end(&w);
+	plistw_dict_begin(&w, "Request");
+	anisette_to_plist(&w, anisette);
+	plistw_array_begin(&w, "app");
+	plistw_string(&w, NULL, app_name);
+	plistw_array_end(&w);
+	plistw_data(&w, "c", login->c, (size_t)login->c_len);
+	plistw_string(&w, "operation", "apptokens");
+	plistw_string(&w, "t", login->idms_token);
+	plistw_string(&w, "u", login->adsid);
+	plistw_data(&w, "checksum", checksum, sizeof(checksum));
+	plistw_dict_end(&w);
+	plistw_dict_end(&w);
+
+	plist_t reply;
+	memset(&reply, 0, sizeof(reply));
+	if (!gsa_post(GSA_ENDPOINT, w.buf, &reply, error, error_size)) {
+		plistw_free(&w);
+		return false;
+	}
+	plistw_free(&w);
+
+	// The answer carries the tokens under the app's own name; the shape is
+	// nested enough that anything unexpected fails honestly rather than
+	// handing back a half-read token.
+	int app_node = plist_get_in(&reply, plist_get(&reply, "appTokens"), app_name);
+	if (app_node < 0) {
+		// some answers carry the token directly under the app's name
+		app_node = plist_get(&reply, app_name);
+	}
+	bool ok = false;
+	if (app_node >= 0) {
+		int tok = plist_get_in(&reply, app_node, "token");
+		if (tok < 0) {
+			tok = plist_get_in(&reply, app_node, "PT");
+		}
+		if (tok >= 0 && plist_str(&reply, tok)) {
+			snprintf(out, out_size, "%s", plist_str(&reply, tok));
+			ok = out[0] != '\0';
+		}
+	}
+	if (!ok && !error[0]) {
+		snprintf(error, error_size, "gsa_app_token_missing");
+	}
+	plist_free(&reply);
 	return ok;
 }
