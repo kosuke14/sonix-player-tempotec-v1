@@ -38,8 +38,8 @@
 lv_obj_t *amp_screen;
 static lv_obj_t *settings_screen, *edit_screen, *list_screen, *login_screen;
 static lv_obj_t *list_container, *list_title, *store_value;
-static lv_obj_t *account_value, *guest_value;
-static lv_obj_t *setup_row, *login_row, *signout_row, *test_row, *store_row, *account_row;
+static lv_obj_t *account_value;
+static lv_obj_t *login_row, *signout_row, *test_row, *store_row, *account_row;
 static lv_obj_t *quality_card, *lyrics_card, *lyrics_switch, *note_quality, *note_2fa,
 	*note_settings;
 static lv_obj_t *quality_pill[2], *quality_pills_parent;
@@ -230,7 +230,14 @@ if (job.kind == JOB_SEARCH) {
 					result->count = -1;
 				}
 			} else if (!have_me) {
-				result->count = -1; // the /me failure is already the message
+				if (job.kind == JOB_ME) {
+					// No daemon to ask: the native session is still the
+					// answer the account row can stand behind.
+					result->count = 0;
+					result->signed_in = ampnative_signed_in();
+				} else {
+					result->count = -1; // the /me failure is already the message
+				}
 			} else if (job.kind == JOB_ME) {
 				result->count = 0; // the state snapshot is the whole answer
 			} else if (!me.authenticated) {
@@ -507,10 +514,11 @@ static void draft_save(void) {
 }
 
 static bool configured(void) {
-	// The guest tree is the whole feature: without it there is no daemon to
-	// sign in on and nothing to decrypt with. The flag alone lies after the
-	// tree is deleted from the card -- the setup row must come back.
-	return config_get_int("applemusic", "translate", 0) != 0 && ampguest_present();
+	// The native sign-in needs no guest tree: GrandSlam and the anisette run
+	// on the player. What the tree still buys is the daemon's full-track
+	// playback, until the native decrypt replaces it -- so the flag stays
+	// for the daemon fallbacks, not for the sign-in.
+	return ampguest_present();
 }
 
 // The page shows only what the state can use: before the guest tree exists,
@@ -518,21 +526,14 @@ static bool configured(void) {
 // sign-in; signed in, the settings themselves. The rows are all built once
 // and the refresh decides who is on the page.
 static void settings_refresh(void) {
-	bool tree = configured();
 	bool signed_in = session_signed_in;
-	lv_obj_t *const setup_only[] = {setup_row};
 	lv_obj_t *const login_only[] = {login_row, note_2fa};
 	lv_obj_t *const signed_rows[] = {store_row,	 account_row,	 quality_card,
 									 lyrics_card, signout_row,	 test_row,
 									 note_settings, note_quality};
-	for (size_t i = 0; i < sizeof(setup_only) / sizeof(*setup_only); i++) {
-		if (setup_only[i]) {
-			lv_obj_set_hidden(setup_only[i], tree);
-		}
-	}
 	for (size_t i = 0; i < sizeof(login_only) / sizeof(*login_only); i++) {
 		if (login_only[i]) {
-			lv_obj_set_hidden(login_only[i], !tree || signed_in);
+			lv_obj_set_hidden(login_only[i], signed_in);
 		}
 	}
 	for (size_t i = 0; i < sizeof(signed_rows) / sizeof(*signed_rows); i++) {
@@ -541,15 +542,9 @@ static void settings_refresh(void) {
 		}
 	}
 	lv_label_set_text(store_value, draft_store[0] ? draft_store : tr("amp_not_set"));
-	// The guest-tree row: what the card carries right now, or the fetch in
-	// progress.
-	if (ampguest_busy()) {
-		lv_label_set_text(guest_value, tr("amp_guest_running"));
-	} else {
-		lv_label_set_text(guest_value, tr(ampguest_present() ? "amp_guest_installed"
-															 : "amp_not_set"));
-	}
-	// The account row mirrors the daemon's session as the last job saw it.
+	// The account row mirrors the session as the last job saw it, the
+	// native one included: a sign-in that ran without the daemon still
+	// shows here.
 	if (session_signed_in && session_apple_id[0]) {
 		lv_label_set_text(account_value, session_apple_id);
 	} else {
@@ -578,7 +573,7 @@ static void settings_refresh(void) {
 }
 
 static void apply_state(result_t *result) {
-	session_signed_in = result->signed_in;
+	session_signed_in = result->signed_in || ampnative_signed_in();
 	snprintf(session_apple_id, sizeof(session_apple_id), "%s", result->apple_id);
 	settings_refresh();
 }
@@ -703,58 +698,9 @@ static void lyrics_cb(lv_event_t *e) {
 // the settings page: connect saves the draft, the sign-in rows drive the flow
 // ---------------------------------------------------------------------------
 
-// The guest tree, fetched by the player itself: the space check, the download
-// and the unpack all happen on the fetcher's own thread; the poll below
-// mirrors the progress into the row and toasts the outcome.
-static void setup_confirmed_cb(void *user);
-static void guest_download_cb(lv_event_t *e) {
-	(void)e;
-	if (busy || switcher_back_drag_active()) {
-		return;
-	}
-	if (ampguest_busy()) {
-		return; // already running; the row shows the progress
-	}
-	// A tree that is already here does not need a second download: re-fetching
-	// it would cost a hundred megabytes and several minutes to arrive at the
-	// very same files. The tap itself asks to use it, which matters for a
-	// tree fetched before this row switched the feature on by itself.
-	if (ampguest_present()) {
-		if (config_get_int("applemusic", "translate", 0) == 0) {
-			config_set_int("applemusic", "translate", 1);
-			config_save();
-			amplocal_init();
-		}
-		toast_success("amp_guest_installed");
-		return;
-	}
-	// The download is a hundred-megabyte decision: say what it costs before
-	// it starts, from the pinned figures, and ask.
-	unsigned archive_mb = (unsigned)((AMPGUEST_ARCHIVE_BYTES + (1 << 20) - 1) >> 20);
-	unsigned unpacked_mb = (unsigned)((AMPGUEST_UNPACKED_BYTES + (1 << 20) - 1) >> 20);
-	char msg[300];
-	snprintf(msg, sizeof(msg), tr("amp_setup_confirm"), archive_mb, unpacked_mb);
-	confirm_show("amp_setup", msg, "amp_setup_download", setup_confirmed_cb, NULL);
-}
-
-static void setup_confirmed_cb(void *user) {
-	(void)user;
-	if (ampguest_busy()) {
-		return;
-	}
-	if (ampguest_fetch_start()) {
-		toast_success("amp_guest_started");
-	}
-	settings_refresh();
-}
-
 static void test_cb(lv_event_t *e) {
 	(void)e;
 	if (busy) {
-		return;
-	}
-	if (!configured()) {
-		toast_error("amp_not_configured"); // no guest tree: nothing to test
 		return;
 	}
 	draft_save();
@@ -844,10 +790,6 @@ static void login_accept_cb(lv_event_t *e) {
 	const char *pass = lv_textarea_get_text(login_pass_field);
 	if (!user[0] || !pass[0]) {
 		toast_error("amp_missing_credentials");
-		return;
-	}
-	if (!configured()) {
-		toast_error("amp_not_configured");
 		return;
 	}
 	remember_checked = lv_obj_has_state(remember_switch, LV_STATE_CHECKED);
@@ -1039,9 +981,10 @@ static void open_settings_cb(lv_event_t *e) {
 	settings_refresh();
 	switch_screen(settings_screen);
 	// The account row reads a fresh snapshot rather than remembering last
-	// time: the daemon's session can lapse, or be restored, behind our back.
-	// The same job doubles as the connection test.
-	if (configured() && session_signed_in) {
+	// time: the daemon's session can lapse, or be restored, behind our back,
+	// and the native session lives on the card. The same job doubles as the
+	// connection test.
+	if (session_signed_in) {
 		job_t job = {.kind = JOB_ME};
 		submit(&job);
 	}
@@ -1064,14 +1007,12 @@ void amppage_init(gui_config_t *cfg) {
 	settingsrow_add_icon(row, &icon_search, THEME_SEMANTIC_GREEN);
 	player_sheet_attach_drag(home, true);
 
-	// The settings page, in three states the refresh switches between: setup
-	// (no guest tree yet), sign-in (tree but no session) and the settings
-	// themselves. The decrypt port stays at its fixed 10020 -- ampmocal owns
-	// it and the guest tree brings the daemon up on it.
+	// The settings page, in two states the refresh switches between: the
+	// sign-in (native, no tree wanted) and the settings themselves. What the
+	// guest tree still gives -- the daemon's full-track playback -- shows as
+	// the daemon fallback in the worker, never as a prerequisite here.
 	settings_screen = screen();
 	lv_obj_t *container = settingsrow_page(settings_screen, config, "amp_wrapper_settings");
-	setup_row = settingsrow_add(container, "amp_setup", &guest_value, guest_download_cb, NULL);
-	settingsrow_add_icon(setup_row, &icon_import, THEME_SEMANTIC_GREEN);
 	lyrics_card = NULL; // built below in signed-in order
 	settingsrow_toggle(container, "amp_remember_password", &remember_switch, remember_cb);
 	login_row = settingsrow_action(container, "amp_sign_in", open_login_cb, NULL);
@@ -1225,40 +1166,6 @@ static void poll_cb(lv_timer_t *timer) {
 	char error[192];
 	if (ampstream_take_error(error, sizeof(error))) {
 		toast_error(error);
-	}
-	// The guest-tree fetch reports through the same one-news-take pattern the
-	// producer uses; the row follows it either way.
-	char guest_error[64];
-	if (ampguest_take_result(guest_error, sizeof(guest_error))) {
-		toast_busy_end();
-		if (guest_error[0]) {
-			toast_error(guest_error);
-		} else {
-			// A landed tree is the whole on-device feature: from here sign-in
-			// and playback are allowed, so the switch flips itself on and the
-			// decrypt listener comes up now rather than at the next playback.
-			// Until it did, a fresh download still ended at a refused
-			// sign-in, which read like the fetch had failed.
-			config_set_int("applemusic", "translate", 1);
-			config_save();
-			amplocal_init();
-			toast_success("amp_guest_ready");
-		}
-	}
-	if (guest_value && lv_screen_active() == settings_screen) {
-		if (ampguest_busy()) {
-			int percent = ampguest_progress();
-			char line[16];
-			if (percent >= 0) {
-				snprintf(line, sizeof(line), "%d%%", percent);
-			} else {
-				snprintf(line, sizeof(line), "%s", tr("amp_guest_running"));
-			}
-			lv_label_set_text(guest_value, line);
-		} else {
-			lv_label_set_text(guest_value,
-							  tr(ampguest_present() ? "amp_guest_installed" : "amp_not_set"));
-		}
 	}
 	if (audio_get_status() == AUDIO_STATUS_PLAYING) {
 		char current[512], next[512];
