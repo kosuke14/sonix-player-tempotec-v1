@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define GSA_ENDPOINT "https://gsa.apple.com/grandslam/GsService2"
 #define GSA_VALIDATE_ENDPOINT "https://gsa.apple.com/grandslam/GsService2/validate"
@@ -205,6 +206,29 @@ static void hmac_sha256(const uint8_t *key, size_t key_len, const char *msg, uin
 // the request plumbing
 // ---------------------------------------------------------------------------
 
+// The identity GrandSlam accepts: since October 2026 Apple's fraud detection
+// refuses anisette that was provisioned through the Android ADI when the
+// request claims a Mac, and GrandSlam answers -80045 to every such login.
+// The Windows claim is what the Windows Apple Music's own AuthKit sends, and
+// it is what the community's working clients send. The provisioning behind
+// the one-time password stays the anisette server's; only the
+// self-description of the request changes.
+static const char *GSA_CLIENT_INFO =
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+
+// A copy of the anisette set with the client info the GSA route wants. The
+// header and the cpd must carry the same one, so every request builder runs
+// its anisette through this first.
+static gsa_anisette_t gsa_anisette(const gsa_anisette_t *src) {
+	gsa_anisette_t copy = *src;
+	for (int i = 0; i < copy.count; i++) {
+		if (strcmp(copy.kv[i].key, "X-Mme-Client-Info") == 0) {
+			snprintf(copy.kv[i].value, sizeof(copy.kv[i].value), "%s", GSA_CLIENT_INFO);
+		}
+	}
+	return copy;
+}
+
 static void anisette_to_plist(plistw_t *w, const gsa_anisette_t *an) {
 	plistw_dict_begin(w, "cpd");
 	for (int i = 0; i < an->count; i++) {
@@ -214,8 +238,8 @@ static void anisette_to_plist(plistw_t *w, const gsa_anisette_t *an) {
 	plistw_dict_end(w);
 }
 
-static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, char *error,
-					 size_t error_size) {
+static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const char *body,
+					 plist_t *reply, char *error, size_t error_size) {
 	// The XML declaration and the doctype go on the front: the plist the
 	// writer emits is the bare dict, and Apple's parsers are particular.
 	char *full = malloc(strlen(body) + 256);
@@ -229,11 +253,20 @@ static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, cha
 			 "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
 			 "<plist version=\"1.0\">\n%s</plist>",
 			 body);
+	// The client info in the header must be the one the cpd carries: the
+	// edge cross-checks the pair, and a mismatch draws its refusals.
+	const char *client_info = "";
+	for (int i = 0; anisette && i < anisette->count; i++) {
+		if (strcmp(anisette->kv[i].key, "X-Mme-Client-Info") == 0) {
+			client_info = anisette->kv[i].value;
+		}
+	}
 	char extra[2048];
 	snprintf(extra, sizeof(extra),
 			 "User-Agent: %s\r\n"
-			 "X-MMe-Client-Info: <MacBookPro18,3> <macOS;13.4.1;22F82> <com.apple.dt.Xcode/3594.4.19>\r\n",
-			 GSA_USER_AGENT);
+			 "Accept: */*\r\n"
+			 "X-MMe-Client-Info: %s\r\n",
+			 GSA_USER_AGENT, client_info);
 	http_req_t req;
 	memset(&req, 0, sizeof(req));
 	req.method = "POST";
@@ -245,30 +278,67 @@ static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, cha
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
+	// Apple's edge throttles the GrandSlam route hard: a burst of attempts
+	// draws 503s and 404s with an empty body, and eventually a 429. The
+	// X-Apple-I-Retry-Request-UUID the refusals carry says retrying is what
+	// is wanted. Only the edge-shaped refusals retry -- a real answer
+	// (wrong password and friends) arrives as a 200 with a Status plist,
+	// and retrying that would only hammer the account.
 	gsa_tls_guard_t tls_guard;
 	gsa_tls_begin(&tls_guard);
-	bool sent = http_request(endpoint, &req, &out, &out_len, 256 * 1024, 30, &status);
+	bool ok = false;
+	for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+		if (attempt > 0) {
+			// 3 s, then 10 s; a 429 cools down longer
+			sleep(status == 429 ? 30 : attempt == 1 ? 3 : 10);
+		}
+		if (out) {
+			free(out);
+			out = NULL;
+		}
+		status = 0;
+		bool sent = http_request(endpoint, &req, &out, &out_len, 256 * 1024, 30, &status);
+		if (!sent) {
+			continue; // the transport reason surfaces below if the last try fails
+		}
+		memset(reply, 0, sizeof(*reply));
+		ok = plist_parse(out, out_len, reply);
+	}
 	gsa_tls_end(&tls_guard);
-	if (!sent) {
-		// the transport reason rides along: a failure before any HTTP status
-		// is the interesting kind, and the code alone would hide it
+	if (!ok) {
 		const char *why = http_last_error();
 		snprintf(error, error_size, "gsa_http_%d%s%s", status, why ? " " : "",
 				 why ? why : "");
 		free(full);
+		if (out) {
+			free(out);
+		}
 		return false;
-	}
-	bool ok = plist_parse(out, out_len, reply);
-	if (!ok) {
-		snprintf(error, error_size, "gsa_bad_plist");
 	}
 	free(full);
 	free(out);
-	return ok;
+	return true;
+}
+
+// The GrandSlam answers nest their fields under a Response dict; older
+// shapes carry them at the root. One helper for both.
+static int resp_dict(plist_t *reply) {
+	int r = plist_get(reply, "Response");
+	return r >= 0 ? r : -1;
+}
+
+static int resp_get(plist_t *reply, const char *key) {
+	int r = resp_dict(reply);
+	int node = r >= 0 ? plist_get_in(reply, r, key) : -1;
+	return node >= 0 ? node : plist_get(reply, key);
 }
 
 static bool check_error(plist_t *reply, char *error, size_t error_size) {
-	int status = plist_get(reply, "Status");
+	int status = resp_get(reply, "Status");
+	if (status < 0) {
+		int r = resp_dict(reply);
+		status = r >= 0 ? plist_get_in(reply, r, "Status") : -1;
+	}
 	if (status < 0) {
 		return true; // some answers carry the fields at the root
 	}
@@ -287,10 +357,10 @@ static bool check_error(plist_t *reply, char *error, size_t error_size) {
 // ---------------------------------------------------------------------------
 
 bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const uint8_t *a,
-					size_t a_len, char *session_id_out, size_t session_id_size, char *error,
-					size_t error_size) {
-	(void)session_id_out;
-	(void)session_id_size;
+					size_t a_len, gsa_login_t *out, char *error, size_t error_size) {
+	memset(out, 0, sizeof(*out));
+	gsa_anisette_t gsa = gsa_anisette(anisette);
+	anisette = &gsa;
 	uint8_t a_pub[256];
 	memset(a_pub, 0, sizeof(a_pub));
 	srp_public_a(a, a_len, a_pub);
@@ -302,7 +372,7 @@ bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const 
 	plistw_string(&w, "Version", "1.0.1");
 	plistw_dict_end(&w);
 	plistw_dict_begin(&w, "Request");
-	plistw_data(&w, "A", a_pub, 256);
+	plistw_data(&w, "A2k", a_pub, 256);
 	anisette_to_plist(&w, anisette);
 	plistw_string(&w, "o", "init");
 	plistw_array_begin(&w, "ps");
@@ -315,29 +385,72 @@ bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const 
 
 	plist_t reply;
 	memset(&reply, 0, sizeof(reply));
-	bool ok = gsa_post(GSA_ENDPOINT, w.buf, &reply, error, error_size);
+	bool ok = gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size);
 	plistw_free(&w);
 	if (!ok) {
+		snprintf(out->error, sizeof(out->error), "%s", error);
+		out->result = GSA_FAILED;
 		return false;
 	}
-	ok = check_error(&reply, error, error_size);
-	int c = plist_get(&reply, "c");
-	if (ok && c >= 0 && plist_str(&reply, c)) {
-		snprintf(session_id_out, session_id_size, "%s", plist_str(&reply, c));
+	if (!check_error(&reply, error, error_size)) {
+		snprintf(out->error, sizeof(out->error), "%s", error);
+		out->result = GSA_FAILED;
+		plist_free(&reply);
+		return false;
 	}
+	// The init answer: the session cookie, the salt, the server's B and the
+	// iteration count, all under the Response dict. They are the complete
+	// step's raw material -- the server refuses a second init with the same
+	// A, so they are kept, never re-fetched.
+	int c_node = resp_get(&reply, "c");
+	int s_node = resp_get(&reply, "s");
+	int b_node = resp_get(&reply, "B");
+	int i_node = resp_get(&reply, "i");
+	if (c_node < 0 || s_node < 0 || b_node < 0 || !plist_str(&reply, c_node)) {
+		snprintf(out->error, sizeof(out->error), "gsa_init_missing_fields");
+		out->result = GSA_FAILED;
+		plist_free(&reply);
+		return false;
+	}
+	snprintf(out->session, sizeof(out->session), "%s", plist_str(&reply, c_node));
+	size_t len = 0;
+	const uint8_t *salt = plist_data(&reply, s_node, &len);
+	if (salt && len && len <= sizeof(out->salt)) {
+		memcpy(out->salt, salt, len);
+		out->salt_len = (int)len;
+	}
+	const uint8_t *b_pub = plist_data(&reply, b_node, &len);
+	if (b_pub && len && len <= sizeof(out->b_pub)) {
+		memcpy(out->b_pub, b_pub, len);
+		out->b_len = (int)len;
+	}
+	out->iters = i_node >= 0 ? plist_int(&reply, i_node) : 2048;
 	plist_free(&reply);
-	return ok;
+	if (!out->salt_len || !out->b_len) {
+		snprintf(out->error, sizeof(out->error), "gsa_init_bad_fields");
+		out->result = GSA_FAILED;
+		return false;
+	}
+	return true;
 }
 
-// The srp session's private parts, parked between the two steps: the caller
-// re-runs them through the same `a`, so the complete step re-derives from
-// the reply directly.
 bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 						const char *password, const uint8_t *a, size_t a_len,
-						const char *session_id, gsa_login_t *out, char *error,
-						size_t error_size) {
-	(void)session_id;
-	memset(out, 0, sizeof(*out));
+						gsa_login_t *out, char *error, size_t error_size) {
+	// The complete consumes what the init kept: a second init with the same
+	// A is refused by the server ("A is invalid"), so the session cookie,
+	// the salt and B travel in the login struct.
+	gsa_anisette_t gsa = gsa_anisette(anisette);
+	anisette = &gsa;
+	memset(error, 0, error_size && error_size > 0 ? 1 : 0);
+	if (error && error_size) {
+		error[0] = '\0';
+	}
+	if (!out->salt_len || !out->b_len || !out->session[0]) {
+		snprintf(error, error_size, "gsa_complete_without_init");
+		out->result = GSA_FAILED;
+		return false;
+	}
 
 	// the verifier password: PBKDF2-HMAC-SHA256 over SHA-256(password)
 	uint8_t hpw[32];
@@ -347,16 +460,19 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 		sha256_update(&c, password, strlen(password));
 		sha256_final_raw(&c, hpw);
 	}
-	// the salt and B arrive with the init answer; a full flow re-fetches them.
-	// The caller of the two-step API holds them; this single-call variant
-	// re-runs init inside for now (the protocol is stateless per request).
-	(void)a_len;
+	uint8_t pbk[32];
+	pbkdf2_hmac_sha256(hpw, 32, out->salt, (size_t)out->salt_len,
+					   (unsigned)(out->iters > 0 ? out->iters : 2048), pbk, 32);
 
-	plist_t reply;
-	memset(&reply, 0, sizeof(reply));
-	uint8_t a_pub[256];
-	memset(a_pub, 0, sizeof(a_pub));
-	srp_public_a(a, a_len, a_pub);
+	srp_session_t srp;
+	memset(&srp, 0, sizeof(srp));
+	if (!srp_process_reply(a, a_len, username, pbk, 32, out->salt, (size_t)out->salt_len,
+						   out->b_pub, (size_t)out->b_len, &srp)) {
+		snprintf(error, error_size, "gsa_bad_b");
+		snprintf(out->error, sizeof(out->error), "%s", error);
+		out->result = GSA_FAILED;
+		return false;
+	}
 
 	plistw_t w;
 	plistw_init(&w);
@@ -365,76 +481,23 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 	plistw_string(&w, "Version", "1.0.1");
 	plistw_dict_end(&w);
 	plistw_dict_begin(&w, "Request");
-	plistw_data(&w, "A", a_pub, 256);
-	anisette_to_plist(&w, anisette);
-	plistw_string(&w, "o", "init");
-	plistw_array_begin(&w, "ps");
-	plistw_string(&w, NULL, "s2k");
-	plistw_string(&w, NULL, "s2k_fo");
-	plistw_array_end(&w);
-	plistw_string(&w, "u", username);
-	plistw_dict_end(&w);
-	plistw_dict_end(&w);
-	if (!gsa_post(GSA_ENDPOINT, w.buf, &reply, error, error_size)) {
-		snprintf(out->error, sizeof(out->error), "%s", error);
-		out->result = GSA_FAILED;
-		plistw_free(&w);
-		return false;
-	}
-	plistw_free(&w);
-	int c_node = plist_get(&reply, "c");
-	int s_node = plist_get(&reply, "s");
-	int b_node = plist_get(&reply, "B");
-	int i_node = plist_get(&reply, "i");
-	if (c_node < 0 || s_node < 0 || b_node < 0) {
-		snprintf(out->error, sizeof(out->error), "gsa_init_missing_fields");
-		out->result = GSA_FAILED;
-		plist_free(&reply);
-		return false;
-	}
-	const char *c = plist_str(&reply, c_node);
-	size_t salt_len = 0;
-	const uint8_t *salt = plist_data(&reply, s_node, &salt_len);
-	size_t b_len = 0;
-	const uint8_t *b_pub = plist_data(&reply, b_node, &b_len);
-	long long iters = i_node >= 0 ? plist_int(&reply, i_node) : 2048;
-
-	// the verifier password
-	uint8_t pbk[32];
-	pbkdf2_hmac_sha256(hpw, 32, salt, salt_len, (unsigned)(iters > 0 ? iters : 2048), pbk, 32);
-
-	srp_session_t srp;
-	memset(&srp, 0, sizeof(srp));
-	if (!srp_process_reply(a, a_len, username, pbk, 32, salt, salt_len, b_pub, b_len, &srp)) {
-		snprintf(out->error, sizeof(out->error), "gsa_bad_b");
-		out->result = GSA_FAILED;
-		plist_free(&reply);
-		return false;
-	}
-	plist_free(&reply);
-
-	// the complete step: M1 proof
-	plistw_init(&w);
-	plistw_dict_begin(&w, NULL);
-	plistw_dict_begin(&w, "Header");
-	plistw_string(&w, "Version", "1.0.1");
-	plistw_dict_end(&w);
-	plistw_dict_begin(&w, "Request");
 	plistw_data(&w, "m", srp.m1, 32);
-	plistw_string(&w, "c", c ? c : "");
+	plistw_string(&w, "c", out->session);
 	anisette_to_plist(&w, anisette);
 	plistw_string(&w, "o", "complete");
 	plistw_string(&w, "u", username);
 	plistw_dict_end(&w);
 	plistw_dict_end(&w);
+
+	plist_t reply;
 	memset(&reply, 0, sizeof(reply));
-	if (!gsa_post(GSA_ENDPOINT, w.buf, &reply, error, error_size)) {
+	bool ok = gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size);
+	plistw_free(&w);
+	if (!ok) {
 		snprintf(out->error, sizeof(out->error), "%s", error);
 		out->result = GSA_FAILED;
-		plistw_free(&w);
 		return false;
 	}
-	plistw_free(&w);
 	if (!check_error(&reply, error, error_size)) {
 		snprintf(out->error, sizeof(out->error), "%s", error);
 		out->result = GSA_FAILED;
@@ -444,22 +507,19 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 
 	// M2 verifies the server
 	size_t m2_len = 0;
-	const uint8_t *m2 = plist_data(&reply, plist_get(&reply, "M2"), &m2_len);
+	const uint8_t *m2 = plist_data(&reply, resp_get(&reply, "M2"), &m2_len);
 	if (!m2 || m2_len != 32 || memcmp(m2, srp.m2, 32) != 0) {
-		snprintf(out->error, sizeof(out->error), "gsa_bad_m2");
+		snprintf(error, error_size, "gsa_bad_m2");
+		snprintf(out->error, sizeof(out->error), "%s", error);
 		out->result = GSA_FAILED;
 		plist_free(&reply);
 		return false;
 	}
 
-	// the status: a second factor, or signed in
-	int status = plist_get(&reply, "Status");
-	int au = status >= 0 ? plist_get_in(&reply, status, "au") : -1;
-	const char *au_str = au >= 0 ? plist_str(&reply, au) : NULL;
-
-	// the spd: AES-CBC under the extra-data keys
+	// the session's keys ride home in the spd, decoded under the extra-data
+	// keys derived from the session key
 	size_t spd_len = 0;
-	const uint8_t *spd = plist_data(&reply, plist_get(&reply, "spd"), &spd_len);
+	const uint8_t *spd = plist_data(&reply, resp_get(&reply, "spd"), &spd_len);
 	uint8_t ek[32], eiv[32], *plain = NULL;
 	if (spd && spd_len >= 32) {
 		hmac_sha256(srp.key, 32, "extra data key:", ek);
@@ -489,7 +549,6 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 			if (pt >= 0 && plist_str(&spd_plist, pt)) {
 				snprintf(out->pt_token, sizeof(out->pt_token), "%s", plist_str(&spd_plist, pt));
 			}
-			// The session's own keys, what the app-token requests sign with.
 			size_t kl = 0;
 			const uint8_t *sk = plist_data(&spd_plist, plist_get(&spd_plist, "sk"), &kl);
 			if (sk && kl && kl <= sizeof(out->sk)) {
@@ -509,6 +568,9 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 	snprintf(out->adsid, sizeof(out->adsid), "%s", adsid);
 	snprintf(out->idms_token, sizeof(out->idms_token), "%s", idms);
 
+	int au = resp_get(&reply, "au");
+	const char *au_str = au >= 0 ? plist_str(&reply, au) : NULL;
+
 	if (au_str && strcmp(au_str, "trustedDeviceSecondaryAuth") == 0) {
 		out->result = GSA_NEEDS_2FA_TOTP;
 		plist_free(&reply);
@@ -524,12 +586,15 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 	return true;
 }
 
+
 bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, const char *code,
 				  char *error, size_t error_size) {
 	// GET GsService2/validate with the security-code and identity-token
 	// headers, plus the anisette set the other GrandSlam calls carry: the
 	// validate is what marks the identity as second-factor-passed, and it
 	// reads the machine data like everything else.
+	gsa_anisette_t gsa = gsa_anisette(anisette);
+	anisette = &gsa;
 	char anisette_h[2048] = "";
 	for (int i = 0; anisette && i < anisette->count; i++) {
 		size_t len = strlen(anisette_h);
@@ -657,6 +722,8 @@ bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
 		snprintf(error, error_size, "gsa_no_session");
 		return false;
 	}
+	gsa_anisette_t gsa = gsa_anisette(anisette);
+	anisette = &gsa;
 	// checksum = HMAC-SHA256(sk, "apptokens" | adsid | app_name)
 	size_t msg_len = strlen("apptokens") + strlen(login->adsid) + strlen(app_name);
 	uint8_t *msg = malloc(msg_len);
@@ -696,7 +763,7 @@ bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
 
 	plist_t reply;
 	memset(&reply, 0, sizeof(reply));
-	if (!gsa_post(GSA_ENDPOINT, w.buf, &reply, error, error_size)) {
+	if (!gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size)) {
 		plistw_free(&w);
 		return false;
 	}

@@ -211,8 +211,8 @@ static ampnative_result_t run_login(const char *apple_id, const char *password, 
 
 	gsa_login_t login;
 	memset(&login, 0, sizeof(login));
-	if (!gsa_login_init(&anisette, apple_id, a, sizeof(a), NULL, 0, error, error_size) ||
-		!gsa_login_complete(&anisette, apple_id, password, a, sizeof(a), NULL, &login, error,
+	if (!gsa_login_init(&anisette, apple_id, a, sizeof(a), &login, error, error_size) ||
+		!gsa_login_complete(&anisette, apple_id, password, a, sizeof(a), &login, error,
 							error_size)) {
 		memset(a, 0, sizeof(a));
 		return AMPNATIVE_FAILED;

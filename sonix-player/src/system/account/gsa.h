@@ -38,6 +38,15 @@ typedef struct {
 	char adsid[128];
 	char idms_token[1024]; // GsIdmsToken, the identity token for the 2FA hop
 	char pt_token[1024];   // PasswordToken from the spd, when present
+	// The init answer's pieces, what the complete step consumes: the caller
+	// runs init once and the complete reuses its session -- the server
+	// refuses a second init that carries the same A.
+	char session[512]; // the c cookie the init hands out
+	uint8_t salt[64];
+	int salt_len;
+	uint8_t b_pub[256];
+	int b_len;
+	long long iters;
 	// The session's own keys from the spd, what the app-token requests sign
 	// with. Zeroed after use by the caller that is done with them.
 	uint8_t sk[64];
@@ -46,15 +55,15 @@ typedef struct {
 	int c_len;
 } gsa_login_t;
 
-// The two sign-in steps. `a` is the caller's 32 random bytes; the SRP and
-// PBKDF2 runs happen inside.
+// The two sign-in steps. `a` is the caller's 32 random bytes. Init keeps
+// the server's answer (the session cookie, the salt, B, the iterations) in
+// `out`; complete consumes them -- the server refuses a second init with
+// the same A, so the pair is one-shot.
 bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const uint8_t *a,
-					size_t a_len, char *session_id_out, size_t session_id_size, char *error,
-					size_t error_size);
+					size_t a_len, gsa_login_t *out, char *error, size_t error_size);
 bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 						const char *password, const uint8_t *a, size_t a_len,
-						const char *session_id, gsa_login_t *out, char *error,
-						size_t error_size);
+						gsa_login_t *out, char *error, size_t error_size);
 
 // The second factor: the six-digit code from a trusted device.
 bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, const char *code,
