@@ -136,23 +136,38 @@ static void *worker_main(void *arg) {
 				// itself, the anisette provisioned on demand. Every field
 				// the user types comes from this device's keyboard, so the
 				// player is the only place the password exists, and it is
-				// wiped right here. The daemon's flow stays as the fallback
-				// while the native one is young.
-				ampnative_result_t nr = ampnative_signin(job.username, job.password,
-														 result->error,
-														 sizeof(result->error));
-				memset(job.password, 0, sizeof(job.password));
+				// wiped the moment the last user is done with it. The
+				// daemon's flow stays as the fallback while the native one
+				// is young, so the copy outlives both attempts.
+				char password[128];
+				snprintf(password, sizeof(password), "%s", job.password);
+				char native_error[192] = "";
+				ampnative_result_t nr = ampnative_signin(job.username, password,
+														 native_error,
+														 sizeof(native_error));
 				if (nr == AMPNATIVE_OK || nr == AMPNATIVE_2FA) {
 					result->count = nr == AMPNATIVE_OK ? 0 : 1;
 				} else if (configured()) {
 					amplocal_login_result_t r =
-						amplocal_signin(job.username, job.password, result->error,
+						amplocal_signin(job.username, password, result->error,
 										sizeof(result->error));
 					result->count =
 						r == AMPLOCAL_LOGIN_OK ? 0 : r == AMPLOCAL_LOGIN_2FA ? 1 : -1;
+					// A daemon that also failed leaves the native error
+					// behind: it says what the player itself could not do,
+					// which is what the session is about.
+					if (result->count < 0 && native_error[0]) {
+						char both[192];
+						snprintf(both, sizeof(both), "%s (%s)", native_error,
+								 result->error[0] ? result->error : "amp_login_failed");
+						snprintf(result->error, sizeof(result->error), "%s", both);
+					}
 				} else {
+					snprintf(result->error, sizeof(result->error), "%s",
+							 native_error[0] ? native_error : "amp_login_failed");
 					result->count = -1;
 				}
+				memset(password, 0, sizeof(password));
 			} else if (job.kind == JOB_2FA) {
 				// The native hop validates the code and signs in again with
 				// the same credentials, which are still in the pending pair.
@@ -1034,6 +1049,7 @@ static void open_settings_cb(lv_event_t *e) {
 
 void amppage_init(gui_config_t *cfg) {
 	config = cfg;
+	creds_path_init(); // the remembered credentials have a place to live now
 	device_state_add_prepare_cb(ampstream_prepare);
 	streamturn_register_abandon(ampstream_cancel);
 	ampitunes_set_root(storage_sd_root());
