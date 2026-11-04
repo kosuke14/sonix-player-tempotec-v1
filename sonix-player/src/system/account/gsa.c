@@ -6,6 +6,7 @@
 #include "src/system/core/json.h"
 #include "src/system/core/sha256.h"
 #include "src/system/net/http.h"
+#include "src/system/net/tls.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -157,6 +158,23 @@ static void aes256_cbc_decrypt(const aes256_t *ctx, const uint8_t iv[16], const 
 	}
 }
 
+// Apple's gsa chain answers with a self-signed root the system store does
+// not carry -- the reference implementations verify nothing there either.
+// The player's global mode is relaxed for exactly the duration of each call
+// and restored after, so the rest of the device stays as strict as it was.
+typedef struct {
+	tls_verify_t saved;
+} gsa_tls_guard_t;
+
+static void gsa_tls_begin(gsa_tls_guard_t *g) {
+	g->saved = tls_verify_mode();
+	tls_set_verify_mode(TLS_VERIFY_RELAXED);
+}
+
+static void gsa_tls_end(const gsa_tls_guard_t *g) {
+	tls_set_verify_mode(g->saved);
+}
+
 // ---------------------------------------------------------------------------
 // hmac-sha256 (for the extra-data keys)
 // ---------------------------------------------------------------------------
@@ -222,14 +240,22 @@ static bool gsa_post(const char *endpoint, const char *body, plist_t *reply, cha
 	req.extra_headers = extra;
 	req.body = full;
 	req.body_len = strlen(full);
-	// gsa_post's caller holds the answer; the wrapper body dies here
 	req.content_type = "text/x-xml-plist";
 	req.want_error_body = true; // the Status/ec/em of a refusal is the useful part
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
-	if (!http_request(endpoint, &req, &out, &out_len, 256 * 1024, 30, &status)) {
-		snprintf(error, error_size, "gsa_http_%d", status);
+	gsa_tls_guard_t tls_guard;
+	gsa_tls_begin(&tls_guard);
+	bool sent = http_request(endpoint, &req, &out, &out_len, 256 * 1024, 30, &status);
+	gsa_tls_end(&tls_guard);
+	if (!sent) {
+		// the transport reason rides along: a failure before any HTTP status
+		// is the interesting kind, and the code alone would hide it
+		const char *why = http_last_error();
+		snprintf(error, error_size, "gsa_http_%d%s%s", status, why ? " " : "",
+				 why ? why : "");
+		free(full);
 		return false;
 	}
 	bool ok = plist_parse(out, out_len, reply);
@@ -560,8 +586,15 @@ bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, cons
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
-	if (!http_request(GSA_VALIDATE_ENDPOINT, &req, &out, &out_len, 256 * 1024, 30, &status)) {
-		snprintf(error, error_size, "gsa_2fa_%d", status);
+	gsa_tls_guard_t tls_guard;
+	gsa_tls_begin(&tls_guard);
+	bool sent = http_request(GSA_VALIDATE_ENDPOINT, &req, &out, &out_len, 256 * 1024, 30,
+							 &status);
+	gsa_tls_end(&tls_guard);
+	if (!sent) {
+		const char *why = http_last_error();
+		snprintf(error, error_size, "gsa_2fa_%d%s%s", status, why ? " " : "",
+				 why ? why : "");
 		return false;
 	}
 	bool ok = status == 200;
