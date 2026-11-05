@@ -15,6 +15,14 @@
 // derived on the device.
 #define GSA_ANISETTE_MAX 12
 
+// The identity the GrandSlam route accepts: Apple's fraud detection of
+// October 2026 refuses anisette provisioned through the Android ADI when
+// the request claims a Mac, and GrandSlam answers -80045 to every such
+// login. The Windows claim is what the Windows Apple Music's own AuthKit
+// sends, and the provisioning must claim the same identity it logs in as.
+#define GSA_CLIENT_INFO \
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+
 typedef struct {
 	char key[64];
 	char value[512];

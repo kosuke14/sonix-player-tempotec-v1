@@ -237,6 +237,10 @@ static void b64_encode(const uint8_t *in, size_t len, char *out, size_t out_size
 // data the servers read before anything else.
 static void apple_headers(char *out, size_t size, const anisette_state_t *st,
 						  const char *client_info, const char *user_agent) {
+	// The provisioning claims the same identity the login will: a PET
+	// issued to a Mac is refused by GrandSlam with -80045, whatever the
+	// later request says.
+	client_info = GSA_CLIENT_INFO;
 	char now[40];
 	time_t t = time(NULL);
 	struct tm tm;
@@ -966,7 +970,7 @@ bool anisette_headers(gsa_anisette_t *out, char *error, size_t error_size) {
 		"X-Mme-Client-Info",
 	};
 	const char *values[10] = {now,		st.serial,	 "UTC", "en_US", rinfo,
-							  lu_hex, device_id,	md,	mdm,	 client_info};
+							  lu_hex, device_id,	md,	mdm,	 GSA_CLIENT_INFO};
 	out->count = 10;
 	for (int i = 0; i < 10; i++) {
 		snprintf(out->kv[i].key, sizeof(out->kv[i].key), "%s", keys[i]);

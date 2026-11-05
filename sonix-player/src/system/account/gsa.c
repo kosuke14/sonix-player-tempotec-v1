@@ -213,9 +213,6 @@ static void hmac_sha256(const uint8_t *key, size_t key_len, const char *msg, uin
 // it is what the community's working clients send. The provisioning behind
 // the one-time password stays the anisette server's; only the
 // self-description of the request changes.
-static const char *GSA_CLIENT_INFO =
-	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
-
 // A copy of the anisette set with the client info the GSA route wants. The
 // header and the cpd must carry the same one, so every request builder runs
 // its anisette through this first.
