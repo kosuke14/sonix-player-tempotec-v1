@@ -368,6 +368,49 @@ index 0e0f49c..90adc05 100644
  }
  
  /// Set the related IR Value to SDNode.
+diff --git a/ARM/DAG/FunctionRaisingInfo.cpp b/ARM/DAG/FunctionRaisingInfo.cpp
+index 328cf89..21ad5e2 100644
+--- a/ARM/DAG/FunctionRaisingInfo.cpp
++++ b/ARM/DAG/FunctionRaisingInfo.cpp
+@@ -28,12 +28,23 @@ void FunctionRaisingInfo::set(ARMModuleRaiser &MRVal, Function &FNVal,
+   DLT = &MR->getModule()->getDataLayout();
+ 
+   DefaultType = Type::getIntNTy(*CTX, DLT->getPointerSizeInBits());
++  DAGPtr = DAG;
+ }
+ 
+ SDValue FunctionRaisingInfo::getValueByRegister(unsigned Reg) {
+-  assert((RegValMap.count(Reg) != 0) &&
+-         "Can not find the corresponding value!");
+-  return SDValue(RegValMap[Reg], 0);
++  auto It = RegValMap.find(Reg);
++  if (It == RegValMap.end() || It->second == nullptr) {
++    // The obfuscated code reads registers nothing has written in this
++    // block. The debug assert was a release null dereference; an undef of
++    // the default type keeps the selection walking.
++    // A zero constant of the default type: the safest stand-in, and the
++    // constant nodes need no map entry.
++    if (DAGPtr != nullptr) {
++      return DAGPtr->getConstant(0, SDLoc(), EVT::getEVT(DefaultType));
++    }
++    return SDValue();
++  }
++  return SDValue(It->second, 0);
+ }
+ 
+ void FunctionRaisingInfo::setValueByRegister(unsigned Reg, SDValue Val) {
+diff --git a/ARM/DAG/FunctionRaisingInfo.h b/ARM/DAG/FunctionRaisingInfo.h
+index ab5eede..70b6b17 100644
+--- a/ARM/DAG/FunctionRaisingInfo.h
++++ b/ARM/DAG/FunctionRaisingInfo.h
+@@ -84,6 +84,7 @@ public:
+   LLVMContext *CTX;
+   const DataLayout *DLT;
+   Type *DefaultType;
++  SelectionDAG *DAGPtr = nullptr;
+ };
+ 
+ } // end namespace mctoll
 diff --git a/ARM/DAG/IREmitter.cpp b/ARM/DAG/IREmitter.cpp
 index a4dae64..2b2671c 100644
 --- a/ARM/DAG/IREmitter.cpp
