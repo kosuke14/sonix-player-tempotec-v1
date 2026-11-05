@@ -1,0 +1,754 @@
+diff --git a/ARM/ARMArgumentRaiser.cpp b/ARM/ARMArgumentRaiser.cpp
+index 3a5872d..7611cd4 100644
+--- a/ARM/ARMArgumentRaiser.cpp
++++ b/ARM/ARMArgumentRaiser.cpp
+@@ -171,8 +171,8 @@ bool ARMArgumentRaiser::raiseArgs() {
+   updateParameterInstr(*MF);
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(getRaisedFunction()->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(getRaisedFunction()->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMArgumentRaiser end.\n");
+ 
+   return true;
+diff --git a/ARM/ARMCreateJumpTable.cpp b/ARM/ARMCreateJumpTable.cpp
+index c4d3080..240cec5 100644
+--- a/ARM/ARMCreateJumpTable.cpp
++++ b/ARM/ARMCreateJumpTable.cpp
+@@ -297,7 +297,7 @@ bool ARMCreateJumpTable::raiseMaichineJumpTable(MachineFunction &MF) {
+           // Finally add BranchInstr to the list of instructions to be
+           // deleted
+           MBBInstrsToErase.push_back(&BranchInstr);
+-          // BranchInstr.dump();
++          // BranchInstr.print(llvm::errs());
+           // Now delete the instructions
+           for (auto *MI : MBBInstrsToErase) {
+             JmpTblPredMBB->erase(MI);
+@@ -349,8 +349,8 @@ bool ARMCreateJumpTable::create() {
+   raiseMaichineJumpTable(*MF);
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(RF->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(RF->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMCreateJumpTable end.\n");
+ 
+   return false;
+diff --git a/ARM/ARMEliminatePrologEpilog.cpp b/ARM/ARMEliminatePrologEpilog.cpp
+index 3b1e0ed..e9f3648 100644
+--- a/ARM/ARMEliminatePrologEpilog.cpp
++++ b/ARM/ARMEliminatePrologEpilog.cpp
+@@ -341,8 +341,8 @@ bool ARMEliminatePrologEpilog::eliminate() {
+   }
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(getRaisedFunction()->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(getRaisedFunction()->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMEliminatePrologEpilog end.\n");
+ 
+   return !Success;
+diff --git a/ARM/ARMFrameBuilder.cpp b/ARM/ARMFrameBuilder.cpp
+index f5447b7..b5f28b5 100644
+--- a/ARM/ARMFrameBuilder.cpp
++++ b/ARM/ARMFrameBuilder.cpp
+@@ -301,8 +301,8 @@ bool ARMFrameBuilder::build() {
+   searchStackObjects(*MF);
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(getRaisedFunction()->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(getRaisedFunction()->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMFrameBuilder end.\n");
+ 
+   return true;
+diff --git a/ARM/ARMFunctionPrototype.cpp b/ARM/ARMFunctionPrototype.cpp
+index a02d5f7..34fc079 100644
+--- a/ARM/ARMFunctionPrototype.cpp
++++ b/ARM/ARMFunctionPrototype.cpp
+@@ -201,8 +201,8 @@ Function *ARMFunctionPrototype::discover(MachineFunction &MachFunc) {
+   // EntryBlock at here.
+   BasicBlock::Create(Pnfn->getContext(), "EntryBlock", Pnfn);
+ 
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(Pnfn->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(Pnfn->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMFunctionPrototype end.\n");
+ 
+   return Pnfn;
+diff --git a/ARM/ARMInstructionSplitting.cpp b/ARM/ARMInstructionSplitting.cpp
+index 7fc02e5..f92913f 100644
+--- a/ARM/ARMInstructionSplitting.cpp
++++ b/ARM/ARMInstructionSplitting.cpp
+@@ -1076,8 +1076,8 @@ bool ARMInstructionSplitting::split() {
+     MI->removeFromParent();
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(getRaisedFunction()->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(getRaisedFunction()->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMInstructionSplitting end.\n");
+ 
+   return true;
+diff --git a/ARM/ARMMIRevising.cpp b/ARM/ARMMIRevising.cpp
+index 7e2a2b1..a3d4801 100644
+--- a/ARM/ARMMIRevising.cpp
++++ b/ARM/ARMMIRevising.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ //===- ARMMIRevising.cpp - Binary raiser utility llvm-mctoll --------------===//
+ //
+ // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+@@ -111,17 +112,21 @@ uint64_t ARMMIRevising::getCalledFunctionAtPLTOffset(uint64_t PLTEndOff,
+       bool Success = MR->getMCDisassembler()->getInstruction(
+           InstAddIP, InstAddIPSz, Bytes.slice(PLTEndOff + 4 - SecStart),
+           PLTEndOff + 4, nulls());
+-      assert(Success && "Failed to disassemble instruction in PLT");
++      if (!Success) {
++        return 0; // not the PLT shape this walk expects
++      }
+ 
+       unsigned int OpcAddIP = InstAddIP.getOpcode();
+       MCInstrDesc MCIDAddIP = MR->getMCInstrInfo()->get(OpcAddIP);
+ 
+       if (OpcAddIP != ARM::ADDri && (MCIDAddIP.getNumOperands() != 6)) {
+-        assert(false && "Failed to find function entry from .plt.");
++        return 0;
+       }
+ 
+       MCOperand OpdAddIP = InstAddIP.getOperand(2);
+-      assert(OpdAddIP.isImm() && "Unexpected immediate for offset.");
++      if (!OpdAddIP.isImm()) {
++        return 0;
++      }
+       unsigned Bits = OpdAddIP.getImm() & 0xFF;
+       unsigned Rot = (OpdAddIP.getImm() & 0xF00) >> 7;
+       int64_t PAlign = static_cast<int64_t>(ARM_AM::rotr32(Bits, Rot));
+@@ -131,37 +136,44 @@ uint64_t ARMMIRevising::getCalledFunctionAtPLTOffset(uint64_t PLTEndOff,
+       Success = MR->getMCDisassembler()->getInstruction(
+           Inst, InstSz, Bytes.slice(PLTEndOff + 8 - SecStart), PLTEndOff + 8,
+           nulls());
+-      assert(Success && "Failed to disassemble instruction in PLT");
++      if (!Success) {
++        return 0;
++      }
+       unsigned int Opcode = Inst.getOpcode();
+       MCInstrDesc MCID = MR->getMCInstrInfo()->get(Opcode);
+ 
+       if (Opcode != ARM::LDRi12 && (MCID.getNumOperands() != 6)) {
+-        assert(false && "Failed to find function entry from .plt.");
++        return 0;
+       }
+ 
+       MCOperand Operand = Inst.getOperand(3);
+-      assert(Operand.isImm() && "Unexpected immediate for offset.");
++      if (!Operand.isImm()) {
++        return 0;
++      }
+ 
+       uint64_t Index = Operand.getImm();
+ 
+       uint64_t GotPltRelocOffset = PLTEndOff + Index + PAlign + 8;
+       const RelocationRef *GotPltReloc =
+           MR->getDynRelocAtOffset(GotPltRelocOffset);
+-      assert(GotPltReloc != nullptr &&
+-             "Failed to get dynamic relocation for jmp target of PLT entry");
+-
+-      assert((GotPltReloc->getType() == ELF::R_ARM_JUMP_SLOT) &&
+-             "Unexpected relocation type for PLT jmp instruction");
++      if (GotPltReloc == nullptr ||
++          GotPltReloc->getType() != ELF::R_ARM_JUMP_SLOT) {
++        return 0;
++      }
+       symbol_iterator CalledFuncSym = GotPltReloc->getSymbol();
+-      assert(CalledFuncSym != Elf32LEObjFile->symbol_end() &&
+-             "Failed to find relocation symbol for PLT entry");
++      if (CalledFuncSym == Elf32LEObjFile->symbol_end()) {
++        return 0;
++      }
+       Expected<StringRef> CalledFuncSymName = CalledFuncSym->getName();
+-      assert(CalledFuncSymName &&
+-             "Failed to find symbol associated with dynamic "
+-             "relocation of PLT jmp target.");
++      if (!CalledFuncSymName) {
++        consumeError(CalledFuncSymName.takeError());
++        return 0;
++      }
+       Expected<uint64_t> CalledFuncSymAddr = CalledFuncSym->getAddress();
+-      assert(CalledFuncSymAddr &&
+-             "Failed to get called function address of PLT entry");
++      if (!CalledFuncSymAddr) {
++        consumeError(CalledFuncSymAddr.takeError());
++        return 0;
++      }
+ 
+       if (CalledFuncSymAddr.get() == 0) {
+         // Set CallTargetIndex for plt offset to map undefined function symbol
+@@ -258,6 +270,9 @@ const Value *ARMMIRevising::getGlobalValueByOffset(int64_t MCInstOffset,
+   assert(MCIR != nullptr && "MCInstRaiser was not initialized!");
+   if (Symbol == nullptr) {
+     auto Iter = MCIR->getMCInstAt(Offset - TextSecAddr);
++    if (Iter == MCIR->const_mcinstr_end()) {
++      return nullptr; // the offset names no recorded instruction
++    }
+     uint64_t OffVal = static_cast<uint64_t>((*Iter).second.getData());
+ 
+     for (auto &Sym : ObjFile->symbols()) {
+@@ -458,9 +473,7 @@ const Value *ARMMIRevising::getGlobalValueByOffset(int64_t MCInstOffset,
+ void ARMMIRevising::addressPCRelativeData(MachineInstr &MInst) {
+   int64_t Imm = 0;
+   // To match the pattern: OPCODE Rx, [PC, #IMM]
+-  if (MInst.getNumOperands() > 2) {
+-    assert(MInst.getOperand(2).isImm() &&
+-           "The third operand must be immediate data!");
++  if (MInst.getNumOperands() > 2 && MInst.getOperand(2).isImm()) {
+     Imm = MInst.getOperand(2).getImm();
+   }
+   // Get MCInst offset - the offset of machine instruction in the binary
+@@ -474,32 +487,47 @@ void ARMMIRevising::addressPCRelativeData(MachineInstr &MInst) {
+   // It should like:
+   // ldr     r1, [pc, #32]
+   // ldr     r1, [pc, r1]
++  fprintf(stderr, "DBG addrPC: globval=%p imm=%lld nops=%u\n", (void *)GlobVal,
++            (long long)Imm, (unsigned)MInst.getNumOperands());
++  if (GlobVal == nullptr) {
++    // The obfuscated code carries PC-relative loads that name no symbol --
++    // jump tables and in-place constants the object file does not record.
++    // The debug assert was a release null dereference; leaving the
++    // instruction untouched lets the generic lowering handle it.
++    return;
++  }
+   MachineInstr *NInst = MInst.getNextNode();
+   // To match the pattern: OPCODE Rx, [PC, Rd], Rd must be the def of previous
+   // instruction.
+-  if (NInst->getNumOperands() >= 2 && NInst->getOperand(1).isReg() &&
++  if (NInst != nullptr && NInst->getNumOperands() >= 3 &&
++      NInst->getOperand(1).isReg() &&
+       NInst->getOperand(1).getReg() == ARM::PC &&
+       NInst->getOperand(2).isReg() &&
+       NInst->getOperand(2).getReg() == MInst.getOperand(0).getReg()) {
+     auto *GV = dyn_cast<GlobalVariable>(GlobVal);
+-    if (GV != nullptr && GV->isConstant()) {
++    if (GV != nullptr && GV->isConstant() && GV->hasInitializer() &&
++        isa<ConstantInt>(GV->getInitializer())) {
+       // Firstly, read the PC relative data according to PC offset.
+       auto *Init = GV->getInitializer();
+       uint64_t GVData = Init->getUniqueInteger().getZExtValue();
+       int64_t MCInstOff = getMCInstIndex(*NInst);
+       // Search the global symbol of object by PC relative data.
+       GlobVal = getGlobalValueByOffset(MCInstOff, GVData + 8);
++      if (GlobVal == nullptr) {
++        // The second hop names no symbol either: leave both instructions
++        // for the generic lowering.
++        return;
++      }
+       // If the global symbol is exist, erase current ldr instruction.
+-      if (GlobVal != nullptr)
+-        NInst->eraseFromParent();
++      NInst->eraseFromParent();
+     }
+   }
+ 
+-  assert(GlobVal && "A not addressed pc-relative data!");
+-
+   // Replace PC relative operands to symbol operand.
+   // The pattern will be generated.
+   // ldr r3, [pc, #20] => ldr r3, @globalvalue
++  fprintf(stderr, "DBG addrPC: changing operand, name=%s\n",
++          GlobVal->getName().data());
+   MInst.getOperand(1).ChangeToES(GlobVal->getName().data());
+ 
+   if (MInst.getNumOperands() > 2) {
+@@ -578,8 +606,8 @@ bool ARMMIRevising::revise() {
+     PMI->eraseFromParent();
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(getRaisedFunction()->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(getRaisedFunction()->print(llvm::errs()));
+   LLVM_DEBUG(dbgs() << "ARMMIRevising end.\n");
+ 
+   return Res;
+diff --git a/ARM/ARMSelectionDAGISel.cpp b/ARM/ARMSelectionDAGISel.cpp
+index b9513ef..5566406 100644
+--- a/ARM/ARMSelectionDAGISel.cpp
++++ b/ARM/ARMSelectionDAGISel.cpp
+@@ -58,11 +58,17 @@ void ARMSelectionDAGISel::selectBasicBlock() {
+   // the return Value of each exit BasicBlock.
+   Type *RTy = FuncInfo->Fn->getReturnType();
+   if (RTy != nullptr && !RTy->isVoidTy() && MBB->succ_size() == 0) {
+-    Instruction *TInst = dyn_cast<Instruction>(
+-        DAGInfo->getRealValue(FuncInfo->RegValMap[ARM::R0]));
+-    assert(TInst && "A def R0 was pointed to a non-instruction!!!");
+-    BasicBlock *TBB = TInst->getParent();
+-    FuncInfo->RetValMap[TBB] = TInst;
++    // A block that never defined R0, or a def whose raised value is the
++    // undef the DAG emitter leaves for nodes it could not name, has no
++    // return to record. The debug assert was a release null dereference.
++    SDNode *RetNode = FuncInfo->RegValMap[ARM::R0];
++    if (RetNode != nullptr) {
++      Instruction *TInst = dyn_cast<Instruction>(DAGInfo->getRealValue(RetNode));
++      if (TInst != nullptr && TInst->getParent() != nullptr) {
++        BasicBlock *TBB = TInst->getParent();
++        FuncInfo->RetValMap[TBB] = TInst;
++      }
++    }
+   }
+ 
+   // Free the SelectionDAG state, now that we're finished with it.
+@@ -138,8 +144,8 @@ bool ARMSelectionDAGISel::doSelection() {
+   FuncInfo->clear();
+ 
+   // For debugging.
+-  LLVM_DEBUG(MF->dump());
+-  LLVM_DEBUG(getRaisedFunction()->dump());
++  LLVM_DEBUG(MF->print(llvm::errs()));
++  LLVM_DEBUG(getRaisedFunction()->print(llvm::errs()));
+     LLVM_DEBUG(dbgs() << "ARMSelectionDAGISel end.\n");
+ 
+   return true;
+diff --git a/ARM/CMakeLists.txt b/ARM/CMakeLists.txt
+index 0367d8a..38fe1e9 100644
+--- a/ARM/CMakeLists.txt
++++ b/ARM/CMakeLists.txt
+@@ -10,6 +10,9 @@ if(NOT LLVM_MCTOLL_BUILT_STANDALONE)
+   set(LLVM_MCTOLL_DEPS intrinsics_gen ARMCommonTableGen)
+ endif()
+ 
++set_source_files_properties(ARMMIRevising.cpp PROPERTIES
++  COMPILE_OPTIONS "-O0;-g")
++
+ add_llvm_library(mctollARMRaiser
+   ARMModuleRaiser.cpp
+   ARMFunctionPrototype.cpp
+diff --git a/ARM/DAG/DAGRaisingInfo.cpp b/ARM/DAG/DAGRaisingInfo.cpp
+index 0e0f49c..90adc05 100644
+--- a/ARM/DAG/DAGRaisingInfo.cpp
++++ b/ARM/DAG/DAGRaisingInfo.cpp
+@@ -13,6 +13,9 @@
+ 
+ #include "DAGRaisingInfo.h"
+ 
++#include "llvm/IR/Type.h"
++#include "llvm/IR/Instructions.h"
++
+ using namespace llvm;
+ using namespace llvm::mctoll;
+ 
+@@ -20,10 +23,20 @@ DAGRaisingInfo::DAGRaisingInfo(SelectionDAG &Dag) : DAG(Dag) {}
+ 
+ /// Gets the related IR Value of given SDNode.
+ Value *DAGRaisingInfo::getRealValue(SDNode *Node) {
+-  assert(Node != nullptr && "Node cannot be nullptr!");
+-  assert(NPMap[Node] != nullptr &&
+-         "Cannot find the corresponding node property!");
+-  return NPMap[Node]->Val;
++  auto It = NPMap.find(Node);
++  if (It == NPMap.end() || It->second == nullptr || It->second->Val == nullptr) {
++    // The obfuscated code builds DAG nodes the raiser never gave an IR
++    // value to. The debug asserts were a release null dereference; an
++    // undef of the node's own type keeps the emission walking, and the
++    // undef poisons only the paths that would have crashed anyway.
++    // A node the raiser never registered: a 32-bit undef keeps the callers
++    // walking. No type computation here -- the node's own type can be an
++    // extended or invalid EVT, and the undef only feeds paths that would
++    // have crashed anyway.
++    return UndefValue::get(Type::getInt32Ty(*DAG.getContext()));
++
++  }
++  return It->second->Val;
+ }
+ 
+ /// Set the related IR Value to SDNode.
+diff --git a/ARM/DAG/IREmitter.cpp b/ARM/DAG/IREmitter.cpp
+index a4dae64..2b2671c 100644
+--- a/ARM/DAG/IREmitter.cpp
++++ b/ARM/DAG/IREmitter.cpp
+@@ -685,6 +685,10 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     unsigned Cond = cast<ConstantSDNode>(Node->getOperand(1))->getZExtValue();
+     // br i1 %cmp, label %if.then, label %if.else
+     MachineBasicBlock *MBB = FuncInfo->MBBMap[CurBB];
++    // A block the map never learned has no successors to branch between.
++    if (MBB == nullptr || MBB->succ_size() == 0) {
++      break;
++    }
+     MachineBasicBlock::succ_iterator SuI = MBB->succ_begin();
+     BasicBlock *Iftrue = FuncInfo->getOrCreateBasicBlock(*SuI);
+     MachineBasicBlock *NextMBB = &*std::next(MBB->getIterator());
+@@ -695,6 +699,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+   case ISD::BR: {
+     // br label %xxx
+     MachineBasicBlock *LMBB = FuncInfo->MBBMap[CurBB];
++    if (LMBB == nullptr) {
++      break;
++    }
+     MachineBasicBlock::succ_iterator SuI = LMBB->succ_begin();
+     if (SuI != LMBB->succ_end()) {
+       BasicBlock *BrDest = FuncInfo->getOrCreateBasicBlock(*SuI);
+@@ -713,17 +720,25 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     bool IsSyscall = false;
+     if (CallFunc == nullptr) {
+       // According to MI to get BL instruction address.
+-      // uint64_t callAddr = DAGInfo->NPMap[Node]->InstAddr;
+-      uint64_t CallAddr = MR->getTextSectionAddress() +
+-                          getMCInstIndex(*(DAGInfo->NPMap[Node]->MI));
+-      Function *IndefiniteFunc = MR->getCallFunc(CallAddr);
+-      CallFunc = MR->getSyscallFunc(Index);
+-      if (CallFunc != nullptr && IndefiniteFunc != nullptr) {
+-        IFFuncArgNum = MR->getFunctionArgNum(CallAddr);
+-        IsSyscall = true;
++      auto NodeProp = DAGInfo->NPMap.find(Node);
++      if (NodeProp != DAGInfo->NPMap.end() && NodeProp->second != nullptr &&
++          NodeProp->second->MI != nullptr) {
++        uint64_t CallAddr = MR->getTextSectionAddress() +
++                            getMCInstIndex(*(NodeProp->second->MI));
++        Function *IndefiniteFunc = MR->getCallFunc(CallAddr);
++        CallFunc = MR->getSyscallFunc(Index);
++        if (CallFunc != nullptr && IndefiniteFunc != nullptr) {
++          IFFuncArgNum = MR->getFunctionArgNum(CallAddr);
++          IsSyscall = true;
++        }
+       }
+     }
+-    assert(CallFunc && "Failed to get called function!");
++    if (CallFunc == nullptr) {
++      // The obfuscated code reaches calls whose target neither the PLT walk
++      // nor the syscall map named. The debug assert was a release null
++      // dereference; skipping the emission keeps the rest of the block.
++      break;
++    }
+     // Get argument number from callee.
+     unsigned ArgNum = CallFunc->arg_size();
+     if (IFFuncArgNum > ArgNum)
+@@ -778,11 +793,18 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     // Emit the switch instruction.
+     if (JTList.size() > 0) {
+       MachineBasicBlock *Mbb = FuncInfo->MBBMap[CurBB];
+-      MachineFunction *MF = Mbb->getParent();
+-
+-      std::vector<JumpTableBlock> JTCases;
+-      const MachineJumpTableInfo *MJT = MF->getJumpTableInfo();
++      MachineFunction *MF = Mbb != nullptr ? Mbb->getParent() : nullptr;
++      const MachineJumpTableInfo *MJT = MF != nullptr ? MF->getJumpTableInfo()
++                                                      : nullptr;
+       unsigned JTIndex = Node->getConstantOperandVal(0);
++      // The obfuscated code takes indirect branches the jump-table machinery
++      // cannot always name. The debug path would have crashed on the
++      // lookups; a block without a table simply falls through.
++      if (Mbb == nullptr || MJT == nullptr ||
++          JTIndex >= MJT->getJumpTables().size()) {
++        break;
++      }
++      std::vector<JumpTableBlock> JTCases;
+       std::vector<MachineJumpTableEntry> JumpTables = MJT->getJumpTables();
+       for (unsigned Idx = 0, MBBSz = JumpTables[JTIndex].MBBs.size();
+            Idx != MBBSz; ++Idx) {
+@@ -804,6 +826,8 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+ 
+       // conditon instruction
+       Instruction *CondInst = nullptr;
++      // A condition that never materialised leaves no switch to build.
++      bool CondReady = false;
+       for (BasicBlock::iterator DI = CondBB->begin(); DI != CondBB->end();
+            DI++) {
+         Instruction *Ins = dyn_cast<Instruction>(DI);
+@@ -814,12 +838,16 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+         if (CondInst && (Ins->getOpcode() == Instruction::Sub)) {
+           if (isa<ConstantInt>(Ins->getOperand(1))) {
+             ConstantInt *IntOp = dyn_cast<ConstantInt>(Ins->getOperand(1));
+-            if (IntOp->uge(0)) {
++            if (IntOp != nullptr && IntOp->uge(0)) {
+               CondInst = Ins;
++              CondReady = true;
+             }
+           }
+         }
+       }
++      if (CondInst == nullptr || !CondReady) {
++        break; // no condition, no switch
++      }
+ 
+       SwitchInst *Inst = IRB.CreateSwitch(CondInst, DefBB, NumCases);
+       for (unsigned Idx = 0, Cnt = NumCases; Idx != Cnt; ++Idx) {
+diff --git a/Raiser/MCInstRaiser.cpp b/Raiser/MCInstRaiser.cpp
+index a7b2256..cd06c02 100644
+--- a/Raiser/MCInstRaiser.cpp
++++ b/Raiser/MCInstRaiser.cpp
+@@ -190,7 +190,7 @@ void MCInstRaiser::buildCFG(MachineFunction &MF, const MCInstrAnalysis *MIA,
+   // Print the Machine function (which contains the reconstructed
+   // MachineBasicBlocks.
+   LLVM_DEBUG(dbgs() << "Generated CFG\n");
+-  LLVM_DEBUG(MF.dump());
++  LLVM_DEBUG(MF.print(llvm::errs()));
+ }
+ 
+ static inline int64_t raiseSignedImm(int64_t Val, const DataLayout &DL) {
+@@ -230,7 +230,7 @@ MachineInstr *MCInstRaiser::RaiseMCInst(const MCInstrInfo &InstrInfo,
+         Builder.addUse(Operand.getReg());
+     } else {
+       outs() << "**** Unhandled Operand : ";
+-      LLVM_DEBUG(Operand.dump());
++      LLVM_DEBUG(Operand.print(llvm::errs()));
+     }
+   }
+ 
+@@ -340,20 +340,31 @@ uint64_t MCInstRaiser::getMCInstSize(uint64_t Offset) const {
+ }
+ 
+ uint64_t MCInstRaiser::getMCInstIndex(const MachineInstr &MI) const {
++  if (MI.getNumOperands() == 0) {
++    return 0; // nothing to read a position from
++  }
+   unsigned NumExpOps = MI.getNumExplicitOperands();
+-  const MachineOperand &MO = NumExpOps < MI.getNumOperands()
+-                                 ? MI.getOperand(NumExpOps)
+-                                 : MI.getOperand(MI.getNumOperands() - 1);
+-  assert(MO.isMetadata() &&
+-         "Unexpected non-metadata operand in branch instruction");
++  unsigned Last = NumExpOps < MI.getNumOperands() ? NumExpOps
++                                                  : MI.getNumOperands() - 1;
++  const MachineOperand &MO = MI.getOperand(Last);
++  // The obfuscated code produces MachineInstrs whose last operand carries no
++  // metadata. The debug asserts were a release null dereference; there is
++  // no index to give back, and callers treat 0 as "no position".
++  if (!MO.isMetadata()) {
++    return 0;
++  }
+   const MDNode *MDN = MO.getMetadata();
+   // Unwrap metadata of the instruction to get the MCInstIndex of
+   // the MCInst corresponding to this MachineInstr.
+   ConstantAsMetadata *CAM = dyn_cast<ConstantAsMetadata>(MDN->getOperand(0));
+-  assert(CAM != nullptr && "Unexpected metadata type");
++  if (CAM == nullptr) {
++    return 0;
++  }
+   Constant *CV = CAM->getValue();
+   ConstantInt *CI = dyn_cast<ConstantInt>(CV);
+-  assert(CI != nullptr && "Unexpected metadata constant type");
++  if (CI == nullptr) {
++    return 0;
++  }
+   APInt ArbPrecInt = CI->getValue();
+   return ArbPrecInt.getSExtValue();
+ }
+diff --git a/Raiser/ModuleRaiser.cpp b/Raiser/ModuleRaiser.cpp
+index 2bbd8c5..48b1f4c 100644
+--- a/Raiser/ModuleRaiser.cpp
++++ b/Raiser/ModuleRaiser.cpp
+@@ -218,7 +218,7 @@ bool ModuleRaiser::runMachineFunctionPasses() {
+     LLVM_DEBUG(dbgs() << "Raised Function Prototypes: \n");
+     LLVM_DEBUG({
+       for (auto MFR : MFRaiserVector) {
+-        MFR->getRaisedFunction()->dump();
++        MFR->getRaisedFunction()->print(llvm::errs());
+       }
+     });
+   }
+diff --git a/X86/X86JumpTables.cpp b/X86/X86JumpTables.cpp
+index 5fc5c5a..51c3a88 100644
+--- a/X86/X86JumpTables.cpp
++++ b/X86/X86JumpTables.cpp
+@@ -369,7 +369,7 @@ bool X86MachineInstructionRaiser::raiseMachineJumpTable() {
+   }
+ 
+   LLVM_DEBUG(dbgs() << "CFG : After Raising Jump Tables\n");
+-  LLVM_DEBUG(MF.dump());
++  LLVM_DEBUG(MF.print(llvm::errs()));
+   return true;
+ }
+ 
+diff --git a/X86/X86MachineInstructionRaiser.cpp b/X86/X86MachineInstructionRaiser.cpp
+index 7f08bf1..0524a40 100644
+--- a/X86/X86MachineInstructionRaiser.cpp
++++ b/X86/X86MachineInstructionRaiser.cpp
+@@ -1613,7 +1613,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpRegToRegMachineInstr(
+       SrcTy = VectorType::get(Type::getInt64Ty(Ctx), 2, false);
+       break;
+     default:
+-      MI.dump();
++      MI.print(llvm::errs());
+       llvm_unreachable("Unhandled sse packed instruction");
+     }
+ 
+@@ -1629,7 +1629,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpRegToRegMachineInstr(
+     } else if (IsSub) {
+       BinOpInst = BinaryOperator::CreateSub(Src1Value, Src2Value);
+     } else {
+-      MI.dump();
++      MI.print(llvm::errs());
+       llvm_unreachable("Unhandled instruction");
+     }
+ 
+@@ -1784,7 +1784,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpRegToRegMachineInstr(
+     raisedValues->setPhysRegSSAValue(DstReg, MBBNo, Result);
+   } break;
+   default:
+-    MI.dump();
++    MI.print(llvm::errs());
+     assert(false && "Unhandled binary instruction");
+   }
+ 
+@@ -2096,7 +2096,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpMemToRegInstr(
+       SrcTy = VectorType::get(Type::getInt64Ty(Ctx), 2, false);
+       break;
+     default:
+-      MI.dump();
++      MI.print(llvm::errs());
+       llvm_unreachable("Unhandled sse packed instruction");
+     }
+ 
+@@ -2111,7 +2111,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpMemToRegInstr(
+     } else if (IsSub) {
+       BinOpInst = BinaryOperator::CreateSub(DestValue, LoadValue);
+     } else {
+-      MI.dump();
++      MI.print(llvm::errs());
+       llvm_unreachable("Unhandled instruction");
+     }
+   } break;
+@@ -3264,7 +3264,7 @@ bool X86MachineInstructionRaiser::raiseBitTestMachineInstr(
+   } else if (Op2.isImm()) {
+     Op2Val = ConstantInt::get(OpValues[0]->getType(), Op2.getImm());
+   } else {
+-    LLVM_DEBUG(MI.dump());
++    LLVM_DEBUG(MI.print(llvm::errs()));
+     assert(false && "Unhandled operand type in compare instruction");
+   }
+   OpValues[1] = Op2Val;
+@@ -3387,7 +3387,7 @@ bool X86MachineInstructionRaiser::raiseCompareMachineInstr(
+       assert(MemOpSize != 0 && "Expected mem op size to be > 0");
+       NonMemRefOpTy = Type::getIntNTy(Ctx, MemOpSize * 8);
+     } else {
+-      LLVM_DEBUG(MI.dump());
++      LLVM_DEBUG(MI.print(llvm::errs()));
+       assert(false && "Unhandled second operand type in compare instruction");
+     }
+ 
+@@ -3419,7 +3419,7 @@ bool X86MachineInstructionRaiser::raiseCompareMachineInstr(
+     } else if (NonMemRefOp->isImm()) {
+       NonMemRefVal = ConstantInt::get(NonMemRefOpTy, NonMemRefOp->getImm());
+     } else {
+-      LLVM_DEBUG(MI.dump());
++      LLVM_DEBUG(MI.print(llvm::errs()));
+       assert(false && "Unhandled first operand type in compare instruction");
+     }
+     // save non-memory reference value at the appropriate index of operand
+@@ -3641,7 +3641,7 @@ bool X86MachineInstructionRaiser::raiseMemRefMachineInstr(
+   case InstructionKind::SETCC:
+     return raiseSetCCMachineInstr(MI, MemoryRefValue);
+   default:
+-    LLVM_DEBUG(MI.dump());
++    LLVM_DEBUG(MI.print(llvm::errs()));
+     assert(false && "Unhandled memory referencing instruction");
+   }
+   return false;
+@@ -3807,7 +3807,7 @@ bool X86MachineInstructionRaiser::raiseSetCCMachineInstr(
+   }
+ 
+   if (Pred == CmpInst::Predicate::BAD_ICMP_PREDICATE || Result == nullptr) {
+-    LLVM_DEBUG(MI.dump());
++    LLVM_DEBUG(MI.print(llvm::errs()));
+     assert(false && "Unhandled set instruction");
+     return false;
+   }
+@@ -4440,7 +4440,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpImmToRegMachineInstr(
+       BinOpInstr = dyn_cast<Instruction>(Result);
+     } break;
+     default:
+-      LLVM_DEBUG(MI.dump());
++      LLVM_DEBUG(MI.print(llvm::errs()));
+       assert(false && "Unhandled reg to imm binary operator instruction");
+       break;
+     }
+@@ -4816,7 +4816,7 @@ bool X86MachineInstructionRaiser::raiseDirectBranchMachineInstr(
+       assert(false && "Invalid condition on branch");
+       break;
+     default:
+-      LLVM_DEBUG(MI->dump());
++      LLVM_DEBUG(MI->print(llvm::errs()));
+       assert(false && "Unhandled conditional branch");
+     }
+ 
+@@ -4986,7 +4986,7 @@ bool X86MachineInstructionRaiser::raiseReturnMachineInstr(
+ 
+ bool X86MachineInstructionRaiser::raiseBranchMachineInstrs() {
+   LLVM_DEBUG(dbgs() << "CFG : Before Raising Terminator Instructions\n");
+-  LLVM_DEBUG(RaisedFunction->dump());
++  LLVM_DEBUG(RaisedFunction->print(llvm::errs()));
+ 
+   // Raise branch instructions with control transfer records
+   bool Success = true;
+@@ -5056,7 +5056,7 @@ bool X86MachineInstructionRaiser::raiseBranchMachineInstrs() {
+     }
+   }
+   LLVM_DEBUG(dbgs() << "CFG : After Raising Terminator Instructions\n");
+-  LLVM_DEBUG(RaisedFunction->dump());
++  LLVM_DEBUG(RaisedFunction->print(llvm::errs()));
+ 
+   return true;
+ }
+@@ -5308,7 +5308,7 @@ bool X86MachineInstructionRaiser::raiseCallMachineInstr(
+           } else if (FuncArg.getType()->isFloatingPointTy()) {
+             ArgVal = ConstantFP::get(FuncArg.getType(), 0.0);
+           } else {
+-            FuncArg.getType()->dump();
++            FuncArg.getType()->print(llvm::errs());
+             llvm_unreachable("Unsupported argument type");
+           }
+         } else if (isa<ConstantInt>(ArgVal)) {
+diff --git a/X86/X86MachineInstructionRaiserSSE.cpp b/X86/X86MachineInstructionRaiserSSE.cpp
+index 6d37837..ef0bdf7 100644
+--- a/X86/X86MachineInstructionRaiserSSE.cpp
++++ b/X86/X86MachineInstructionRaiserSSE.cpp
+@@ -447,7 +447,7 @@ bool X86MachineInstructionRaiser::raiseSSEConvertPrecisionMachineInstr(
+     CastTy = VectorType::get(Type::getDoubleTy(Ctx), 2, false);
+     break;
+   default:
+-    MI.dump();
++    MI.print(llvm::errs());
+     llvm_unreachable("Unhandled sse convert instruction");
+   }
+ 
+diff --git a/X86/X86MachineInstructionRaiserUtils.cpp b/X86/X86MachineInstructionRaiserUtils.cpp
+index 8a64ae5..848f60d 100644
+--- a/X86/X86MachineInstructionRaiserUtils.cpp
++++ b/X86/X86MachineInstructionRaiserUtils.cpp
+@@ -164,7 +164,7 @@ Value *X86MachineInstructionRaiser::getMemoryRefValue(const MachineInstr &MI) {
+     // TODO : Memory references with BaseType FrameIndexBase
+     // (i.e., not RegBase type)
+     outs() << "****** Unhandled memory reference in instruction\n\t";
+-    LLVM_DEBUG(MI.dump());
++    LLVM_DEBUG(MI.print(llvm::errs()));
+     outs() << "****** reference of type FrameIndexBase";
+   }
+ 
+diff --git a/X86/X86RaisedValueTracker.cpp b/X86/X86RaisedValueTracker.cpp
+index 89ad36d..ac0d978 100644
+--- a/X86/X86RaisedValueTracker.cpp
++++ b/X86/X86RaisedValueTracker.cpp
+@@ -708,7 +708,7 @@ bool X86RaisedValueTracker::testAndSetEflagSSAValue(unsigned int FlagBit,
+       PhysRegDefsInMBB[FlagBit][MBBNo].second =
+           ConstantInt::get(Type::getInt1Ty(Ctx), 0);
+     } else {
+-      LLVM_DEBUG(MI.dump());
++      LLVM_DEBUG(MI.print(llvm::errs()));
+       assert(false && "*** EFLAGS update abstraction not handled yet");
+     }
+   } break;
+@@ -1027,7 +1027,7 @@ bool X86RaisedValueTracker::testAndSetEflagSSAValue(unsigned int FlagBit,
+       // Set CF to 0 and make type to i1
+       NewCF = ConstantInt::get(Type::getInt1Ty(Ctx), 0);
+     } else {
+-      LLVM_DEBUG(MI.dump());
++      LLVM_DEBUG(MI.print(llvm::errs()));
+       assert(false &&
+              "*** Abstraction of CF for the instruction not handled yet");
+     }
