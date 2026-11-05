@@ -316,7 +316,7 @@ index b9513ef..5566406 100644
  
    return true;
 diff --git a/ARM/CMakeLists.txt b/ARM/CMakeLists.txt
-index 0367d8a..38fe1e9 100644
+index 0367d8a..d8c8077 100644
 --- a/ARM/CMakeLists.txt
 +++ b/ARM/CMakeLists.txt
 @@ -10,6 +10,9 @@ if(NOT LLVM_MCTOLL_BUILT_STANDALONE)
@@ -324,7 +324,7 @@ index 0367d8a..38fe1e9 100644
  endif()
  
 +set_source_files_properties(ARMMIRevising.cpp PROPERTIES
-+  COMPILE_OPTIONS "-O0;-g")
++  COMPILE_OPTIONS "-O1;-g;-fsanitize=address")
 +
  add_llvm_library(mctollARMRaiser
    ARMModuleRaiser.cpp
@@ -412,10 +412,97 @@ index ab5eede..70b6b17 100644
  
  } // end namespace mctoll
 diff --git a/ARM/DAG/IREmitter.cpp b/ARM/DAG/IREmitter.cpp
-index a4dae64..2b2671c 100644
+index a4dae64..936b035 100644
 --- a/ARM/DAG/IREmitter.cpp
 +++ b/ARM/DAG/IREmitter.cpp
-@@ -685,6 +685,10 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -118,12 +118,22 @@ static int raiseISDOpcodeToInstruction(unsigned Opcode) {
+ 
+ Value *IREmitter::getIRValue(SDValue Val) {
+   SDNode *N = Val.getNode();
++  if (N == nullptr) {
++    // An SDValue with no node: the selection dropped it somewhere earlier.
++    return ConstantInt::get(Type::getInt32Ty(MR->getModule()->getContext()),
++                            0);
++  }
+ 
+   if (ConstantSDNode::classof(N))
+     return const_cast<ConstantInt *>(
+         (static_cast<ConstantSDNode *>(N))->getConstantIntValue());
+ 
+-  return DAGInfo->getRealValue(N);
++  Value *Raised = DAGInfo->getRealValue(N);
++  if (Raised == nullptr) {
++    return ConstantInt::get(Type::getInt32Ty(MR->getModule()->getContext()),
++                            0);
++  }
++  return Raised;
+ }
+ 
+ static const std::vector<StringRef> CPSR({"N_Flag", "Z_Flag", "C_Flag",
+@@ -349,6 +359,11 @@ void IREmitter::emitBinaryCPSR(Value *Inst, BasicBlock *BB, unsigned Opcode,
+                                SDNode *Node) {
+   Value *S0 = getIRValue(Node->getOperand(0));
+   Value *S1 = getIRValue(Node->getOperand(1));
++  // An operand nothing raised leaves the flags where they were: every
++  // builder call below would otherwise dereference a null-typed value.
++  if (S0 == nullptr || S1 == nullptr) {
++    return;
++  }
+ 
+   switch (Opcode) {
+   case Instruction::Add: {
+@@ -359,9 +374,9 @@ void IREmitter::emitBinaryCPSR(Value *Inst, BasicBlock *BB, unsigned Opcode,
+     if (ConstantSDNode::classof(Node->getOperand(1).getNode())) {
+       Value *InstTp = IRB.CreateSub(S0, S0);
+       Value *InstAdd = IRB.CreateAdd(InstTp, S1);
+-      InstNot = IRB.CreateNot(InstAdd);
++      InstNot = (InstAdd != nullptr && InstAdd->getType() != nullptr) ? IRB.CreateNot(InstAdd) : IRB.getInt32(0);
+     } else {
+-      InstNot = IRB.CreateNot(S1, "");
++      InstNot = (S1 != nullptr && S1->getType() != nullptr) ? IRB.CreateNot(S1) : IRB.getInt32(0);
+     }
+     emitCPSR(S0, InstNot, BB, 1);
+   } break;
+@@ -633,28 +648,34 @@ void IREmitter::emitSDNode(SDNode *Node) {
+   case ICmp: {
+     Value *LHS = getIRValue(Node->getOperand(0));
+     Value *RHS = getIRValue(Node->getOperand(1));
++    if (LHS == nullptr || RHS == nullptr) {
++      break; // an operand nothing raised: the flags stay as they were
++    }
+ 
+     Value *InstNot = nullptr;
+     if (ConstantSDNode::classof(Node->getOperand(1).getNode())) {
+       Value *InstTp = IRB.CreateSub(LHS, LHS);
+       Value *InstAdd = IRB.CreateAdd(InstTp, RHS);
+-      InstNot = IRB.CreateNot(InstAdd);
++      InstNot = (InstAdd != nullptr && InstAdd->getType() != nullptr) ? IRB.CreateNot(InstAdd) : IRB.getInt32(0);
+     } else {
+-      InstNot = IRB.CreateNot(RHS);
++      InstNot = (RHS != nullptr && RHS->getType() != nullptr) ? IRB.CreateNot(RHS) : IRB.getInt32(0);
+     }
+     emitCPSR(LHS, InstNot, BB, 1);
+   } break;
+   case FCmp: {
+     Value *LHS = getIRValue(Node->getOperand(0));
+     Value *RHS = getIRValue(Node->getOperand(1));
++    if (LHS == nullptr || RHS == nullptr) {
++      break;
++    }
+ 
+     Value *InstNot = nullptr;
+     if (ConstantSDNode::classof(Node->getOperand(1).getNode())) {
+       Value *InstTp = IRB.CreateSub(LHS, LHS);
+       Value *InstAdd = IRB.CreateAdd(InstTp, RHS);
+-      InstNot = IRB.CreateNot(InstAdd);
++      InstNot = (InstAdd != nullptr && InstAdd->getType() != nullptr) ? IRB.CreateNot(InstAdd) : IRB.getInt32(0);
+     } else {
+-      InstNot = IRB.CreateNot(RHS);
++      InstNot = (RHS != nullptr && RHS->getType() != nullptr) ? IRB.CreateNot(RHS) : IRB.getInt32(0);
+     }
+ 
+     emitCPSR(LHS, InstNot, BB, 1);
+@@ -685,6 +706,10 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      unsigned Cond = cast<ConstantSDNode>(Node->getOperand(1))->getZExtValue();
      // br i1 %cmp, label %if.then, label %if.else
      MachineBasicBlock *MBB = FuncInfo->MBBMap[CurBB];
@@ -426,7 +513,7 @@ index a4dae64..2b2671c 100644
      MachineBasicBlock::succ_iterator SuI = MBB->succ_begin();
      BasicBlock *Iftrue = FuncInfo->getOrCreateBasicBlock(*SuI);
      MachineBasicBlock *NextMBB = &*std::next(MBB->getIterator());
-@@ -695,6 +699,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -695,6 +720,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
    case ISD::BR: {
      // br label %xxx
      MachineBasicBlock *LMBB = FuncInfo->MBBMap[CurBB];
@@ -436,7 +523,15 @@ index a4dae64..2b2671c 100644
      MachineBasicBlock::succ_iterator SuI = LMBB->succ_begin();
      if (SuI != LMBB->succ_end()) {
        BasicBlock *BrDest = FuncInfo->getOrCreateBasicBlock(*SuI);
-@@ -713,17 +720,25 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -704,6 +732,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     LLVM_FALLTHROUGH;
+   }
+   case EXT_ARMISD::BRD: {
++    CallInst *Inst = nullptr;
+     // Get the function call Index.
+     uint64_t Index = Node->getConstantOperandVal(0);
+     // Get function from ModuleRaiser.
+@@ -713,24 +742,42 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      bool IsSyscall = false;
      if (CallFunc == nullptr) {
        // According to MI to get BL instruction address.
@@ -459,19 +554,37 @@ index a4dae64..2b2671c 100644
 +          IFFuncArgNum = MR->getFunctionArgNum(CallAddr);
 +          IsSyscall = true;
 +        }
-       }
-     }
--    assert(CallFunc && "Failed to get called function!");
++      }
++    }
 +    if (CallFunc == nullptr) {
 +      // The obfuscated code reaches calls whose target neither the PLT walk
-+      // nor the syscall map named. The debug assert was a release null
-+      // dereference; skipping the emission keeps the rest of the block.
++      // nor the syscall map named. Skipping the emission would leave the
++      // node without a value, and whatever reads it later walks on type
++      // garbage; a variadic placeholder keeps the node and the state
++      // consistent instead.
++      FunctionType *PlaceholderTy =
++          FunctionType::get(Type::getInt32Ty(M.getContext()), true);
++      Function *Placeholder = M.getFunction("mctoll_unknown_call");
++      if (Placeholder == nullptr) {
++        Placeholder = Function::Create(PlaceholderTy, Function::ExternalLinkage,
++                                       "mctoll_unknown_call", M);
+       }
++      CallInst *PHCall = IRB.CreateCall(Placeholder, {});
++      DAGInfo->setRealValue(Node, PHCall);
 +      break;
-+    }
+     }
+-    assert(CallFunc && "Failed to get called function!");
      // Get argument number from callee.
      unsigned ArgNum = CallFunc->arg_size();
      if (IFFuncArgNum > ArgNum)
-@@ -778,11 +793,18 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+       ArgNum = IFFuncArgNum;
+     Argument *CalledFuncArgs = CallFunc->arg_begin();
+     std::vector<Value *> CallInstFuncArgs;
+-    CallInst *Inst = nullptr;
+     if (ArgNum > 0) {
+       Value *ArgVal = nullptr;
+       const MachineFrameInfo &MFI = FuncInfo->MF->getFrameInfo();
+@@ -778,11 +825,18 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      // Emit the switch instruction.
      if (JTList.size() > 0) {
        MachineBasicBlock *Mbb = FuncInfo->MBBMap[CurBB];
@@ -494,7 +607,7 @@ index a4dae64..2b2671c 100644
        std::vector<MachineJumpTableEntry> JumpTables = MJT->getJumpTables();
        for (unsigned Idx = 0, MBBSz = JumpTables[JTIndex].MBBs.size();
             Idx != MBBSz; ++Idx) {
-@@ -804,6 +826,8 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -804,6 +858,8 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
  
        // conditon instruction
        Instruction *CondInst = nullptr;
@@ -503,7 +616,7 @@ index a4dae64..2b2671c 100644
        for (BasicBlock::iterator DI = CondBB->begin(); DI != CondBB->end();
             DI++) {
          Instruction *Ins = dyn_cast<Instruction>(DI);
-@@ -814,12 +838,16 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -814,12 +870,16 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
          if (CondInst && (Ins->getOpcode() == Instruction::Sub)) {
            if (isa<ConstantInt>(Ins->getOperand(1))) {
              ConstantInt *IntOp = dyn_cast<ConstantInt>(Ins->getOperand(1));
@@ -521,6 +634,36 @@ index a4dae64..2b2671c 100644
  
        SwitchInst *Inst = IRB.CreateSwitch(CondInst, DefBB, NumCases);
        for (unsigned Idx = 0, Cnt = NumCases; Idx != Cnt; ++Idx) {
+@@ -1064,7 +1124,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+         Value *CZext = IRB.CreateZExt(CFlag, Ty);
+         Value *InstSBC = IRB.CreateAdd(InstSub, CZext);
+         DAGInfo->setRealValue(Node, InstSBC);
+-        Value *InstNot = IRB.CreateNot(S2);
++        Value *InstNot = (S2 != nullptr && S2->getType() != nullptr) ? IRB.CreateNot(S2) : IRB.getInt32(0);
+         if (1)
+           emitCPSR(S1, InstNot, BB, 0);
+         else
+@@ -1285,7 +1345,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+         DAGInfo->setRealValue(Node, Inst);
+         FuncInfo->ArgValMap[FuncInfo->NodeRegMap[Node]] = Inst;
+ 
+-        Value *InstNot = IRB.CreateNot(S1);
++        Value *InstNot = (S1 != nullptr && S1->getType() != nullptr) ? IRB.CreateNot(S1) : IRB.getInt32(0);
+         emitCPSR(InstNot, S0, BB, 1);
+       } else {
+         HANDLE_EMIT_CONDCODE(Sub)
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1eea23d..741544f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -83,3 +83,7 @@ if(HAVE_LIBXAR)
+   target_link_libraries(llvm-mctoll PRIVATE ${XAR_LIB})
+ endif()
+ 
++
++# The obfuscated-input hunt: the tool's own allocations instrumented.
++target_compile_options(llvm-mctoll PRIVATE -fsanitize=address)
++target_link_options(llvm-mctoll PRIVATE -fsanitize=address)
 diff --git a/Raiser/MCInstRaiser.cpp b/Raiser/MCInstRaiser.cpp
 index a7b2256..cd06c02 100644
 --- a/Raiser/MCInstRaiser.cpp
