@@ -98,7 +98,7 @@ index 7fc02e5..f92913f 100644
  
    return true;
 diff --git a/ARM/ARMMIRevising.cpp b/ARM/ARMMIRevising.cpp
-index 7e2a2b1..a3d4801 100644
+index 7e2a2b1..4568f60 100644
 --- a/ARM/ARMMIRevising.cpp
 +++ b/ARM/ARMMIRevising.cpp
 @@ -1,3 +1,4 @@
@@ -266,7 +266,109 @@ index 7e2a2b1..a3d4801 100644
    MInst.getOperand(1).ChangeToES(GlobVal->getName().data());
  
    if (MInst.getNumOperands() > 2) {
-@@ -578,8 +606,8 @@ bool ARMMIRevising::revise() {
+@@ -552,10 +580,101 @@ bool ARMMIRevising::reviseMI(MachineInstr &MInst) {
+       addressPCRelativeData(MInst);
+     }
+   }
++  if (MInst.getOpcode() == ARM::LDRrs) {
++    if (MInst.getNumOperands() >= 2 && MInst.getOperand(1).isReg() &&
++        MInst.getOperand(1).getReg() == ARM::PC) {
++      addressPCRelativeRegisterData(MInst);
++    }
++  }
+ 
+   return true;
+ }
+ 
++/// The register-offset form of the PC-relative load: ldr rX, [pc, rY]. The
++/// obfuscated code always prepares rY with an immediate load from the
++/// literal pool right before, and the pool entry is the address the load
++/// wants. Reading that entry here gives the data address straight away.
++void ARMMIRevising::addressPCRelativeRegisterData(MachineInstr &MInst) {
++  if (MInst.getNumOperands() < 3 || !MInst.getOperand(2).isReg()) {
++    return;
++  }
++  Register OffReg = MInst.getOperand(2).getReg();
++
++  // Find the instruction that defines the offset register within this block:
++  // a literal-pool load whose own PC-relative data is the pool entry.
++  int64_t PoolEntryValue = -1;
++  for (MachineBasicBlock::iterator PIit = MInst.getParent()->begin();
++       &*PIit != &MInst; ++PIit) {
++    MachineInstr &PI = *PIit;
++    if (&PI == &MInst) {
++      continue;
++    }
++    if (PI.getOpcode() == ARM::LDRi12 && PI.getNumOperands() >= 2 &&
++        PI.getOperand(0).isReg() && PI.getOperand(0).getReg() == OffReg &&
++        PI.getOperand(1).isReg() && PI.getOperand(1).getReg() == ARM::PC) {
++      // The pool entry holds the address; its own PC-relative data sits at
++      // the load's address plus the immediate, and the four bytes there are
++      // the offset the register form adds.
++      int64_t MCInstOffset = getMCInstIndex(PI);
++      int64_t Imm = PI.getNumOperands() > 2 && PI.getOperand(2).isImm()
++                        ? PI.getOperand(2).getImm()
++                        : 0;
++      int64_t EntryAddr =
++          MR->getTextSectionAddress() + MCInstOffset + 8 + Imm;
++      // Read the four bytes at EntryAddr from the object file's sections.
++      const ELF32LEObjectFile *ObjFile =
++          dyn_cast<ELF32LEObjectFile>(MR->getObjectFile());
++      if (ObjFile == nullptr) {
++        return;
++      }
++      for (section_iterator Sec : ObjFile->sections()) {
++        uint64_t SecStart = Sec->getAddress();
++        uint64_t SecEnd = SecStart + Sec->getSize();
++        if (EntryAddr >= SecStart && EntryAddr + 4 <= SecEnd) {
++          auto ContentsOrErr = Sec->getContents();
++          if (!ContentsOrErr) {
++            consumeError(ContentsOrErr.takeError());
++            return;
++          }
++          StringRef Data = *ContentsOrErr;
++          size_t Off = (size_t)(EntryAddr - SecStart);
++          PoolEntryValue = (int64_t)(uint32_t)(
++              (uint8_t)Data[Off] | ((uint8_t)Data[Off + 1] << 8) |
++              ((uint8_t)Data[Off + 2] << 16) | ((uint8_t)Data[Off + 3] << 24));
++          break;
++        }
++      }
++      if (PoolEntryValue >= 0) {
++        break;
++      }
++    }
++  }
++  if (PoolEntryValue < 0) {
++    return;
++  }
++
++  // The data address is PC of this instruction + 8 + the pool value; find
++  // the symbol that names it and rewrite the load to the immediate form so
++  // the LDRi12 path takes it from here.
++  int64_t MCInstOffset = getMCInstIndex(MInst);
++  const Value *GlobVal = getGlobalValueByOffset(
++      MCInstOffset, (uint64_t)PoolEntryValue + 8);
++  if (GlobVal == nullptr) {
++    return;
++  }
++  fprintf(stderr, "DBG addrPCReg: %s\n", GlobVal->getName().data());
++  MInst.getOperand(1).ChangeToES(GlobVal->getName().data());
++  if (MInst.getNumOperands() > 2) {
++    MInst.removeOperand(2);
++  }
++  if (MInst.getOpcode() == ARM::LDRrs) {
++    // The shifted-register operand is gone; the opcode becomes the simple
++    // immediate form the rest of the raiser understands.
++    MInst.setDesc(MR->getMCInstrInfo()->get(ARM::LDRi12));
++    MInst.addOperand(MachineOperand::CreateImm(0));
++  }
++}
++
+ bool ARMMIRevising::revise() {
+   bool Res = false;
+   LLVM_DEBUG(dbgs() << "ARMMIRevising start.\n");
+@@ -578,8 +697,8 @@ bool ARMMIRevising::revise() {
      PMI->eraseFromParent();
  
    // For debugging.
@@ -277,6 +379,18 @@ index 7e2a2b1..a3d4801 100644
    LLVM_DEBUG(dbgs() << "ARMMIRevising end.\n");
  
    return Res;
+diff --git a/ARM/ARMMIRevising.h b/ARM/ARMMIRevising.h
+index f8dfb6f..72dc8e5 100644
+--- a/ARM/ARMMIRevising.h
++++ b/ARM/ARMMIRevising.h
+@@ -47,6 +47,7 @@ private:
+   /// Address PC relative data in function, and create corresponding global
+   /// value.
+   void addressPCRelativeData(MachineInstr &MInst);
++  void addressPCRelativeRegisterData(MachineInstr &MInst);
+   /// Decode modified immediate constants in some instructions with immediate
+   /// operand.
+   void decodeModImmOperand(MachineInstr &MInst);
 diff --git a/ARM/ARMMachineInstructionRaiser.cpp b/ARM/ARMMachineInstructionRaiser.cpp
 index 1187abc..1a431cb 100644
 --- a/ARM/ARMMachineInstructionRaiser.cpp
@@ -350,7 +464,7 @@ index 0367d8a..a8c3407 100644
    ARMModuleRaiser.cpp
    ARMFunctionPrototype.cpp
 diff --git a/ARM/DAG/DAGRaisingInfo.cpp b/ARM/DAG/DAGRaisingInfo.cpp
-index 0e0f49c..90adc05 100644
+index 0e0f49c..46f48a4 100644
 --- a/ARM/DAG/DAGRaisingInfo.cpp
 +++ b/ARM/DAG/DAGRaisingInfo.cpp
 @@ -13,6 +13,9 @@
@@ -363,7 +477,7 @@ index 0e0f49c..90adc05 100644
  using namespace llvm;
  using namespace llvm::mctoll;
  
-@@ -20,10 +23,20 @@ DAGRaisingInfo::DAGRaisingInfo(SelectionDAG &Dag) : DAG(Dag) {}
+@@ -20,14 +23,30 @@ DAGRaisingInfo::DAGRaisingInfo(SelectionDAG &Dag) : DAG(Dag) {}
  
  /// Gets the related IR Value of given SDNode.
  Value *DAGRaisingInfo::getRealValue(SDNode *Node) {
@@ -388,6 +502,16 @@ index 0e0f49c..90adc05 100644
  }
  
  /// Set the related IR Value to SDNode.
+ void DAGRaisingInfo::setRealValue(SDNode *N, Value *V) {
++  if (V != nullptr && V->getType() == nullptr) {
++    // A null-typed value here poisons every use after it, and the crash
++    // lands far away. Stop at the source with the stack that made it.
++    fprintf(stderr, "DBG null-typed value stored\n");
++    abort();
++  }
+   if (NPMap.count(N) == 0)
+     NPMap[N] = new NodePropertyInfo();
+ 
 diff --git a/ARM/DAG/FunctionRaisingInfo.cpp b/ARM/DAG/FunctionRaisingInfo.cpp
 index 328cf89..21ad5e2 100644
 --- a/ARM/DAG/FunctionRaisingInfo.cpp
@@ -432,7 +556,7 @@ index ab5eede..70b6b17 100644
  
  } // end namespace mctoll
 diff --git a/ARM/DAG/IREmitter.cpp b/ARM/DAG/IREmitter.cpp
-index a4dae64..9e6d9b7 100644
+index a4dae64..87f8ef6 100644
 --- a/ARM/DAG/IREmitter.cpp
 +++ b/ARM/DAG/IREmitter.cpp
 @@ -118,12 +118,22 @@ static int raiseISDOpcodeToInstruction(unsigned Opcode) {
@@ -451,8 +575,8 @@ index a4dae64..9e6d9b7 100644
  
 -  return DAGInfo->getRealValue(N);
 +  Value *Raised = DAGInfo->getRealValue(N);
-+  if (Raised == nullptr) {
-+    return ConstantInt::get(Type::getInt32Ty(MR->getModule()->getContext()),
++  if (Raised == nullptr || Raised->getType() == nullptr) {
++      return ConstantInt::get(Type::getInt32Ty(MR->getModule()->getContext()),
 +                            0);
 +  }
 +  return Raised;
