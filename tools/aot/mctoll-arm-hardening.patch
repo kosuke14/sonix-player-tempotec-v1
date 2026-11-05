@@ -316,15 +316,17 @@ index b9513ef..5566406 100644
  
    return true;
 diff --git a/ARM/CMakeLists.txt b/ARM/CMakeLists.txt
-index 0367d8a..d8c8077 100644
+index 0367d8a..a8c3407 100644
 --- a/ARM/CMakeLists.txt
 +++ b/ARM/CMakeLists.txt
-@@ -10,6 +10,9 @@ if(NOT LLVM_MCTOLL_BUILT_STANDALONE)
+@@ -10,6 +10,11 @@ if(NOT LLVM_MCTOLL_BUILT_STANDALONE)
    set(LLVM_MCTOLL_DEPS intrinsics_gen ARMCommonTableGen)
  endif()
  
-+set_source_files_properties(ARMMIRevising.cpp PROPERTIES
++set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ARMMIRevising.cpp PROPERTIES
 +  COMPILE_OPTIONS "-O1;-g;-fsanitize=address")
++set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/DAG/IREmitter.cpp PROPERTIES
++  COMPILE_OPTIONS "-O0;-g;-fsanitize=address")
 +
  add_llvm_library(mctollARMRaiser
    ARMModuleRaiser.cpp
@@ -412,7 +414,7 @@ index ab5eede..70b6b17 100644
  
  } // end namespace mctoll
 diff --git a/ARM/DAG/IREmitter.cpp b/ARM/DAG/IREmitter.cpp
-index a4dae64..936b035 100644
+index a4dae64..9e6d9b7 100644
 --- a/ARM/DAG/IREmitter.cpp
 +++ b/ARM/DAG/IREmitter.cpp
 @@ -118,12 +118,22 @@ static int raiseISDOpcodeToInstruction(unsigned Opcode) {
@@ -439,7 +441,19 @@ index a4dae64..936b035 100644
  }
  
  static const std::vector<StringRef> CPSR({"N_Flag", "Z_Flag", "C_Flag",
-@@ -349,6 +359,11 @@ void IREmitter::emitBinaryCPSR(Value *Inst, BasicBlock *BB, unsigned Opcode,
+@@ -345,10 +355,23 @@ Type *IREmitter::getIntTypeByPtr(Type *PTy) {
+   IRB.CreateBr(ElseBB);                                                        \
+   IRB.SetInsertPoint(ElseBB);
+ 
++// The node property lookup: operator[] would create a null entry and the
++// flag reads that follow were the recurring null-plus-offset crash. Nodes
++// the raiser never described simply carry no flags.
++static NodePropertyInfo *findNodeProps(DAGRaisingInfo *DAGInfo, SDNode *Node) {
++  auto It = DAGInfo->NPMap.find(Node);
++  return It != DAGInfo->NPMap.end() ? It->second : nullptr;
++}
++
+ void IREmitter::emitBinaryCPSR(Value *Inst, BasicBlock *BB, unsigned Opcode,
                                 SDNode *Node) {
    Value *S0 = getIRValue(Node->getOperand(0));
    Value *S1 = getIRValue(Node->getOperand(1));
@@ -451,7 +465,7 @@ index a4dae64..936b035 100644
  
    switch (Opcode) {
    case Instruction::Add: {
-@@ -359,9 +374,9 @@ void IREmitter::emitBinaryCPSR(Value *Inst, BasicBlock *BB, unsigned Opcode,
+@@ -359,9 +382,9 @@ void IREmitter::emitBinaryCPSR(Value *Inst, BasicBlock *BB, unsigned Opcode,
      if (ConstantSDNode::classof(Node->getOperand(1).getNode())) {
        Value *InstTp = IRB.CreateSub(S0, S0);
        Value *InstAdd = IRB.CreateAdd(InstTp, S1);
@@ -463,7 +477,48 @@ index a4dae64..936b035 100644
      }
      emitCPSR(S0, InstNot, BB, 1);
    } break;
-@@ -633,28 +648,34 @@ void IREmitter::emitSDNode(SDNode *Node) {
+@@ -435,11 +458,12 @@ void IREmitter::emitBinary(SDNode *Node) {
+   switch (InstOpc) {
+ #define HANDLE_BINARY(OPCODE)                                                  \
+   case Instruction::OPCODE: {                                                  \
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {                                       \
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;                         \
+-      if (!(DAGInfo->NPMap[Node]->UpdateCPSR)) {                               \
++    NodePropertyInfo *NPBin = findNodeProps(DAGInfo, Node);                    \
++    if (NPBin != nullptr && NPBin->HasCPSR) {                                  \
++      unsigned CondValue = NPBin->Cond;                                        \
++      if (!NPBin->UpdateCPSR) {                                                \
+         HANDLE_EMIT_CONDCODE(OPCODE)                                           \
+-      } else if (DAGInfo->NPMap[Node]->Special) {                              \
++      } else if (NPBin->Special) {                                             \
+         HANDLE_EMIT_CONDCODE_COMMON(OPCODE)                                    \
+         emitBinaryCPSR(Inst, IfBB, InstOpc, Node);                             \
+         IRB.CreateBr(ElseBB);                                                  \
+@@ -533,8 +557,9 @@ void IREmitter::emitSDNode(SDNode *Node) {
+           S, Node->getValueType(0).getTypeForEVT(*CTX)->getPointerTo());
+ 
+     Value *Inst = nullptr;
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+       // Create new BB for EQ instructin exectute.
+       BasicBlock *IfBB = BasicBlock::Create(*CTX, "", BB->getParent());
+       // Create new BB to update the DAG BB.
+@@ -609,8 +634,9 @@ void IREmitter::emitSDNode(SDNode *Node) {
+       Ptr = IRB.CreateIntToPtr(S, Nty->getPointerTo());
+     }
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+       // Create new BB for EQ instructin exectute.
+       BasicBlock *IfBB = BasicBlock::Create(*CTX, "", BB->getParent());
+       // Create new BB to update the DAG BB.
+@@ -633,28 +659,34 @@ void IREmitter::emitSDNode(SDNode *Node) {
    case ICmp: {
      Value *LHS = getIRValue(Node->getOperand(0));
      Value *RHS = getIRValue(Node->getOperand(1));
@@ -502,7 +557,7 @@ index a4dae64..936b035 100644
      }
  
      emitCPSR(LHS, InstNot, BB, 1);
-@@ -685,6 +706,10 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -685,6 +717,10 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      unsigned Cond = cast<ConstantSDNode>(Node->getOperand(1))->getZExtValue();
      // br i1 %cmp, label %if.then, label %if.else
      MachineBasicBlock *MBB = FuncInfo->MBBMap[CurBB];
@@ -513,7 +568,7 @@ index a4dae64..936b035 100644
      MachineBasicBlock::succ_iterator SuI = MBB->succ_begin();
      BasicBlock *Iftrue = FuncInfo->getOrCreateBasicBlock(*SuI);
      MachineBasicBlock *NextMBB = &*std::next(MBB->getIterator());
-@@ -695,6 +720,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -695,6 +731,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
    case ISD::BR: {
      // br label %xxx
      MachineBasicBlock *LMBB = FuncInfo->MBBMap[CurBB];
@@ -523,7 +578,7 @@ index a4dae64..936b035 100644
      MachineBasicBlock::succ_iterator SuI = LMBB->succ_begin();
      if (SuI != LMBB->succ_end()) {
        BasicBlock *BrDest = FuncInfo->getOrCreateBasicBlock(*SuI);
-@@ -704,6 +732,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -704,6 +743,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      LLVM_FALLTHROUGH;
    }
    case EXT_ARMISD::BRD: {
@@ -531,7 +586,7 @@ index a4dae64..936b035 100644
      // Get the function call Index.
      uint64_t Index = Node->getConstantOperandVal(0);
      // Get function from ModuleRaiser.
-@@ -713,24 +742,42 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -713,24 +753,42 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      bool IsSyscall = false;
      if (CallFunc == nullptr) {
        // According to MI to get BL instruction address.
@@ -584,7 +639,7 @@ index a4dae64..936b035 100644
      if (ArgNum > 0) {
        Value *ArgVal = nullptr;
        const MachineFrameInfo &MFI = FuncInfo->MF->getFrameInfo();
-@@ -778,11 +825,18 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -778,11 +836,18 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
      // Emit the switch instruction.
      if (JTList.size() > 0) {
        MachineBasicBlock *Mbb = FuncInfo->MBBMap[CurBB];
@@ -607,7 +662,7 @@ index a4dae64..936b035 100644
        std::vector<MachineJumpTableEntry> JumpTables = MJT->getJumpTables();
        for (unsigned Idx = 0, MBBSz = JumpTables[JTIndex].MBBs.size();
             Idx != MBBSz; ++Idx) {
-@@ -804,6 +858,8 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -804,6 +869,8 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
  
        // conditon instruction
        Instruction *CondInst = nullptr;
@@ -616,7 +671,7 @@ index a4dae64..936b035 100644
        for (BasicBlock::iterator DI = CondBB->begin(); DI != CondBB->end();
             DI++) {
          Instruction *Ins = dyn_cast<Instruction>(DI);
-@@ -814,12 +870,16 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -814,12 +881,16 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
          if (CondInst && (Ins->getOpcode() == Instruction::Sub)) {
            if (isa<ConstantInt>(Ins->getOperand(1))) {
              ConstantInt *IntOp = dyn_cast<ConstantInt>(Ins->getOperand(1));
@@ -634,7 +689,90 @@ index a4dae64..936b035 100644
  
        SwitchInst *Inst = IRB.CreateSwitch(CondInst, DefBB, NumCases);
        for (unsigned Idx = 0, Cnt = NumCases; Idx != Cnt; ++Idx) {
-@@ -1064,7 +1124,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -835,10 +906,11 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Type *Ty = getDefaultType();
+     Value *Val = ConstantInt::get(Ty, 32, true);
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+ 
+-      if (DAGInfo->NPMap[Node]->UpdateCPSR) {
++      if (NP != nullptr && NP->UpdateCPSR) {
+         Value *InstSub = IRB.CreateSub(Val, S1);
+         Value *InstLShr = IRB.CreateLShr(S0, S1);
+         Value *InstShl = IRB.CreateShl(S0, InstSub);
+@@ -881,10 +953,11 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Type *Ty = getDefaultType();
+     Value *Val1 = ConstantInt::get(Ty, 1, true);
+     Value *Val2 = ConstantInt::get(Ty, 31, true);
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+ 
+-      if (DAGInfo->NPMap[Node]->UpdateCPSR) {
++      if (NP != nullptr && NP->UpdateCPSR) {
+         Value *InstLShr = IRB.CreateLShr(S0, Val1);
+         Value *CFlag = callCreateAlignedLoad(FuncInfo->AllocaMap[2]);
+         CFlag = IRB.CreateZExt(CFlag, Ty);
+@@ -938,10 +1011,11 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Type *Ty = getDefaultType();
+     Value *Val = ConstantInt::get(Ty, -1, true);
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+ 
+-      if (DAGInfo->NPMap[Node]->UpdateCPSR) {
++      if (NP != nullptr && NP->UpdateCPSR) {
+         Value *InstXor = IRB.CreateXor(Val, S1);
+         Value *Inst = IRB.CreateAnd(S0, InstXor);
+ 
+@@ -983,8 +1057,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+   case ARMISD::CMN: {
+     Value *S0 = getIRValue(Node->getOperand(0));
+     Value *S1 = getIRValue(Node->getOperand(1));
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+       HANDLE_EMIT_CONDCODE_COMMON(Add)
+       emitCPSR(S0, S1, IfBB, 0);
+       IRB.CreateBr(ElseBB);
+@@ -1027,8 +1102,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Value *S0 = getIRValue(Node->getOperand(0));
+     Value *S1 = getIRValue(Node->getOperand(1));
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+       // Create new BB for EQ instructin exectute.
+       BasicBlock *IfBB = BasicBlock::Create(*CTX, "", BB->getParent());
+       // Create new BB to update the DAG BB.
+@@ -1054,17 +1130,18 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Value *S2 = getIRValue(Node->getOperand(1));
+     Type *Ty = getDefaultType();
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+ 
+-      if (DAGInfo->NPMap[Node]->UpdateCPSR) {
++      if (NP != nullptr && NP->UpdateCPSR) {
+         Value *InstSub = IRB.CreateSub(S1, S2);
+         Value *CFlag = nullptr;
+         CFlag = callCreateAlignedLoad(FuncInfo->AllocaMap[2]);
          Value *CZext = IRB.CreateZExt(CFlag, Ty);
          Value *InstSBC = IRB.CreateAdd(InstSub, CZext);
          DAGInfo->setRealValue(Node, InstSBC);
@@ -643,7 +781,46 @@ index a4dae64..936b035 100644
          if (1)
            emitCPSR(S1, InstNot, BB, 0);
          else
-@@ -1285,7 +1345,7 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+@@ -1102,8 +1179,9 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Value *S0 = getIRValue(Node->getOperand(0));
+     Value *S1 = getIRValue(Node->getOperand(1));
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+       // Create new BB for EQ instructin exectute.
+       BasicBlock *IfBB = BasicBlock::Create(*CTX, "", BB->getParent());
+       // Create new BB to update the DAG BB.
+@@ -1197,10 +1275,11 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Value *S1 = getIRValue(Node->getOperand(1));
+     Type *OperandTy = getDefaultType();
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
+ 
+-      if (DAGInfo->NPMap[Node]->UpdateCPSR) {
++      if (NP != nullptr && NP->UpdateCPSR) {
+         // Create add emit.
+         Value *CFlag = callCreateAlignedLoad(FuncInfo->AllocaMap[2]);
+         Value *Result = IRB.CreateAdd(S0, S1);
+@@ -1277,15 +1356,16 @@ void IREmitter::emitSpecialNode(SDNode *Node) {
+     Value *S0 = getIRValue(Node->getOperand(0));
+     Value *S1 = getIRValue(Node->getOperand(1));
+ 
+-    if (DAGInfo->NPMap[Node]->HasCPSR) {
+-      unsigned CondValue = DAGInfo->NPMap[Node]->Cond;
+-      if (DAGInfo->NPMap[Node]->UpdateCPSR) {
++    NodePropertyInfo *NP = findNodeProps(DAGInfo, Node);
++    if (NP != nullptr && NP->HasCPSR) {
++      unsigned CondValue = NP != nullptr ? NP->Cond : 0;
++      if (NP != nullptr && NP->UpdateCPSR) {
+         // Create add emit.
+         Value *Inst = IRB.CreateSub(S0, S1);
          DAGInfo->setRealValue(Node, Inst);
          FuncInfo->ArgValMap[FuncInfo->NodeRegMap[Node]] = Inst;
  
