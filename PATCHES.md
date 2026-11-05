@@ -23,7 +23,9 @@ font faces to compact raster sizes; and gives shared headers, settings rows,
 grids and status icons compact geometry.
 
 Rounded screen corners, the optional black quarter-circles on the system layer
-in Settings → Appearance, use **16 px** on this board (`bp_screen_corner_radius()`).
+in Settings → Appearance, start at **16 px** on this board
+(`bp_screen_corner_radius()`); a slider under the switch moves them from 2 to
+20 px ([A choice of corners](#a-choice-of-corners-and-the-original-play-button)).
 The mask the helpers were originally written beside is 28 px on a 480-wide
 panel; 28 px here would swallow the 24 px status bar, and 14 px (half of 28 by
 pixel count) undershoots the 2" IPS, whose visible corner is about 2 mm. The masks are A8, built the first time
@@ -1135,9 +1137,10 @@ the one after that would use them back again:
 * the control centre parks below the bottom edge in the stock arrangement and
   above the top edge in the classic one, keeps its grabber under the status bar
   in the first and at the foot of the sheet in the second, and gives the drag the
-  one free direction it has — the extra button rows are stretched out by a drag
-  in the classic arrangement, where downwards is free, and by a tap on the handle
-  under the brightness slider in the stock one, where downwards is the way out;
+  one free direction it has — a drag that is mostly vertical and towards the edge
+  the sheet came from carries it away in both arrangements, and the extra buttons
+  are on a second page that is swiped sideways, so no direction has to be shared
+  with them (see "The control centre's second page");
 * Cover Flow parks above the top edge in the stock arrangement and below the
   bottom edge in the classic one, with its grip at the foot of the sheet in the
   first and under the status bar in the second, and the row is laid out around
@@ -1160,6 +1163,99 @@ sheet the arrangement puts at the top — the control centre in the classic one,
 Cover Flow in the stock one — because hiding the bar must not take the gesture
 away with it. The reader and the two games hide it behind a full-screen picture
 instead, and they keep their own presses.
+
+## The control centre's second page
+
+The control centre has held sixteen buttons for some time, but only eight were
+visible: the other eight were behind a stretch of the card that was pulled down
+over the now-playing card (classic gestures) or unfolded with a handle (stock
+gestures). That was a gesture borrowed from the way the sheet itself moves, and
+it was a different gesture in each arrangement. It is replaced by what a reader
+of a phone's home screen already knows: **two pages, side by side, swiped
+sideways**.
+
+`pages_view` is a window the width of the card's inside and `row_h` high, with
+`LV_SCROLL_SNAP_START`, `scroll_one`, no elasticity and no momentum, so one flick
+is one page and a page cannot be left half-turned. It holds `QP_PAGE_COUNT`
+(`QP_SLOT_COUNT / QP_SLOT_VISIBLE`, so two) wrapping flexes of four to a line --
+the very flex the single row used to be -- and `order_apply()` puts the in-use
+slot *i* on page *i / 8*. The brightness (or volume) row stays where it is under
+the pages. With nothing past the eighth place, scrolling is switched off and the
+panel looks and behaves exactly as before; with something there, the card grows
+by `DOTS_ROOM` at the expense of the now-playing card's height and a pair of dots
+appears under the slider. The dots are what is shown and the strip round them is
+what a tap finds: it turns to the next page. `panel_prepare()` always opens on the
+first page.
+
+The sheet's own drag has a rule of its own to keep from fighting the swipe: it
+engages only when the finger has moved eight pixels towards the close direction
+*and* further vertically than horizontally, and not at all once LVGL has claimed
+the press for the page row. A thumb that starts a sideways swipe on a button and
+drifts upwards on the way no longer takes the whole sheet with it.
+
+### Ten new buttons
+
+The second page is for things that were wanted with the player in the hand and
+were several taps deep in Settings. All reuse the setting's own API, so nothing
+is duplicated: **airplane** (see below), **crossfeed**, **soundfield**, **mono**
+(`*_set_enabled()`, the same as the audio pages), **replaygain** (off, or the
+mode last saved in `[audio] replaygain_last`, and the track already loaded is
+measured again at once as the playback page does), **keylock** and **led**
+(`[power] lock_keys_screen_off` / `led_on` through `powersettings_apply()`),
+**rotate** (`display_set_rotated()` and `[screen] rotate_180`, with the
+"unavailable" popup where the display cannot do it), **screen_off** and **power**
+(the sheet goes away, then `power_screen_off()` / `powermenu_show()`).
+
+Airplane mode is not a setting of its own, only two others switched at once, so
+it is lit while it is *true*: `[quickpanel] airplane` is set **and** both radios
+are off. Switching either radio back on from anywhere ends it without anyone
+having to say so. The way into it writes down what was on in
+`airplane_wifi`/`airplane_bt`, and the way out restores exactly that.
+
+A long press on a toggle with a page of its own opens it (`second_page_hold_cb`
+looks the page up at the press, since not every page exists when the buttons are
+built). The Soundfield, Crossfeed, playback and power pages now read their
+switches again when they come up, because the control centre changes the same
+settings from outside; `musicsettings_soundfield_screen()` and
+`musicsettings_crossfeed_screen()` are the two new accessors.
+
+### Edit mode
+
+A long press on the controls card where there is no button (`edit_enter_cb`
+checks the event's target: the card, `pages_view`, a page or the dots; a button's
+own long press still opens its page) calls `edit_set(true)`. Every tile gets an
+outline, the picked-up one a heavier one, and the level row is swapped for a Done
+button of the same height, so nothing moves. A transparent `edit_overlay` is laid
+over `pages_view`: it takes the taps off the tiles without touching their
+handlers, hit-tests the current page's children itself (`edit_tile_at`), and turns
+a sideways swipe into a page turn since the page row can no longer be scrolled
+through it. `edit_tap()` picks a tile up, or swaps it with the picked-up one in
+`slots[]` and goes through `layout_changed()`, which saves and re-applies like the
+settings page's moves. Swaps were chosen over a drag because the lists are kept
+compact and a swap needs no drop target. `panel_prepare()` always leaves edit
+mode, so the sheet never opens in it. The swap logic is covered in
+`test_quickpanel_layout.c`; the overlay and the long press need a device.
+
+### Layout and migration
+
+The ten buttons are appended to the enum after `QP_BTN_PEQ_PROFILE`; their keys
+(`airplane`, `crossfeed`, `soundfield`, `replaygain`, `mono`, `keylock`, `led`,
+`rotate`, `screen_off`, `power`) are what is saved and are never to be renamed.
+A **saved** layout is never rearranged: the ten join the list of buttons waiting
+in Settings, like the sleep timers did. A config that has never carried a layout
+at all gets the panel as it ships: page one is the eight it has always opened
+with and page two is the PEQ, airplane, crossfeed, ReplayGain, mono, key lock,
+screen off and power buttons, with the remaining buttons in "not in use".
+
+With 27 buttons the list of buttons left out can hold more than the two keys
+(`hidden`, `hidden_more`) allow, so `hidden_more2` and `hidden_more3` carry the
+rest, eight names to a key as before (a setting is 127 characters). Older builds
+read the first two and ignore the others, which loses nothing they knew of.
+
+`order_apply()` also gained `button_available()`: a button whose module is off in
+Plugins (MSEB, EQ, PEQ, Mono, Soundfield, Crossfeed) is hidden and the page
+closes up round it. Before, `order_apply()` un-hid every button in the grid, which
+undid the hiding done when the buttons were built.
 
 ## The control centre's slider, as brightness or as volume
 
@@ -3187,3 +3283,159 @@ text toast, including during the reward cooldown. The existing petting and
 once-daily grooming rules are unchanged. The headless page test checks the
 smile, pendant-free chain, playback transitions, and the visual petting
 feedback on the V1 renderer; the appearance should also be checked on device.
+
+## Built on the real stock firmware 1.3
+
+The stock image the build used until now was committed as "1.3" but was not:
+its `usr/resource/config.json` says product version 1.2, and its kernel is the
+earlier build. The official V1 1.3 OTA is now in `sonix-packer/firmware-input`
+as `v1.zip.part1` + `v1.zip.part2`, two byte-split pieces of one zip, and every
+build starts from it. Hashes and preparation steps are in
+[the firmware input README](sonix-packer/firmware-input/README.md).
+
+What 1.3 changes, from a file-by-file comparison of the two stock images:
+
+- **A compatibility marker.** `ota_v0/ota_compatibility.in`
+  (`compatibility=tempotec_v1_x1600_auto`) sits beside `ota_update.in`. The
+  earlier package has no such file. Nothing in the 1.3 rootfs or kernel reads
+  it, so whatever checks it sits outside the update. This is probably the
+  recovery/updater on units shipped with 1.3, but that cannot be inspected
+  from the OTA. An image built on the 1.2 package lacks the marker, which is
+  one plausible reason it did not work on 1.3.
+- **The kernel.** `#120` of 13 October 2026. Compared with the 1.2 kernel, the
+  only functional addition found is one more SPI NAND chip (Zbit
+  `ZB35Q01CYIG`). A unit built with that chip needs the 1.3 kernel, the second
+  plausible reason. The partition table comes from u-boot, not the kernel.
+- **The rootfs.** Rebuilt drivers, busybox, `sys_server`, `dmrd` (QPlay 3) and
+  the Bluetooth, USB and Wi-Fi scripts. The new script logic is gated on AIC8800
+  radios and the HiBy R1 (`/run/aic_*_power_gate`, `/run/r1_wireless_type`),
+  so it stays inactive on the Broadcom-based V1. Unchanged: the launcher
+  (`hiby_player.sh`), `S92_03_start_music_player`, `S11jpeg_display_shell`
+  (the boot-screen patch lands at the same line 16, report identical),
+  `S80_bt_init`, the LED script, `etc/ota_bin` and the recovery scripts.
+  `bluealsa`'s options and codecs are identical. Every `sys_server` command and
+  ALSA control Sonix uses is still there.
+
+The packer needed no change to install Sonix on 1.3. A local build on each
+base differs only by the stock differences and the stamped
+`base_build_version`. Changes made to build on the 1.3 base:
+
+- `prepare_v1_stock.sh` joins split archives: `NAME.part1, NAME.part2, ...` and
+  `NAME.001, NAME.002, ...`, in numeric order. A gap in the numbering is an
+  error rather than a silently short archive, and a folder walk opens each set
+  once. It prints the prepared `v1.upt`'s SHA-256.
+- The packer keeps every file of the stock package except the rootfs: the
+  kernel chunks and their chain, `ota_config.in`, `ota_v0.ok` and the
+  compatibility marker. It says which marker it carries over and checks the
+  marker is unchanged before writing the image. In `ota_update.in` only the
+  rootfs entry's size and MD5 are rewritten in place. The stock file's layout,
+  including the empty line it ends on (missing from the previous retyped
+  heredoc), is kept as is.
+- `verify_upt.sh` reports the OTA config, the compatibility marker and the
+  TempoTec product version. `--stock STOCK.upt` requires every package file
+  outside the rootfs to be byte-identical to the stock update's, and
+  `ota_update.in` to differ only in the rootfs size and MD5. The workflow runs
+  it on every image. The build report names the stock version, its SHA-256
+  and the marker, and says whether the image is a CI build or a release.
+- Bluetooth finds the radio's rfkill switch by name, as 1.3's `bt_init` does
+  (`get_rfkill_index "bluetooth" "0"`), instead of always writing `rfkill0`. The
+  lowest-numbered switch whose name contains "bluetooth" wins, and `rfkill0`
+  is the fallback, so a V1 whose switch is `rfkill0` behaves exactly as before.
+
+Host tests: `make -C sonix-player/tests bluetooth basebuild stock-prepare`.
+Locally, the 1.3 OTA was prepared from its pieces, verified (kernel SHA-256
+`a598b189…f6230`, product version 1.3, marker present), packed with a stand-in
+player binary, and the result verified with `--sonix-v1 --stock`.
+
+**Confirmed on hardware:** the image built on 1.3 was flashed on a V1 running
+stock firmware 1.3 and works, so images built on the 1.3 OTA are no longer
+test builds. This is the base of release 1.5.0. Keep the official 1.3 `v1.upt`
+and its checksum for recovery all the same.
+
+## A choice of corners, and the original play button
+
+Two small additions to Settings. Neither changes anything until it is chosen.
+
+**How round the screen corners are.** *Rounded corners* in Settings → Appearance
+had one arc, the 16 px of `bp_screen_corner_radius()`, sized to the 2" panel's
+glass. The V1's shell reads squarer than that in the hand, so the card now has
+a slider under the switch while the corners are on: 2 to 20 px in steps of 2
+(`CORNERS_RADIUS_MIN`, `_MAX` and `_STEP` in `corners.h`), with the radius as
+`N px` under the name. It is the toggle-and-slider card the timed options
+already use (`settingsrow_toggle_slider()`), and it stands at 16 px until
+something else is chosen, so anybody who already had the corners on sees
+exactly the corners they had. The top stop stays under the 24 px status bar: an
+arc taller than the bar would start to cut into its clock and battery.
+
+The radius is kept in the config alone (`ui/corner_radius`) and asked for each
+time it is wanted, so there is no second copy to fall out of step with it. A
+number written by hand is pulled into range and a key that was never written
+gives the board's arc. Moving the slider draws the four A8 masks again at the
+new size in the buffers they already have. The image descriptors are therefore
+the same pointers LVGL already holds, so each is dropped from the image cache
+(`lv_image_cache_drop()`, which `lvgl.h` no longer pulls in) and each corner
+has its source set again: that is what makes the object take the new size, and
+repaint the old area, which is the larger one when the arc has shrunk. While the
+corners are off the new radius is only remembered; the masks are redrawn when
+they are next turned on.
+`make -C sonix-player/tests corners` draws every stop into a framebuffer driven
+the way the panel is (only what was invalidated is redrawn) and holds each
+update to a full redraw, and `tests/ui/test_main_menu.c` drives the slider
+itself.
+
+**The original play button.** The player this port started from drew play and
+pause as a glyph on a filled disc, as big as the button. This fork had taken the
+disc away and left the bare glyph in the accent, like previous and next beside
+it. **Settings → Music → Display options → Legacy play button**
+(`screen/player_legacy_play`, off by default) puts the disc back.
+
+The drawing is `playbutton_paint()` in `src/gui/nowplaying/playbutton.c`, split
+out of `player.c` -- which is far too large to build without a device -- so that
+it can be drawn and measured on its own. `player.c`'s `paint_play_button()` calls
+it from every path that can move one of its colours: the glyph changing, a new
+sleeve, a new palette, the cover tint and the switch itself. Plain is exactly
+what it was: no body, the glyph at its own size, the accent. Legacy makes the
+button a circle (`LV_RADIUS_CIRCLE`) and scales the glyph to 55 % of the
+button's width, never above the size it was drawn at: the bitmaps are drawn for
+a button with nothing behind them, and at 40 px in a 44 px disc the triangle's
+corners would touch the rim. Pressing darkens the disc and the glyph through
+LVGL's own button theme; nothing of the button's own is added to that.
+
+The disc is the original's: white over artwork and in the dark palettes, and the
+palette's pressed surface in the light one when there is no sleeve behind it to
+stand out against. Poster's deck stands on its own ground and not on the sleeve,
+so there it counts as no sleeve. The glyph stays the accent for as long as it
+can be told from the disc, and that is a measured rule, not a list. Contrast is
+worked out on relative luminance with the gamma taken as 2 (it needs no libm,
+and chooses between two colours about as well as sRGB's own curve does, a little
+pessimistically):
+
+- the accent keeps the original look while it holds **2.5:1** on the disc. The
+  original shipped the default blue on the light theme's grey disc at 2.8, so a
+  floor of 3 would have changed the one case everybody has, and made the button
+  look different with and without a sleeve;
+- below that -- yellow, lime, green and cyan accents, Tokyo Night's violet,
+  OLED's white on a white disc -- the disc takes the accent, and the glyph is
+  white on it while that holds **3:1** (blue, pink, brown, Amber's colour) and
+  black where it does not, which on such a disc is 7:1 or better. That is not
+  what `theme_on_accent()` gives labels on accent fills (white on all but the
+  palest): a label can lean on its words, this glyph is all that tells play from
+  pause;
+- Amber on Black and OLED, whose point is one colour, always fill the disc with
+  it: a white disc in the middle of the page would be a second.
+
+Measured with the exact sRGB curve, the worst glyph/disc pair over every accent
+preset in every palette is 2.65:1, and over 600,000 random accents the worst is
+2.42:1 (a hot magenta on the light grey disc); once the disc has become the
+accent, it is never under 3:1.
+`make -C sonix-player/tests playbutton` runs the real function on a real button
+and reads pixels back: the disc round and nothing past its rim, the glyph
+centred and clear of it, plain and legacy alike, the press, switching back and
+forth with no disc left behind, every palette and accent held to the contrast
+above, and the two new texts in all eleven language files.
+`SONIX_PLAYBUTTON_SNAPSHOTS=<prefix>` also writes a contact sheet of the looks.
+
+**Readings to check.** "Legacy" here means the filled circle behind the glyph
+that the original player drew, and the corner choice rounds the screen's own
+corners, not the cards and tiles inside it. Both are written down so that a
+different reading can be asked for. Neither has been seen on the glass.

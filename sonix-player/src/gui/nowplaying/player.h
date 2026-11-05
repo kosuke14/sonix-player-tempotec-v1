@@ -81,6 +81,11 @@ typedef enum {
 	PLAYER_LAYOUT_ALBUM_ART_MAX = 5, // the sleeve over the screen, the media controls traded for it
 } player_layout_t;
 
+// In custom layouts, replace the format line with the tagged recording year
+// when one is available. Standard and tracks without a year keep their format.
+bool player_recording_year_get(void);
+void player_recording_year_set(bool enabled);
+
 player_layout_t player_layout_get(void);
 void player_layout_set(player_layout_t layout);
 
@@ -94,6 +99,15 @@ void player_layout_set(player_layout_t layout);
 // artwork on screen, so nothing is decoded and playback is untouched.
 bool player_cover_tint_get(void);
 void player_cover_tint_set(bool enabled);
+
+// Whether the play/pause button sits on a filled disc, as it did in the
+// original player ("legacy"), instead of being a bare glyph like previous and
+// next. Off by default; the switch is in Music > Display options, under the
+// cover tint it shares a colour with. In every arrangement that has the
+// button -- Album Art Max trades it away. Changing it only repaints that one
+// button, in place. See playbutton.h for the disc itself.
+bool player_legacy_play_get(void);
+void player_legacy_play_set(bool enabled);
 
 // Where AAM's scrub bar stands: along the foot of the artwork (false, the
 // default) or up its left edge (true, the "Leftie" of the concept). It is

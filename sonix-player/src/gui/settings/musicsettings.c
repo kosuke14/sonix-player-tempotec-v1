@@ -417,6 +417,11 @@ static void soundfield_slider_cb(lv_event_t *e) {
 	soundfield_set_value_label(soundfield_get_width());
 }
 
+static void soundfield_loaded_cb(lv_event_t *e) {
+	(void)e;
+	soundfield_refresh();
+}
+
 static void build_soundfield_page(gui_config_t *cfg) {
 	soundfield_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(soundfield_screen, cfg, "musicsettings_soundfield");
@@ -435,6 +440,8 @@ static void build_soundfield_page(gui_config_t *cfg) {
 	lv_label_set_text(note, tr("musicsettings_soundstage_note"));
 
 	soundfield_refresh();
+	// The control centre has a button for it: read again whenever the page comes up.
+	lv_obj_add_event_cb(soundfield_screen, soundfield_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	switcher_attach_back_gesture(soundfield_screen);
 }
 
@@ -523,6 +530,11 @@ static void crossfeed_reset_cb(lv_event_t *e) {
 	crossfeed_refresh();
 }
 
+static void crossfeed_loaded_cb(lv_event_t *e) {
+	(void)e;
+	crossfeed_refresh();
+}
+
 static void build_crossfeed_page(gui_config_t *cfg) {
 	crossfeed_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(crossfeed_screen, cfg, "musicsettings_crossfeed");
@@ -547,6 +559,7 @@ static void build_crossfeed_page(gui_config_t *cfg) {
 						LV_ANIM_OFF);
 
 	crossfeed_refresh();
+	lv_obj_add_event_cb(crossfeed_screen, crossfeed_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	switcher_attach_back_gesture(crossfeed_screen);
 }
 
@@ -1220,6 +1233,9 @@ lv_obj_t *musicsettings_fade_screen(void) { return fade_screen; }
 
 static lv_obj_t *playback_screen;
 lv_obj_t *musicsettings_playback_screen(void) { return playback_screen; }
+lv_obj_t *musicsettings_soundfield_screen(void) { return soundfield_screen; }
+lv_obj_t *musicsettings_crossfeed_screen(void) { return crossfeed_screen; }
+
 
 bool musicsettings_fade_enabled(void) { return config_get_bool("audio", "fade", false); }
 
@@ -1761,6 +1777,17 @@ static lv_obj_t *cover_tint_switch;
 
 static void cover_tint_cb(lv_event_t *e) {
 	player_cover_tint_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+// The play/pause button on a filled disc, as the original player drew it
+// ("legacy"). Stored and repainted by the player, like the tint above.
+static lv_obj_t *legacy_play_switch;
+
+static void legacy_play_cb(lv_event_t *e) { player_legacy_play_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED)); }
+
+// Replace the format line with the tagged year in custom player layouts.
+static void recording_year_cb(lv_event_t *e) {
+	player_recording_year_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
 // Where Album Art Max puts its scrub bar: along the foot of the sleeve, or up
@@ -2512,6 +2539,12 @@ static void build_display_page(gui_config_t *cfg) {
 	layout_refresh();
 	theme_register_refresh(layout_refresh);
 
+	// Standard keeps its format line; custom layouts can show the tagged year.
+	lv_obj_t *recording_year_switch;
+	settingsrow_toggle(container, "musicsettings_recording_year", &recording_year_switch, recording_year_cb);
+	option_note(container, "musicsettings_recording_year_note");
+	lv_obj_set_state(recording_year_switch, LV_STATE_CHECKED, player_recording_year_get());
+
 	// Album Art Max's own sub-setting. Under the pills and not on its own page:
 	// it is one arrangement's business, and there is nothing else to say. It is
 	// shown only while that arrangement is the one chosen -- the pills above
@@ -2540,6 +2573,14 @@ static void build_display_page(gui_config_t *cfg) {
 	if (player_cover_tint_get()) {
 		lv_obj_add_state(cover_tint_switch, LV_STATE_CHECKED);
 	}
+
+	// The play/pause button on a disc instead of a bare glyph, the way the
+	// original player drew it. A look and nothing more: it moves nothing, takes
+	// the same room as the button it replaces, and follows the cover tint's
+	// colour when that is on.
+	settingsrow_toggle(container, "musicsettings_legacy_play", &legacy_play_switch, legacy_play_cb);
+	option_note(container, "musicsettings_legacy_play_note");
+	lv_obj_set_state(legacy_play_switch, LV_STATE_CHECKED, player_legacy_play_get());
 
 	// Whether a start with a remembered track lands on the now-playing page
 	// rather than on the home screen. Read once, at startup (main.c).
@@ -2594,6 +2635,15 @@ static void playback_loaded_cb(lv_event_t *e) {
 	(void)e;
 	settingsrow_duration_set_minutes(&sleep_row, sleeptimer_minutes(SLEEPTIMER_MUSIC));
 	sleep_refresh();
+	// ReplayGain and mono have buttons in the control centre too.
+	rg_refresh();
+	if (mono_switch) {
+		if (mono_get_enabled()) {
+			lv_obj_add_state(mono_switch, LV_STATE_CHECKED);
+		} else {
+			lv_obj_remove_state(mono_switch, LV_STATE_CHECKED);
+		}
+	}
 }
 
 static void build_playback_page(gui_config_t *cfg) {

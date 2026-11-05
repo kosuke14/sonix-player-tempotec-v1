@@ -2,8 +2,6 @@
 
 This repository is a community port of the original **[Sonix Player](https://github.com/Jepl4r/sonix-player)** project by **[Jepl4r](https://github.com/Jepl4r)** for the Tempotec Variations V1. 
 
-/!\ It's currently not working on stock firmware 1.3, be patient since the firmware is not publicly released yet. /!\
-
 The firmware builder starts with an official V1 update package, replaces the stock music player and its interface with Sonix, then repackages the update as `v1.upt`.
 
 ## Previews
@@ -229,10 +227,13 @@ This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-
 - **V1 themes** - **Tokyo Night**, **Amber on Black** and **OLED**, designed for the V1 panel, beside Dark and Light. Make your own with a [custom colour theme](docs/custom-themes.md).
 - **Boot screens** - Retrospace (the default), Space, Travelling in space, Stock, or your own picture.
 - **Player layouts** - **Immersive**, **Poster** and **Album Art Max**, beside Standard, Waveform and Alternative.
+- **Legacy play button and corner roundness** - the original round disc behind play and pause, as an option under Settings → Music → Display options; and a slider for how round the screen corners are, from a hint of a corner (2 px) up to 20 px, for a V1 that looks boxier than its 16 px default.
 - **Interface fonts** - choose MiSans, Neon 80s or Roboto, or any `.ttf`/`.otf` in the card's `Fonts` folder. Missing glyphs fall back to MiSans, so every language stays readable.
 - **Dual Scrobbler Suite** (Last.fm & ListenBrainz) — Native background scrobbling for both services with independent toggles, token-based setup, and offline queue caching when disconnected from Wi-Fi.
-- **Over-The-Air (OTA) Updates** — Check for and download new releases directly over Wi-Fi from GitHub Releases with one click in Settings → System → Firmware update.
-
+- **Over-The-Air (OTA) Updates** - Check for and download new releases directly over Wi-Fi from GitHub Releases with one click in Settings → System → Firmware update.
+- **SmartMix Playlist**  - Generate similar tracks, tag based playlists!
+- **Editable control centre**
+- **Many more improvements!**
 ### Shared with Sonix Player
 
 - **Music**: a local library with a file browser, albums, artists, genres, playlists, favourites and most played, plus gapless playback, fades, ReplayGain and sleep timers.
@@ -242,7 +243,7 @@ This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-
 - **Audiobooks and e-books**: chapters, bookmarks and speed control, plus an EPUB reader.
 - **Wireless**: Wi-Fi, Bluetooth headphones and speakers, a Bluetooth receiver, AirPlay, DLNA, Wi-Fi file transfer and SonixLink.
 - **Tools and games**: a file manager, a Game Boy / Game Boy Color emulator, and Flappy Bird.
-- **Screen and power**: rounded corners, brightness, a screensaver, standby, a low-battery warning and a battery screen when off.
+- **Screen and power**: rounded corners (with a choice of how round), brightness, a screensaver, standby, a low-battery warning and a battery screen when off.
 
 Local audio decoder inputs include WAV, FLAC, MP3, Ogg Vorbis, Opus, M4A/M4B/MP4, AAC, ALAC, WavPack, APE, AIFF/AIFC, CAF and DSD (DSF/DFF). Streaming services require valid credentials and may depend on third-party availability.
 
@@ -276,7 +277,7 @@ Only attempt this on a TempoTec Variations V1. Read the warning above before pro
 3. Charge the player adequately, insert the card and start the device's built-in firmware update process. Menu names vary by stock firmware version; follow the device's on-screen instructions and do not interrupt the update.
 4. If you want to restore stock firmware, put the original vendor `v1.upt` and its matching checksum file at the card root and use the same update process.
 
-The build workflow defaults to the supplied V1 1.3 stock archive; an optional workflow URL selects a different stock image. See [stock firmware input](sonix-packer/firmware-input/README.md) for local preparation. The 1.3 archive has been inspected, but a Sonix image based on it has not been verified on hardware.
+The build workflow defaults to the bundled official V1 1.3 OTA (`sonix-packer/firmware-input/v1.zip.part1` and `.part2`); an optional workflow URL selects a different stock image. See [stock firmware input](sonix-packer/firmware-input/README.md) for local preparation and checksums. An image built on 1.3 keeps the 1.3 kernel and the package's `ota_compatibility.in` marker byte-for-byte, and works on a V1 running stock firmware 1.3.
 
 The package builder is designed to preserve the stock `xImage` kernel and leave the existing update/recovery path in place. This is checked during the build, but it is **not** a guarantee that recovery will work on every device or in every failure case.
 

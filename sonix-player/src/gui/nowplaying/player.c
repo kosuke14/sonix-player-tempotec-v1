@@ -14,6 +14,7 @@
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/nowplaying/coverloader.h"
 #include "src/gui/nowplaying/lyricsearch.h"
+#include "src/gui/nowplaying/playbutton.h"
 #include "src/system/addons/addons.h"
 #include "src/gui/library/medialist.h"
 #include "src/gui/fonts/fonts.h"
@@ -425,6 +426,7 @@ static int aam_status_h;
 // And where its scrub bar stands: along the foot of the picture (false) or up
 // its left edge (true). The second is the concept's "Leftie".
 static bool aam_leftie;
+static bool show_recording_year; // replace the format line only in non-standard layouts
 
 // The pieces Album Art Max owns. Declared here with the rest of the arrangement
 // state rather than beside the functions that build them, because the theme's
@@ -445,14 +447,20 @@ static lv_obj_t *aam_menu_bar[3];
 
 static uint32_t album_tone; // the sleeve's colour, 0 when there is no sleeve
 
-// Whether the play/pause glyph and the played stretch of the progress bar
-// take that colour in every arrangement, and not only in the alternative
-// one. A setting of its own (Music > Display options), off unless it was
-// switched on: the page then follows the record instead of the theme, which
-// is a matter of taste and not a thing to visit on everybody. The two skip
-// glyphs are no part of it -- they are drawn in set_over_cover(), which this
-// never reaches, and keep the colour they have always had.
+// Whether the playback controls and the track's secondary details take that
+// colour in every arrangement, and not only in the alternative one. A setting
+// of its own (Music > Display options), off unless it was switched on: the page
+// then follows the record instead of the theme, which is a matter of taste and
+// not a thing to visit on everybody. The two skip glyphs are no part of it --
+// they are drawn in set_over_cover() and keep the colour they have always had.
 static bool cover_tint;
+
+// Whether the play/pause button sits on a filled disc, as the original player
+// drew it, rather than being a bare glyph like previous and next. Its own
+// setting (Music > Display options, "Legacy play button"), off unless it was
+// switched on. What the disc is made of is playbutton.c's business; this only
+// says which look is up and repaints when anything it depends on moves.
+static bool play_legacy;
 
 static lv_obj_t *song_text_obj; // the title and artist, wherever they live now
 static lv_obj_t *song_side_obj; // the star and the format, likewise
@@ -892,13 +900,32 @@ static sleeptimer_kind_t sleeptimer_kind_playing(void) {
 	return SLEEPTIMER_MUSIC;
 }
 
+// The play/pause button, in whichever look is chosen: the glyph in the accent,
+// and under it, with the legacy look on, the disc. The original player's disc
+// was white over artwork and in the dark palettes, and the palette's pressed
+// surface in the light one when there is no cover to stand out against;
+// playbutton.c turns it into the accent where those would not read.
+//
+// Poster's deck stands on its own ground and not on the sleeve (see
+// set_over_cover), so it is only "over artwork" in the other arrangements.
+//
+// Every path that can move one of the colours ends up here -- a new sleeve, a
+// new palette, the cover tint, the legacy switch itself -- and it is cheap
+// enough to run whenever the glyph is set.
+static void paint_play_button(void) {
+	if (!play_btn || !play_btn_icon) {
+		return;
+	}
+	bool over_artwork = chrome_over_cover && !layout_poster_now;
+	playbutton_paint(play_btn, play_btn_icon, play_legacy, chrome_accent(), over_artwork || theme()->dark);
+}
+
 static void apply_playback_status(audio_status_t status) {
 	bool playing = (status == AUDIO_STATUS_PLAYING);
 
-	// The glyph is the accent colour, always: play and pause are the same
-	// control in two states. Only the disc under it changes (see
-	// set_over_cover): white over artwork and in the dark theme, dark in the
-	// light theme when there is no cover to stand out against.
+	// The glyph is the accent colour: play and pause are the same control in
+	// two states, and only the glyph changes between them. Under it there is
+	// nothing, or -- with the legacy look on -- the disc (see paint_play_button).
 	//
 	// On a live stream there is no pause -- stopping and starting again does
 	// not resume, it reconnects -- so the button says stop while it is on.
@@ -906,8 +933,7 @@ static void apply_playback_status(audio_status_t status) {
 	// it opens a fresh connection to the same one.
 	lv_image_set_src(play_btn_icon,
 					 live_mode ? (playing ? &icon_stop : &icon_play) : (playing ? &icon_pause : &icon_play));
-	lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-	lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
+	paint_play_button();
 
 	// Keep polling either way, just less often when nothing is playing. The
 	// timer must never be paused here: a track change is briefly reported as
@@ -1224,6 +1250,19 @@ static void set_over_cover(bool on) {
 			}
 		}
 	}
+	// The cover-tint option owns the artist, format/year and queue-position
+	// lines too. Apply this after the ordinary over-cover and palette rules so
+	// every route into this function (new artwork, layout change, or theme
+	// change) agrees.
+	if (cover_tint && album_tone) {
+		lv_color_t ink = aam_accent();
+		lv_obj_t *const tinted[] = {song_artist_label, format_label, queue_position_label};
+		for (size_t i = 0; i < sizeof(tinted) / sizeof(tinted[0]); i++) {
+			if (tinted[i]) {
+				lv_obj_set_style_text_color(tinted[i], ink, 0);
+			}
+		}
+	}
 
 	for (size_t i = 0; i < sizeof(icon_objs) / sizeof(icon_objs[0]); i++) {
 		if (!icon_objs[i]) {
@@ -1250,9 +1289,13 @@ static void set_over_cover(bool on) {
 		}
 	}
 
-	if (play_btn_icon) {
-		lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-		lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
+	paint_play_button(); // the glyph, and the disc under it where there is one
+
+	// Repeat/shuffle is repainted here as well as by the transport painter:
+	// this is the common path for a newly decoded sleeve and a palette change,
+	// so the mode glyph cannot be left behind in the theme accent.
+	if (repeat_btn_icon) {
+		update_repeat_button();
 	}
 
 	// The floating chevron parks over the artwork's top-left corner.
@@ -1359,9 +1402,8 @@ static lv_color_t chrome_accent(void) {
 // drawn in. Its own answer and not chrome_accent()'s: the two have never been
 // the same colour on every palette -- Tokyo Night's bar keeps the theme
 // accent while its play glyph wears the deck's violet -- so the cover tint
-// needs a way to take the bar over that leaves that alone. The knob's white
-// ring and the unplayed stretch are set when the page is built and when the
-// theme changes, and are no part of this either way.
+// needs a way to take the bar over that leaves that alone. The unplayed
+// stretch follows the same tint at its usual translucent strength.
 static lv_color_t progress_tint(void) {
 	// Album Art Max is the record's page and not the theme's: there the sleeve's
 	// colour is the design, whether or not the cover tint is switched on for the
@@ -1385,6 +1427,17 @@ static void paint_progress_tint(void) {
 	lv_color_t tint = progress_tint();
 	lv_obj_set_style_bg_color(progress_slider, tint, LV_PART_INDICATOR);
 	lv_obj_set_style_bg_color(progress_slider, tint, LV_PART_KNOB);
+	if (!layout_aam_now && !layout_wave_now) {
+		bool tinted_rest = cover_tint && album_tone;
+		lv_color_t rest = tinted_rest ? tint
+			: theme_is_monochrome()
+				? theme_player_chrome_color(THEME_PLAYER_CHROME_PROGRESS_REST)
+				: lv_color_white();
+		lv_obj_set_style_bg_color(progress_slider, rest, LV_PART_MAIN);
+		lv_obj_set_style_bg_opa(progress_slider,
+			tinted_rest ? LV_OPA_30 : theme_is_monochrome() ? LV_OPA_COVER : LV_OPA_30,
+			LV_PART_MAIN);
+	}
 	if (layout_aam_now) {
 		// Album Art Max's band is read as a stretch of colour rather than as a
 		// line: the played part starts a step lighter at the first second and
@@ -1443,10 +1496,9 @@ static void paint_overflow_tint(void) {
 // glyph, the repeat/shuffle mode and the played stretch of the progress bar.
 // The ellipsis with them, whenever the accent is the sleeve's.
 static void paint_transport_tint(void) {
-	if (play_btn_icon) {
-		lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-		lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
-	}
+	bool tinted = cover_tint && album_tone;
+	back_btn_cover_tint(tinted, tinted ? cover_mark() : theme()->accent);
+	paint_play_button();
 	if (repeat_btn_icon) {
 		update_repeat_button();
 	}
@@ -5384,7 +5436,11 @@ static void update_fav_button(void) {
 	// competing with the cream title and playback accent; OLED's in its muted
 	// grey, for the same reason.
 	lv_color_t favorite_color;
-	if (layout_aam_now) {
+	if (cover_tint && album_tone) {
+		// The explicit cover-tint option wins over the palette and favourite
+		// yellow alike, in both the outline and filled states.
+		favorite_color = cover_mark();
+	} else if (layout_aam_now) {
 		// The sleeve's colour, as everything else on that page is: the star sits
 		// between two other marks drawn in it, and a grey one among them would
 		// read as the button being unavailable.
@@ -5514,8 +5570,12 @@ static void update_format_label(const device_state_t *state) {
 	// The mark beside it in Studio, which is the same question asked of the
 	// stream rather than of the library. Here because this is where the format
 	// line is worked out, and the two say one thing between them.
+	bool year_visible = show_recording_year && layout_choice != PLAYER_LAYOUT_STANDARD &&
+		(layout_wave_now || layout_studio_now || layout_immersive_now || layout_poster_now || layout_aam_now) &&
+		!state->live && state->metadata.year > 0 && state->current_file[0] &&
+		!podcastcache_is_episode(state->current_file);
 	if (layout_studio_now && studio_quality_icon) {
-		const lv_image_dsc_t *mark = studio_quality_mark(state);
+		const lv_image_dsc_t *mark = year_visible ? NULL : studio_quality_mark(state);
 		if (mark) {
 			lv_image_set_src(studio_quality_icon, mark);
 			lv_obj_set_hidden(studio_quality_icon, false);
@@ -5525,6 +5585,10 @@ static void update_format_label(const device_state_t *state) {
 	}
 
 	if (!format_label) {
+		return;
+	}
+	if (year_visible) {
+		lv_label_set_text_fmt(format_label, "%d", state->metadata.year);
 		return;
 	}
 
@@ -5703,12 +5767,15 @@ static void speed_btn_event_cb(lv_event_t *e) {
 // The icons are the white ARGB bitmaps generated from assets/icons/*.svg;
 // recolouring them is what marks the mode as active or not.
 static void update_repeat_button(void) {
-	// Active playback modes use the reference's dark orange. Shuffle/repeat
-	// when inactive has its own deep-brown role rather than the artist color.
-	lv_color_t active = chrome_accent();
-	lv_color_t inactive = (theme_is_monochrome() || theme_is_tokyo_night())
-							  ? theme_player_chrome_color(THEME_PLAYER_CHROME_SHUFFLE_IDLE)
-							  : lv_color_make(100, 100, 100);
+	// Active playback modes use the reference's dark orange, or explicitly
+	// the sleeve's colour while cover tint is on. The inactive glyph follows
+	// the sleeve too; otherwise it keeps its own muted palette role.
+	lv_color_t active = cover_tint && album_tone ? cover_mark() : chrome_accent();
+	lv_color_t inactive = cover_tint && album_tone
+		? cover_mark()
+		: (theme_is_monochrome() || theme_is_tokyo_night())
+			? theme_player_chrome_color(THEME_PLAYER_CHROME_SHUFFLE_IDLE)
+			: lv_color_make(100, 100, 100);
 
 	const lv_image_dsc_t *icon;
 	lv_color_t color;
@@ -6349,6 +6416,21 @@ void player_layout_set(player_layout_t layout) {
 	device_state_t state;
 	device_state_get(&state);
 	update_layout(&state);
+	update_format_label(&state);
+}
+
+bool player_recording_year_get(void) { return show_recording_year; }
+
+void player_recording_year_set(bool enabled) {
+	if (show_recording_year == enabled) {
+		return;
+	}
+	show_recording_year = enabled;
+	config_set_bool("screen", "player_recording_year", enabled);
+	config_save();
+	device_state_t state;
+	device_state_get(&state);
+	update_format_label(&state);
 }
 
 bool player_aam_leftie_get(void) { return aam_leftie; }
@@ -6385,9 +6467,26 @@ void player_cover_tint_set(bool enabled) {
 
 	// The sleeve's colour is already at hand for whatever is on screen, so
 	// the switch shows at once, in the middle of a track: no cover is decoded
-	// again and nothing is laid out again. The glyphs and the bar are simply
-	// repainted in the other colour -- the sleeve's, or back to the theme's.
+	// again and nothing is laid out again. Repaint every owner of a local
+	// colour, both into the sleeve's palette and back into the theme's.
+	set_over_cover(chrome_over_cover);
+	update_fav_button();
 	paint_transport_tint();
+}
+
+bool player_legacy_play_get(void) { return play_legacy; }
+
+void player_legacy_play_set(bool enabled) {
+	if (enabled == play_legacy) {
+		return;
+	}
+	play_legacy = enabled;
+	config_set_bool("screen", "player_legacy_play", enabled);
+	config_save();
+
+	// One button, repainted where it stands: the page is not laid out again and
+	// the colours it needs are the ones already worked out for the sleeve.
+	paint_play_button();
 }
 
 void player_output_unplugged(const char *what) {
@@ -7467,7 +7566,9 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_add_event_cb(prev_btn, prev_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_set_style_opa(prev_btn, LV_OPA_40, LV_STATE_DISABLED); // see apply_connecting()
 
-	// Play/pause: a plain glyph like prev/next, with the same generous hit target.
+	// Play/pause: a plain glyph like prev/next, with the same generous hit target
+	// -- or, with the legacy look on, the glyph on a disc as wide as the button
+	// (paint_play_button()).
 	play_btn = lv_btn_create(player_controls_buttons);
 	lv_obj_set_size(play_btn, compact ? COMPACT_PLAY_BTN : 84, compact ? COMPACT_PLAY_BTN : 84);
 	lv_obj_set_style_bg_opa(play_btn, LV_OPA_TRANSP, 0);
@@ -7839,7 +7940,10 @@ void player_init(gui_config_t *cfg) {
 	// exists -- and whether the controls follow the sleeve's colour, which is
 	// off unless it was switched on.
 	cover_tint = config_get_bool("screen", "player_cover_tint", false);
+	play_legacy = config_get_bool("screen", "player_legacy_play", false);
+	paint_play_button(); // the button was built before the setting was read
 	aam_leftie = config_get_bool("screen", "player_aam_leftie", false);
+	show_recording_year = config_get_bool("screen", "player_recording_year", false);
 	int saved = (int)config_get_int("screen", "player_layout_alt", 0);
 	layout_choice = (saved == (int)PLAYER_LAYOUT_ALTERNATIVE)  ? PLAYER_LAYOUT_ALTERNATIVE
 						: (saved == (int)PLAYER_LAYOUT_STUDIO)	   ? PLAYER_LAYOUT_STUDIO
