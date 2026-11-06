@@ -38,8 +38,9 @@
 lv_obj_t *amp_screen;
 static lv_obj_t *settings_screen, *edit_screen, *list_screen, *login_screen;
 static lv_obj_t *list_container, *list_title, *store_value;
-static lv_obj_t *account_value;
-static lv_obj_t *login_row, *signout_row, *test_row, *store_row, *account_row;
+static lv_obj_t *account_value, *anisette_value;
+static lv_obj_t *login_row, *signout_row, *test_row, *store_row, *anisette_row,
+			  *account_row;
 static lv_obj_t *quality_card, *lyrics_card, *lyrics_switch, *note_quality, *note_2fa,
 	*note_settings;
 static lv_obj_t *quality_pill[2], *quality_pills_parent;
@@ -372,6 +373,7 @@ static void page_left_cb(lv_event_t *e) {
 // ---------------------------------------------------------------------------
 
 static char draft_store[32];
+static char draft_anisette[192]; // the anisette server the sign-in rides on
 static char draft_user[128], draft_pass[128]; // the login screen's fields
 static char creds_path[600];
 
@@ -502,6 +504,8 @@ static void creds_forget(void) {
 
 static void draft_load(void) {
 	ampstream_config(draft_store, sizeof(draft_store));
+	snprintf(draft_anisette, sizeof(draft_anisette), "%s",
+			 config_get("applemusic", "anisette_url", ""));
 	remember_checked = creds_load(draft_user, sizeof(draft_user), draft_pass, sizeof(draft_pass));
 	if (!remember_checked) {
 		draft_user[0] = '\0';
@@ -528,9 +532,9 @@ static bool configured(void) {
 static void settings_refresh(void) {
 	bool signed_in = session_signed_in;
 	lv_obj_t *const login_only[] = {login_row, note_2fa};
-	lv_obj_t *const signed_rows[] = {store_row,	 account_row,	 quality_card,
-									 lyrics_card, signout_row,	 test_row,
-									 note_settings, note_quality};
+	lv_obj_t *const signed_rows[] = {store_row,	 anisette_row, account_row,
+									 quality_card, lyrics_card, signout_row,
+									 test_row, note_settings, note_quality};
 	for (size_t i = 0; i < sizeof(login_only) / sizeof(*login_only); i++) {
 		if (login_only[i]) {
 			lv_obj_set_hidden(login_only[i], signed_in);
@@ -542,6 +546,8 @@ static void settings_refresh(void) {
 		}
 	}
 	lv_label_set_text(store_value, draft_store[0] ? draft_store : tr("amp_not_set"));
+	lv_label_set_text(anisette_value,
+					  draft_anisette[0] ? draft_anisette : tr("amp_anisette_default"));
 	// The account row mirrors the session as the last job saw it, the
 	// native one included: a sign-in that ran without the daemon still
 	// shows here.
@@ -591,15 +597,17 @@ static void edit_cb(lv_event_t *e) {
 	}
 	searching = false;
 	editing = (int)(intptr_t)lv_event_get_user_data(e);
-	lv_label_set_text(edit_title, tr("amp_storefront"));
-	const char *text = draft_store;
+	bool anisette_edit = editing == 2;
+	lv_label_set_text(edit_title, tr(anisette_edit ? "amp_anisette" : "amp_storefront"));
+	const char *text = anisette_edit ? draft_anisette : draft_store;
 	lv_textarea_set_accepted_chars(edit_field, NULL);
 	lv_textarea_set_max_length(edit_field, 127);
 	lv_textarea_set_text(edit_field, text);
 	// Readable, like the subsonic page's, so a mistyped password is seen
 	// before it is sent.
 	lv_textarea_set_password_mode(edit_field, false);
-	lv_textarea_set_placeholder_text(edit_field, tr("amp_storefront"));
+	lv_textarea_set_placeholder_text(edit_field,
+									tr(anisette_edit ? "amp_anisette" : "amp_storefront"));
 	keyboard_reset(keyboard);
 	keyboard_set_visible(keyboard, true);
 	switch_screen(edit_screen);
@@ -642,6 +650,20 @@ static void accept_cb(lv_event_t *e) {
 			return;
 		}
 		snprintf(draft_store, sizeof(draft_store), "%s", value);
+	} else if (editing == 2) {
+		// The anisette server: the machine data the sign-in rides on. A
+		// change takes effect at once, and the provisioned identity that
+		// belonged to the old server is dropped -- the new one provisions
+		// its own on the next sign-in.
+		if (strlen(value) >= sizeof(draft_anisette)) {
+			toast_error("amp_bad_storefront");
+			return;
+		}
+		snprintf(draft_anisette, sizeof(draft_anisette), "%s", value);
+		config_set("applemusic", "anisette_url", draft_anisette);
+		config_save();
+		anisette_set_server(draft_anisette);
+		anisette_set_root(storage_sd_root());
 	} else if (editing == 1) {
 		snprintf(draft_user, sizeof(draft_user), "%s", value);
 	} else {
@@ -1019,6 +1041,9 @@ void amppage_init(gui_config_t *cfg) {
 	settingsrow_add_icon(login_row, &icon_check, THEME_SEMANTIC_GREEN);
 	store_row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)0);
 	settingsrow_add_icon(store_row, &icon_music_note, THEME_SEMANTIC_CYAN);
+	anisette_row = settingsrow_add(container, "amp_anisette", &anisette_value, edit_cb,
+								  (void *)(intptr_t)2);
+	settingsrow_add_icon(anisette_row, &icon_wifi_high, THEME_SEMANTIC_CYAN);
 	account_row = settingsrow_add(container, "amp_account", &account_value, NULL, NULL);
 	settingsrow_add_icon(account_row, &icon_artist, THEME_SEMANTIC_GREEN);
 
