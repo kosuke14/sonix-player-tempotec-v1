@@ -532,12 +532,18 @@ static bool configured(void) {
 static void settings_refresh(void) {
 	bool signed_in = session_signed_in;
 	lv_obj_t *const login_only[] = {login_row, note_2fa};
-	lv_obj_t *const signed_rows[] = {store_row,	 anisette_row, account_row,
-									 quality_card, lyrics_card, signout_row,
-									 test_row, note_settings, note_quality};
+	lv_obj_t *const always[] = {store_row, anisette_row, quality_card,
+								lyrics_card, test_row, note_settings,
+								note_quality};
+	lv_obj_t *const signed_rows[] = {account_row, signout_row};
 	for (size_t i = 0; i < sizeof(login_only) / sizeof(*login_only); i++) {
 		if (login_only[i]) {
 			lv_obj_set_hidden(login_only[i], signed_in);
+		}
+	}
+	for (size_t i = 0; i < sizeof(always) / sizeof(*always); i++) {
+		if (always[i]) {
+			lv_obj_set_hidden(always[i], false);
 		}
 	}
 	for (size_t i = 0; i < sizeof(signed_rows) / sizeof(*signed_rows); i++) {

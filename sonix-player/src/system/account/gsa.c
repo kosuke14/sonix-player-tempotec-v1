@@ -326,7 +326,7 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 			out = NULL;
 		}
 		status = 0;
-		bool sent = http_request(endpoint, &req, &out, &out_len, 256 * 1024, 30, &status);
+		bool sent = http_request(endpoint, &req, &out, &out_len, 256 * 1024, 15, &status);
 		if (!sent) {
 			continue; // the transport reason surfaces below if the last try fails
 		}
@@ -336,8 +336,12 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 	gsa_tls_end(&tls_guard);
 	if (!ok) {
 		const char *why = http_last_error();
-		snprintf(error, error_size, "gsa_http_%d%s%s", status, why ? " " : "",
-				 why ? why : "");
+		if (status == -1 && (!why || strstr(why, "answered") != why)) {
+			snprintf(error, error_size, "gsa_timeout");
+		} else {
+			snprintf(error, error_size, "gsa_http_%d%s%s", status,
+					 why ? " " : "", why ? why : "");
+		}
 		// The refusal's own words ride along: an edge block page names the
 		// layer that refused, which the code alone cannot.
 		if (out && out_len > 0) {
