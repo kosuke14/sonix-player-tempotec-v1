@@ -22,6 +22,8 @@
 // sends, and the provisioning must claim the same identity it logs in as.
 #define GSA_CLIENT_INFO \
 	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+#define GSA_CLIENT_INFO_MAC \
+	"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 
 typedef struct {
 	char key[64];

@@ -289,6 +289,38 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 			// 3 s, then 10 s; a 429 cools down longer
 			sleep(status == 429 ? 30 : attempt == 1 ? 3 : 10);
 		}
+		// The claim cycles Windows -> Mac -> Windows: the edge's verdict
+		// differs by client identity, and only the device knows which one
+		// its route accepts. The header and the cpd must say the same, so
+		// the whole request body is rebuilt per attempt.
+		const char *claim =
+			(attempt % 2 == 0) ? GSA_CLIENT_INFO : GSA_CLIENT_INFO_MAC;
+		{
+			char *rebuilt = malloc(strlen(body) + 256);
+			if (rebuilt) {
+				const char *mac_info = GSA_CLIENT_INFO_MAC;
+				const char *win_info = GSA_CLIENT_INFO;
+				const char *from = (claim == win_info) ? mac_info : win_info;
+				const char *at = strstr(body, from);
+				if (at) {
+					size_t head = (size_t)(at - body);
+					snprintf(rebuilt, strlen(body) + 256, "%.*s%s%s", (int)head, body,
+							 claim, at + strlen(from));
+					snprintf(full, strlen(body) + 512, "%s", rebuilt);
+				}
+				free(rebuilt);
+			}
+			// the header's client info follows the claim
+			char *ci_at = strstr(extra, "X-MMe-Client-Info: ");
+			if (ci_at) {
+				ci_at += strlen("X-MMe-Client-Info: ");
+				size_t room = strlen(claim);
+				memset(ci_at, ' ', strlen(ci_at) > room ? strlen(ci_at) : room);
+				memcpy(ci_at, claim, room);
+			}
+			req.body = full;
+			req.body_len = strlen(full);
+		}
 		if (out) {
 			free(out);
 			out = NULL;
@@ -306,6 +338,24 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 		const char *why = http_last_error();
 		snprintf(error, error_size, "gsa_http_%d%s%s", status, why ? " " : "",
 				 why ? why : "");
+		// The refusal's own words ride along: an edge block page names the
+		// layer that refused, which the code alone cannot.
+		if (out && out_len > 0) {
+			char snippet[96];
+			size_t take = out_len < sizeof(snippet) - 1 ? out_len : sizeof(snippet) - 1;
+			bool printable = true;
+			for (size_t i = 0; i < take; i++) {
+				if ((out[i] != 0 && (out[i] < 0x20 || out[i] > 0x7e)) ) {
+					printable = false;
+				}
+			}
+			if (printable && out_len < 4096) {
+				memcpy(snippet, out, take);
+				snippet[take] = '\0';
+				size_t len = strlen(error);
+				snprintf(error + len, error_size - len, " [%s]", snippet);
+			}
+		}
 		free(full);
 		if (out) {
 			free(out);
