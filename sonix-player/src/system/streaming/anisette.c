@@ -28,7 +28,7 @@
 // middle is plain framing over the same TLS the rest of the player uses.
 
 #define ANISETTE_DIR ".local/amp-anisette"
-#define ANISETTE_DEFAULT_SERVER "https://ani.sidestore.io"
+#define ANISETTE_DEFAULT_SERVER "https://ani.iloader.app"
 #define ANISETTE_TIMEOUT 25
 
 // The cross toolchain carries no openssl headers: the entropy comes from
@@ -237,10 +237,10 @@ static void b64_encode(const uint8_t *in, size_t len, char *out, size_t out_size
 // data the servers read before anything else.
 static void apple_headers(char *out, size_t size, const anisette_state_t *st,
 						  const char *client_info, const char *user_agent) {
-	// The provisioning claims the same identity the login will: a PET
-	// issued to a Mac is refused by GrandSlam with -80045, whatever the
-	// later request says.
-	client_info = GSA_CLIENT_INFO;
+	// The identity must match the server that minted the OTP: the machine
+	// data Apple validates is the pair, not either half alone. Every caller
+	// quotes the /v3/client_info of the configured server back here.
+	if (!client_info || !client_info[0]) client_info = GSA_CLIENT_INFO_MAC;
 	char now[40];
 	time_t t = time(NULL);
 	struct tm tm;
@@ -970,7 +970,8 @@ bool anisette_headers(gsa_anisette_t *out, char *error, size_t error_size) {
 		"X-Mme-Client-Info",
 	};
 	const char *values[10] = {now,		st.serial,	 "UTC", "en_US", rinfo,
-							  lu_hex, device_id,	md,	mdm,	 GSA_CLIENT_INFO};
+							  lu_hex, device_id,	md,	mdm,
+							  client_info[0] ? client_info : GSA_CLIENT_INFO_MAC};
 	out->count = 10;
 	for (int i = 0; i < 10; i++) {
 		snprintf(out->kv[i].key, sizeof(out->kv[i].key), "%s", keys[i]);

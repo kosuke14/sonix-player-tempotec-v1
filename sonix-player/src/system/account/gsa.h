@@ -17,9 +17,11 @@
 
 // The identity the GrandSlam route accepts: Apple's fraud detection of
 // October 2026 refuses anisette provisioned through the Android ADI when
-// the request claims a Mac, and GrandSlam answers -80045 to every such
-// login. The Windows claim is what the Windows Apple Music's own AuthKit
-// sends, and the provisioning must claim the same identity it logs in as.
+// The client identity Apple's GrandSlam reads. Since 2026-10 the OTP and
+// the claimed identity are validated as a pair: the identity must match
+// whatever machine profile the anisette server's ADI was provisioned
+// under, so the working value is always the server's /v3/client_info
+// answer. The two macros below are only offline fallbacks.
 #define GSA_CLIENT_INFO \
 	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 #define GSA_CLIENT_INFO_MAC \

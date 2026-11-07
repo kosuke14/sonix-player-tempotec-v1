@@ -185,7 +185,9 @@ int main(void) {
 			"01234567-89ab-cdef-0123-456789abcdef",
 			"urz4f2/9Bq0AAAAAAAAAAA==",
 			"B52E4F58-9C77-4F61-A0A1-C2E8A9C1D0F2",
-			"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+			// the identity is the server's /v3/client_info answer: the
+			// OTP and the claimed machine are validated as a pair
+			"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
 		};
 		for (int i = 0; i < 10; i++) {
 			CHECK(strcmp(headers.kv[i].key, want_keys[i]) == 0);
