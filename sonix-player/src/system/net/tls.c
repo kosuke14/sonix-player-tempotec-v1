@@ -35,6 +35,8 @@ typedef struct x509_store_ctx_st X509_STORE_CTX;
 // SSL_ctrl() commands. Both are ancient and fixed.
 #define SSL_CTRL_SET_TLSEXT_HOSTNAME 55
 #define SSL_CTRL_SET_MIN_PROTO_VERSION 123
+#define SSL_CTRL_SET_MAX_PROTO_VERSION 124
+#define SSL_CTRL_SET_GROUPS_LIST 92
 #define TLSEXT_NAMETYPE_host_name 0
 #define TLS1_2_VERSION 0x0303
 
@@ -77,6 +79,10 @@ struct openssl_api {
 	int (*SSL_set_fd)(SSL *, int fd);
 	long (*SSL_ctrl)(SSL *, int cmd, long larg, void *parg);
 	int (*SSL_set1_host)(SSL *, const char *hostname);
+	int (*SSL_CTX_set_cipher_list)(void *, const char *);
+	int (*SSL_CTX_set_ciphersuites)(void *, const char *);
+
+
 	int (*SSL_connect)(SSL *);
 	int (*SSL_read)(SSL *, void *buf, int num);
 	int (*SSL_write)(SSL *, const void *buf, int num);
@@ -219,6 +225,10 @@ static bool load_symbols(void) {
 	BIND(lib_ssl, SSL_CTX_load_verify_locations);
 	BIND(lib_ssl, SSL_CTX_set_default_verify_paths);
 	BIND(lib_ssl, SSL_CTX_ctrl);
+	BIND(lib_ssl, SSL_CTX_set_cipher_list);
+	BIND(lib_ssl, SSL_CTX_set_ciphersuites);
+	
+
 	BIND(lib_ssl, SSL_new);
 	BIND(lib_ssl, SSL_free);
 	BIND(lib_ssl, SSL_set_verify);
@@ -338,6 +348,33 @@ static bool ensure_loaded(void) {
 	// asking by version rather than by SSL_OP_NO_* flags keeps this correct
 	// across OpenSSL versions.
 	api.SSL_CTX_ctrl(shared_ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION, NULL);
+
+	// The ClientHello shape: Apple's GrandSlam edge grades the handshake
+	// fingerprint, and a POST from an unliked shape is refused with a 403
+	// before any protocol runs. The knobs come from the environment for the
+	// experiments, and from the config once a shape is known good.
+	const char *shape_ciphers = getenv("TLS_SHAPE_CIPHERS");
+	if (shape_ciphers && api.SSL_CTX_set_cipher_list) {
+		api.SSL_CTX_set_cipher_list(shared_ctx, shape_ciphers);
+	}
+	const char *shape_suites = getenv("TLS_SHAPE_SUITES");
+	if (shape_suites && api.SSL_CTX_set_ciphersuites) {
+		api.SSL_CTX_set_ciphersuites(shared_ctx, shape_suites);
+	}
+	const char *shape_groups = getenv("TLS_SHAPE_GROUPS");
+	if (shape_groups) {
+		// SSL_CTX_set1_curves_list is a ctrl wrapper, not a symbol: the
+		// groups string rides the same ctrl path the version knobs use.
+		api.SSL_CTX_ctrl(shared_ctx, SSL_CTRL_SET_GROUPS_LIST, 0,
+						 (void *)shape_groups);
+	}
+	const char *shape_max = getenv("TLS_SHAPE_MAXTLS");
+	if (shape_max) {
+		long v = strtol(shape_max, NULL, 10);
+		// 12 -> TLS 1.2, 13 -> TLS 1.3; the ctrl path, like the groups
+		api.SSL_CTX_ctrl(shared_ctx, SSL_CTRL_SET_MAX_PROTO_VERSION,
+						 v == 13 ? 0x0304 : 0x0303, NULL);
+	}
 
 	if (!load_ca(shared_ctx)) {
 		// Without a bundle, strict mode can only refuse: every certificate is
