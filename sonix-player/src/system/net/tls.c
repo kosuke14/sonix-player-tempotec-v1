@@ -508,7 +508,11 @@ static void explain_failure(SSL *ssl, int ret, char *err, size_t err_size) {
 		api.ERR_error_string_n(e, buf, sizeof(buf));
 		snprintf(err, err_size, tr("tls_error"), buf);
 	} else {
-		snprintf(err, err_size, "%s", tr("tls_handshake_failed"));
+		// No queue entry: the detail lives in the error code and the errno.
+		// The numbers are what tell a protocol mismatch from a mid-flight
+		// drop, which otherwise look identical.
+		snprintf(err, err_size, "%s (ssl_err=%d errno=%d)", tr("tls_handshake_failed"),
+				 code, errno);
 	}
 }
 
