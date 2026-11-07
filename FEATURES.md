@@ -70,6 +70,7 @@
 - **Search** across tracks, albums and artists.
 - **Albums with the same name stay apart** - an album is its name and whose it is: the album artist, the artist when there is none, and the folder when there is neither.
 - **Quality badges** under a title: lossy, CD, Hi-Fi, DSD.
+- **Remembered file browser** - Browse returns to the last folder and scroll position after a restart, regardless of which track is playing. If no saved folder is available, it falls back to the remembered local track’s folder (when Remember track is on), then Music or the card root.
 - **Years, Playlists and Most played** - tiles on the Music page alongside All tracks, Albums, Artists, Album artists, Genres and Browse. Every local track play is counted in the library database, and Most played lists your most-listened tracks in descending play-count order. The Music page tiles can be reordered or hidden via **Music → Settings → Library → Rearrange main page**.
 - **Picture viewer** - JPEG (`.jpg`, `.jpeg`) and PNG (`.png`) images can be opened directly from the File Manager.
 - **Playlists** - create, rename, reorder, delete. A long press on a row of All tracks, Albums, Artists or Album artists starts a selection, and the chosen tracks, albums or artists go into the queue, the favourites or a playlist together. Inside a playlist or the favourites the selection also takes the chosen tracks out, after asking. In the file browser the same works on tracks and folders, a folder bringing everything under it. A backup writes an extended M3U to the card that other players can read; import reads one back, resolves missing entries by file name, and reports what it found.
@@ -101,7 +102,8 @@
 - **Album art shape** - choose Rounded, Square or Vinyl (a circle) in Settings → Music → Display options. Applies to the inset sleeves in Standard, Waveform and Alternative; edge-to-edge layouts retain their own shape.
 - **Poster layout** - the sleeve scaled to the edges of the screen without the crop Immersive takes: the whole picture from side to side at the width of the panel, held at the top with square corners and nothing stretched, and the deck below it on its own opaque ground rather than over the artwork - as much of the sleeve as the deck leaves room for, at the largest size the screen allows. Anything holding artwork gets one, and without a picture the empty sleeve stands edge to edge in the cover's colour with the controls in the theme's ink; the favourite marker is a heart on this deck, kept a step smaller than the star it stands in for; and the foot of the sleeve fades into the deck over its last pixels instead of meeting the controls at a line.
 - **Album Art Max layout** - the sleeve instead of the controls: the picture at the width of the panel with the status bar kept above it, the format, the shuffle mode, the menu and the heart in one row under that bar, and a minimal scrub bar along the foot of the artwork, with the artist, the track name and the place in the queue on a black strip below. There is no transport on the page - the physical keys are the transport, which the status bar's play/pause mark confirms - and double-tapping the left or right side of the picture is the previous or next track. Nothing is written over the photograph and the strip carries everything that names the track: the artist first, in the record's colour, then the title in the theme's ink, each given the width of its own words so that neither scrolls unless it has to. The scrub bar, the heart, the format line and the queue count are all drawn in the colour of the album art, so the page belongs to the record rather than to the theme. The bar is a thin band of colour that deepens towards the playhead, which is a tab rather than a knob. The two clocks appear in the middle of the picture, large, only while a track is being scrubbed (a finger on the bar or a held skip key), with the artwork dimmed behind them. *Scrub bar on the left* moves the bar up the left edge instead, where the thumb travels vertically. The V1's panel only, where every number in it is measured; the other boards keep the standard arrangement.
-- **Player layout** - Standard, Waveform, Alternative, Immersive, Poster or Album Art Max, in Settings → Music → Display options; the choice is remembered across restarts.
+- **Vinyl layout** - a thin white rounded border around the sleeve, with a static black record peeking out below it and a compact deck (names, seek bar and transport) underneath. The record's exposed lower arc has clean 2 px concentric grooves in lifted greys and a slightly larger centre label peeking below the sleeve; its small pressing mark matches the reference: a thin rounded stroke leaning down to the right in the exposed lower arc. The exposed record ends above the deck with a clear gap, so it never overlaps the text, seek bar or buttons. The record is drawn once per layout/theme change rather than animated, to keep redraws and battery use down. The V1's 240×320 panel only.
+- **Player layout** - Standard, Waveform, Alternative, Immersive, Poster, Album Art Max or Vinyl, in Settings → Music → Display options; the choice is remembered across restarts.
 - **Tint controls from album art** - optional, off by default, in the same Display options: the play/pause button and the played part of the progress bar take the main colour of the playing track's artwork, in every layout, while previous and next keep their colour. The colour is the one already worked out from the decoded artwork, so nothing extra is decoded and playback is untouched; a track with no artwork keeps the theme's colours.
 - **Legacy play button** - optional, off by default, in the same Display options: the play/pause button sits on a filled circle as big as the button, as it did in the original player, instead of standing as a bare glyph. The circle is white over artwork and in the dark palettes and the palette's grey on the light page, with the glyph in the accent. Where the accent would wash out on it - a yellow, lime or green accent, Tokyo Night's violet, OLED's white - the circle takes the accent and the glyph turns black (or white where that reads better), and Amber on Black and OLED always fill it with their colour. With album-derived tint (including Waveform), the circle stays white and the glyph takes the album colour, even if the tint is pale. A finger on it darkens it.
 - **The control centre** - pulled down from the status bar, or up from the bottom edge with **Appearance → Stock gestures** on: the round quick controls, the brightness bar under them -- or the volume, with **Screen → Volume in control centre** -- and the playing track over its transport. **Tap the title or the artist to open Now Playing** for what is playing, and the control centre closes on the way: the player comes up over the page, or is simply revealed when it was already open behind the panel. The two lines do nothing while the card says there is nothing playing.
@@ -152,7 +154,13 @@ a self-signed certificate), and HLS.
   the firmware's scripts. Pair, connect, forget; the codec list comes from what
   the connected device announces and the best is chosen at each connection.
   Paired devices can be renamed locally or restored to their original name; the
-  remote device itself is not changed.
+  remote device itself is not changed. Search runs for up to 30 seconds using
+  classic Bluetooth inquiry, without hiding devices that have not announced
+  their audio services yet. During the search the player is also discoverable,
+  so a car head unit can initiate pairing; stopping the search restores the
+  previous visibility setting. For Tesla, start Search on the player, then use
+  **Bluetooth → Add New Device → Start Search** in the car. Car interoperability
+  still needs validation on the actual vehicle.
 - **AirPods** - battery per earbud and for the case, model detection, and noise
   control: off, cancellation, transparency, adaptive.
 - **Bluetooth in** - a phone or laptop connects and the player becomes its
@@ -417,7 +425,7 @@ a self-signed certificate), and HLS.
 ## Settings
 
 - **Appearance** - dark and light, plus the V1 palettes Tokyo Night, Amber on Black and OLED (true black with no grey cards, white as its accent, and a main menu without the title and tagline); twelve accent colors, clock position, a dynamic tint that borrows the accent's hue for backgrounds and cards, a toggle to show/hide the battery percentage, and **rounded screen corners** (off by default). While they are on, a slider under the switch sets how round: 2 to 20 px in steps of 2, so the shell can read as boxy as the V1 does in the hand. It starts at 16 px, sized to the 2" 240×320 panel's glass, which is what the corners always were; the choice is kept while the corners are off.
-- **Appearance → Browse on home screen** - replaces the Music tile with Browse, opening the card’s file browser in the card’s `Music` folder directly; a card without that folder still opens at its root. The chevron and the root button still walk up to the rest of the card. Off by default; Music remains available when switched off.
+- **Appearance → Browse on home screen** - replaces the Music tile with Browse, opening the card’s file browser at its last browsed folder and scroll position. On first use it opens the remembered local track’s folder when **Remember track** is enabled, otherwise `Music` (or the card root if it is absent). Missing folders fall back safely. The chevron and the root button still walk up to the rest of the card. Off by default; Music remains available when switched off.
 - **Appearance → Show Books on home screen** - replaces the Audiobooks tile with Books, opening the EPUB shelf directly from home. Off by default; Audiobooks remain available when switched off. Switched on, the two swap places in **More** as well: its Books row becomes Audiobooks, so both libraries stay one tap away and neither is listed twice.
 - **Appearance → Main menu icons only** - optionally hide the six main-menu tile labels and show larger, centered icons. Dedicated native-pixel art avoids stretching small toolbar glyphs or repeatedly filtering the colored illustrations. Applies immediately in every theme and is saved across restarts; other menus, the status bar and the now-playing strip are unchanged. Off by default.
 - **Appearance → Stock gestures** - moves the two sheets to the edges the original firmware pulls them from: Cover Flow down from the top edge of any page, and the control centre up from the bottom of the screen. Off by default, which keeps this player's own arrangement — the control centre pulled down from the status bar, Cover Flow pulled up from the bottom of the main menu — so an update never moves a gesture that is already in the fingers. Both sheets pick the new edges up at the next pull, with no restart; the grip each one is dragged out by moves with them, and the second page of control-centre buttons is turned to the same way in both arrangements, by a swipe or a tap on the dots under the slider.
@@ -503,3 +511,21 @@ a self-signed certificate), and HLS.
 - **Developer options** - unlocked by tapping the build number: ADB, log to the
   card, database log, disabling the software volume attenuation, and a page of
   running processes and memory.
+
+### Hi-res artwork badge
+
+Music > Display options offers an optional HI-RES badge on the now-playing
+artwork. Choose Off, Top right or Top left separately for each player layout;
+it is off by default. It appears for lossless audio above 16-bit or 48 kHz,
+and for DSD, once the stream's format is known. Lossy audio and podcasts do
+not show it. When a source badge occupies the right corner, the hi-res badge
+uses the left corner instead. Album Art Max reserves its corners for text and
+has no badge. Waveform's Standard fallback uses the Standard setting.
+
+### Both control-centre sliders
+
+Settings > Screen > Both sliders shows separate brightness and volume rails in
+the control centre. The setting is off by default; turning it off restores the
+previous choice of which single slider to use. On the V1, the quick buttons and
+playback controls remain accessible while the track text is hidden to make room
+for two full-width, finger-sized targets. USB DAC status remains visible.

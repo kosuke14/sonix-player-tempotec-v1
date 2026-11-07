@@ -44,6 +44,10 @@ bool player_queue_position(int *position, int *count);
 // drawn on a blurred reflection below. Poster scales the sleeve to the width of
 // the screen and puts the deck below it on its own ground.
 //
+// Vinyl frames the sleeve with a thin rounded border and lets a static black
+// record peek out below it. The compact deck keeps the names, seek bar and
+// transport, but omits the clock row to reserve room for the record.
+//
 // Album Art Max -- AAM -- trades the media controls for the artwork, which is
 // the whole of it: the sleeve at the width of the screen, the format and the
 // three buttons in a row under the status bar, the artist and the album in the
@@ -79,12 +83,23 @@ typedef enum {
 	PLAYER_LAYOUT_IMMERSIVE = 3, // the sleeve above a reflected controls deck
 	PLAYER_LAYOUT_POSTER = 4,	 // the sleeve at the width of the screen, whole from side to side, the deck below it
 	PLAYER_LAYOUT_ALBUM_ART_MAX = 5, // the sleeve over the screen, the media controls traded for it
+	PLAYER_LAYOUT_VINYL = 6, // rounded sleeve over a static record, compact deck below
 } player_layout_t;
 
 // In custom layouts, replace the format line with the tagged recording year
 // when one is available. Standard and tracks without a year keep their format.
 bool player_recording_year_get(void);
 void player_recording_year_set(bool enabled);
+
+// A separate artwork badge placement is remembered for each chosen layout.
+// Album Art Max reserves both corners for text and does not show the badge.
+typedef enum {
+	PLAYER_HIRES_OFF = 0,
+	PLAYER_HIRES_RIGHT,
+	PLAYER_HIRES_LEFT,
+} player_hires_position_t;
+player_hires_position_t player_hires_position_get(player_layout_t layout);
+void player_hires_position_set(player_layout_t layout, player_hires_position_t position);
 
 player_layout_t player_layout_get(void);
 void player_layout_set(player_layout_t layout);

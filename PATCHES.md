@@ -6,6 +6,20 @@
 | Touchscreen multitouch, R1 | `tools/cst8xx_multitouch_patch.py` | the panel reports two fingers, the driver lets one out |
 
 
+## Bluetooth TX discovery and car pairing
+
+The V1 Bluetooth search now requests classic BR/EDR inquiry explicitly through
+BlueZ 5.54's per-client discovery filter, with no UUID or RSSI gate. It runs for
+up to 30 seconds and makes the player discoverable during that window, then
+restores RX/SonixLink visibility. Stop, pairing and mode changes interrupt the
+search; stale completions cannot cancel a newer request. Unsupported discovery
+filters fall back to the adapter default, while real start failures are reported.
+
+Hardware validation pending: on the Tesla, start the player's Search, then open
+**Bluetooth → Add New Device → Start Search**. Confirm each device appears on the
+other, pairing completes, and playback works. Also recheck headphones and RX
+mode. Host marshalling/lifecycle tests are not a radio interoperability test.
+
 ## TempoTec V1 240×320 interface profile
 
 The build of this fork is the TempoTec V1 profile. There is no runtime choice
@@ -125,11 +139,16 @@ pulled away from the pixel's own grey by `BACKDROP_BAND_SAT_PCT`, 140 -- sees
 to it that the hue survives the dim: a dark ground of some colour, which is
 what light type has always wanted here, and not a light ground of none.
 The band is asked for
-at the deck's own rectangle (240 wide by `compact_deck_height()` tall) and cut
+at the deck's own rectangle with a reach above it (240 wide by
+`compact_deck_height()` plus `IMMERSIVE_FROST_OVERHEAD`, 12, tall) and cut
 out of the very crop the screen-sized picture was made from -- `make_backdrop()`
 takes the band from the foot of that crop rather than from a crop of the band's
 own aspect, because a blur whose colours come from pixels that are not on the
-screen meets the photograph above it as a seam of the wrong colour. The band is
+screen meets the photograph above it as a seam of the wrong colour. Those
+twelve pixels above the deck frost the sleeve's own foot along with the band,
+so the first row of the deck is not flush against the frost's edge: the
+photograph itself, blurred, a reach rather than a stretch of the band. The
+band is
 an image object of the artwork's frame, built before the words' page: over the
 picture, under the source marks, under the deck, under the sheet the lyrics
 slide in on. It is frosted glass and not a panel -- the artwork stays where it
@@ -3439,3 +3458,63 @@ above, and the two new texts in all eleven language files.
 that the original player drew, and the corner choice rounds the screen's own
 corners, not the cards and tiles inside it. Both are written down so that a
 different reading can be asked for. Neither has been seen on the glass.
+## Multi-file CUE sheets (issue #229)
+
+A sheet with `FILE "01. Song.flac" WAVE / TRACK 01 / INDEX 01 00:00:00`
+followed by a second `FILE` is valid. Sonix formerly stopped parsing at the
+second `FILE` and displayed `01` when that first track lacked its own `TITLE`.
+It now resolves each track's own audio file, resets the playback window at file
+boundaries, and uses a one-track-per-file filename (minus a matching numeric
+prefix and extension) as the title when no track title is supplied. Explicit
+track titles take precedence; multi-track single-file images keep their previous
+number fallback. The scanner, folder browser, queue, remote browse, format
+detection and artwork lookup use the corresponding file and suppress duplicate
+raw audio rows. `make -C sonix-player/tests tags` covers a multi-file UTF-8
+fixture, metadata lookup, format detection and the single-file boundary case.
+An on-device rescan and playback check is still needed.
+
+## Remember the folder browser
+
+The file browser remembers its last visited folder and scroll position across a
+restart, independently of the playing queue. On first use, with no usable saved
+folder, it tries the remembered local track's folder when Remember track is on,
+then Music, then the card root. CUE virtual paths are resolved to their sheet's
+folder. The home Browse tile and the Music page share the same position.
+
+A separate atomic state file beside device_config.ini holds a full-length path,
+including names the INI format cannot represent. Saved paths are checked against
+the mounted card, including symlinks; a missing card or deleted folder cannot
+send the browser outside the card or overwrite the saved position at boot. Scroll
+writes are debounced and flushed when leaving the page or shutting down. Folder
+reads remain asynchronous, and the saved offset is clamped when a listing has
+shrunk. `make -C sonix-player/tests browserstate` checks persistence and path
+fallbacks. The reboot and scroll behavior still needs checking on a V1.
+
+## Bluetooth RX: PCM width, stalled capture and AVRCP state
+
+A Lenovo Legion Tab was reported to play LDAC, AAC, SBC and aptX in RX mode,
+while aptX HD was badly corrupted. The old receiver opened every input except
+32-bit as S16, but allocated and passed 24-bit data to the DAC when BlueALSA
+reported 24 bits. The client now asks the ALSA BlueALSA plug for left-aligned
+S32 for either 24-bit BlueALSA representation and passes four-byte samples to
+the external audio path; 16-bit remains widened as before. This needs listening
+on the V1: the host test stubs the plug, not the firmware's ALSA conversion.
+
+The capture handle is nonblocking, with one bounded poll and a sleep for
+spurious readiness instead of a potentially unbounded ALSA wait at FIFO
+priority. Stop and rapid re-entry serialize ownership on the worker rather than
+on the interface. These changes address plausible RX freeze/recovery paths, but
+are not a diagnosis of the reported long-session lockup or of a Galaxy Fold 8
+connection dropping after roughly 30 seconds. A Mac M4 was also reported to
+work with AAC but not SBC; the exact cause of that failure is not yet known.
+
+The receiver now uses request tickets for fresh PCM information, coalesces
+queued reads, and keeps metadata revisions separate from stream-format replies.
+AVRCP metadata is tied to the current source, cleared on invalidation and
+protected against an older in-flight D-Bus reply. The RX page compares each
+change counter and flag separately, so two changes cannot cancel in a sum.
+`make -C sonix-player/tests bluetooth` exercises the actual capture session with
+fake ALSA, queue/ticket logic, and D-Bus metadata signals. It cannot substitute
+for a V1, BlueALSA and the reported senders. A Bluetooth log taken immediately
+after each separate failure is needed to distinguish link-level disconnects,
+codec negotiation and RX-worker failures.

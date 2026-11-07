@@ -1736,11 +1736,30 @@ static void art_shape_pick_cb(lv_event_t *e) {
 	art_shape_refresh();
 }
 
+static lv_obj_t *hires_pills[3];
+static lv_obj_t *hires_card;
+
+static void hires_refresh(void) {
+	player_layout_t layout = player_layout_get();
+	if (hires_card) lv_obj_set_hidden(hires_card, layout == PLAYER_LAYOUT_ALBUM_ART_MAX);
+	player_hires_position_t pos = player_hires_position_get(layout);
+	for (int i = 0; i < 3; i++) {
+		if (hires_pills[i]) settingsrow_pill_active(hires_pills[i], pos == (player_hires_position_t)i);
+	}
+}
+
+static void hires_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) return;
+	player_hires_position_set(player_layout_get(), (player_hires_position_t)(intptr_t)lv_event_get_user_data(e));
+	hires_refresh();
+}
+
 static lv_obj_t *layout_standard_pill;
 static lv_obj_t *layout_alternative_pill;
 static lv_obj_t *layout_studio_pill;
 static lv_obj_t *layout_immersive_pill;
 static lv_obj_t *layout_poster_pill;
+static lv_obj_t *layout_vinyl_pill;
 static lv_obj_t *layout_aam_pill; // only built on the V1, the panel it is measured for
 // Album Art Max's own row: the band along the foot of the sleeve or up its left
 // edge. Shown only while that arrangement is the chosen one, and only where it
@@ -1770,10 +1789,12 @@ static void layout_refresh(void) {
 	settingsrow_pill_active(layout_studio_pill, chosen == PLAYER_LAYOUT_STUDIO);
 	settingsrow_pill_active(layout_immersive_pill, chosen == PLAYER_LAYOUT_IMMERSIVE);
 	settingsrow_pill_active(layout_poster_pill, chosen == PLAYER_LAYOUT_POSTER);
+	if (layout_vinyl_pill) settingsrow_pill_active(layout_vinyl_pill, chosen == PLAYER_LAYOUT_VINYL);
 	if (layout_aam_pill) {
 		settingsrow_pill_active(layout_aam_pill, chosen == PLAYER_LAYOUT_ALBUM_ART_MAX);
 	}
 	aam_leftie_show();
+	hires_refresh();
 }
 
 static void layout_pick_cb(lv_event_t *e) {
@@ -2546,12 +2567,24 @@ static void build_display_page(gui_config_t *cfg) {
 	// quietly ignored -- a layout that does nothing when chosen reads as a
 	// broken page, not as a limitation.
 	if (bp_is_tempotec_v1()) {
+		layout_vinyl_pill = settingsrow_pill(layout_pills, "musicsettings_layout_vinyl",
+											 PLAYER_LAYOUT_VINYL, layout_pick_cb);
 		layout_aam_pill = settingsrow_pill(layout_pills, "musicsettings_layout_aam",
 										   PLAYER_LAYOUT_ALBUM_ART_MAX, layout_pick_cb);
 	}
 
 	layout_refresh();
 	theme_register_refresh(layout_refresh);
+
+	// The position belongs to the selected arrangement, not all of them.
+	lv_obj_t *hires_row = NULL;
+	hires_card = settingsrow_pills(container, "musicsettings_hires_badge", &hires_row);
+	hires_pills[PLAYER_HIRES_OFF] = settingsrow_pill(hires_row, "musicsettings_hires_off", PLAYER_HIRES_OFF, hires_pick_cb);
+	hires_pills[PLAYER_HIRES_RIGHT] = settingsrow_pill(hires_row, "musicsettings_hires_right", PLAYER_HIRES_RIGHT, hires_pick_cb);
+	hires_pills[PLAYER_HIRES_LEFT] = settingsrow_pill(hires_row, "musicsettings_hires_left", PLAYER_HIRES_LEFT, hires_pick_cb);
+	option_note(container, "musicsettings_hires_note");
+	hires_refresh();
+	theme_register_refresh(hires_refresh);
 
 	// Inset sleeves can be square, softly rounded, or circular like a record.
 	lv_obj_t *art_pills = NULL;

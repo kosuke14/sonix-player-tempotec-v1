@@ -150,7 +150,11 @@ static int queue_head, queue_count;
 static bool g_enabled;
 static bool g_busy;
 static bool g_scanning;
+static unsigned g_scan_generation; // a finished scan must not cancel a newer request
 static bool g_discoverable; // what the Bluetooth list page asked for, last
+// Source MAC explicitly tapped by the user in TX mode before switching to the
+// receiver page; tried ahead of any other bonded phones and ignores backoff.
+static char g_preferred_source[BT_MAC_MAX];
 static int g_seen_count;   // device objects bluez held at the last refresh
 static int g_hidden_count; // ...of which nameless and not audio gear
 static bt_state_t g_state = BT_STATE_OFF;
@@ -217,6 +221,7 @@ static int g_pending_volume = -1; // coalesces a held volume key into one write
 // loop, neither of which may block on D-Bus.
 static bt_stream_t g_rx_stream;
 static unsigned g_rx_serial; // moves every time the worker reads the line above
+static unsigned g_rx_requested, g_rx_answered;
 
 // The codecs the sending device offers, read on the worker with the rest of the
 // receiver's state and read here from the cache. The receiver page's codec menu
@@ -228,8 +233,11 @@ static char g_rx_codecs[BT_MAX_CODECS][BT_CODEC_MAX];
 static int g_rx_codec_count;
 static char g_rx_codec_selected[BT_CODEC_MAX];
 
-static void post_job(const job_t *job);
+static bool post_job(const job_t *job);
+static bool queue_has(job_type_t type);
 static bool bluetooth_still_wanted(void);
+static bool user_job_waiting(void);
+static bool user_job_waiting_locked(void);
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -1369,14 +1377,46 @@ static int codecs_to_ask_for(char out[][BT_CODEC_MAX], int max) {
 	return count;
 }
 
-static bool receiver_profile_wanted(void) {
+bool bluetooth_receiver_profile(void) {
 	pthread_mutex_lock(&lock);
 	bool wanted = g_receiver_profile;
 	pthread_mutex_unlock(&lock);
 	return wanted;
 }
 
-static void sink_in_cmdline(pid_t pid, void *user) {
+static bool receiver_profile_wanted(void) { return bluetooth_receiver_profile(); }
+
+// A scan is also a pairing window: answer the car's inquiry while looking
+// for one. Keep the page/SonixLink request separate so ending a scan restores
+// that owner rather than clearing it.
+// RX is discoverable once its A2DP sink is up. Otherwise visibility follows
+// the active scan or the page's explicit request (e.g. SonixLink).
+static bool effective_discoverable(void) {
+	pthread_mutex_lock(&lock);
+	bool visible = g_receiver_profile || g_discoverable || g_scanning;
+	pthread_mutex_unlock(&lock);
+	return visible;
+}
+
+typedef struct {
+	bool has_source;
+	bool has_sink;
+} bluealsa_profiles_t;
+
+static void bluealsa_cmdline_scan(const char *args, size_t len, bluealsa_profiles_t *out) {
+	if (!args || !out) {
+		return;
+	}
+	for (size_t at = 0; at < len; at += strlen(args + at) + 1) {
+		if (strcmp(args + at, "a2dp-source") == 0) {
+			out->has_source = true;
+		} else if (strcmp(args + at, "a2dp-sink") == 0) {
+			out->has_sink = true;
+		}
+	}
+}
+
+static void profiles_in_cmdline(pid_t pid, void *user) {
 	char path[64];
 	snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
 	char args[1024];
@@ -1387,21 +1427,16 @@ static void sink_in_cmdline(pid_t pid, void *user) {
 	size_t got = fread(args, 1, sizeof(args) - 1, f);
 	fclose(f);
 	args[got] = '\0';
-	// The arguments are separated by NULs.
-	for (size_t at = 0; at < got; at += strlen(args + at) + 1) {
-		if (strcmp(args + at, "a2dp-sink") == 0) {
-			*(bool *)user = true;
-			return;
-		}
-	}
+	bluealsa_cmdline_scan(args, got, (bluealsa_profiles_t *)user);
 }
 
-// Whether the running bluealsa was started with the A2DP sink, read from its
-// command line.
-static bool bluealsa_has_sink(void) {
-	bool sink = false;
-	for_each_process("bluealsa", sink_in_cmdline, &sink);
-	return sink;
+// Whether the running bluealsa matches the active direction: a2dp-sink alone in
+// receiver (RX) mode, or a2dp-source alone in transmitter (TX) mode, matching
+// stock V1's /usr/bin/bluealsa_profile.
+static bool bluealsa_matches_profile(bool want_sink) {
+	bluealsa_profiles_t found = {0};
+	for_each_process("bluealsa", profiles_in_cmdline, &found);
+	return want_sink ? (found.has_sink && !found.has_source) : (found.has_source && !found.has_sink);
 }
 
 static bool ensure_bluealsa(void) {
@@ -1414,11 +1449,11 @@ static bool ensure_bluealsa(void) {
 	}
 
 	// A daemon left from before -- the stock bring-up, or a run of this player
-	// with the receiver open -- may carry the other set of profiles.
+	// with the receiver open -- may carry the other profile.
 	bool want_sink = receiver_profile_wanted();
-	if (process_running("bluealsa") && bluealsa_has_sink() != want_sink) {
-		fprintf(stderr, "bluetooth: bluealsa is running %s the A2DP sink; starting it again\n",
-				want_sink ? "without" : "with");
+	if (process_running("bluealsa") && !bluealsa_matches_profile(want_sink)) {
+		fprintf(stderr, "bluetooth: bluealsa profile does not match %s mode; starting it again\n",
+				want_sink ? "RX (a2dp-sink)" : "TX (a2dp-source)");
 		stop_process("bluealsa");
 		sleep_ms(300);
 	}
@@ -1510,12 +1545,8 @@ static bool ensure_bluealsa(void) {
 		int at = 0;
 		argv[at++] = (char *)"bluealsa";
 		argv[at++] = (char *)"-p";
-		argv[at++] = (char *)"a2dp-source";
-		if (want_sink) {
-			argv[at++] = (char *)"-p";
-			argv[at++] = (char *)"a2dp-sink";
-		}
-		fprintf(stderr, "bluetooth: bluealsa with the A2DP source%s\n", want_sink ? " and sink" : " only");
+		argv[at++] = (char *)(want_sink ? "a2dp-sink" : "a2dp-source");
+		fprintf(stderr, "bluetooth: bluealsa with A2DP %s only\n", want_sink ? "sink (RX)" : "source (TX)");
 		argv[at++] = (char *)"--a2dp-volume";
 		argv[at++] = keepalive;
 		if (rt) {
@@ -1964,6 +1995,13 @@ static void refresh_devices(void) {
 		}
 
 		if (row.paired) {
+			// A pairing initiated from the remote phone goes through our Agent1
+			// without calling pair_and_connect(), so Trusted is still false.
+			// Marking it trusted lets BlueZ accept subsequent A2DP/AVRCP
+			// profile connections from that phone without stalling.
+			if (!row.trusted && btstack_trust(row.mac, true)) {
+				row.trusted = true;
+			}
 			// A paired device always gets a row, so one that never gave a name
 			// falls back to its address -- unlike in the scan list, where a
 			// nameless device is simply not shown.
@@ -2012,81 +2050,88 @@ static void refresh_devices(void) {
 	refresh_audio_state();
 }
 
-// How long a discovery runs when the user presses search. Ten seconds, as the
-// firmware's `bt-adapter -d` does, except that the list fills as devices arrive
-// rather than all at once at the end.
-#define SCAN_SECONDS 10
-
-// How many times a refused discovery is asked for again, and how long between.
-// NotReady is what bluez answers while the controller is coming back from a
-// reset, and the log has three of them inside a second at 23:13:49 with the
-// chip down under bluealsa at the same moment ("Couldn't get HCI version:
-// Network is down"). Retried, the search starts a little late instead of
-// failing under the user's finger.
+// Three inquiry opportunities rather than one ten-second pass. A car can take
+// several seconds to enter inquiry and resolve names. No UUID/RSSI gate here:
+// it must still get a row before its audio services arrive.
+#define SCAN_SECONDS 30
+#define SCAN_POLL_MS 100
 #define SCAN_START_TRIES 3
 #define SCAN_START_WAIT_MS 400
 
-static void do_scan(void) {
-	bool started = false;
-	for (int attempt = 0; attempt < SCAN_START_TRIES && !started; attempt++) {
-		if (attempt) {
-			sleep_ms(SCAN_START_WAIT_MS);
-			pthread_mutex_lock(&lock);
-			bool abandon = !g_enabled;
-			if (abandon) {
-				g_scanning = false;
-			}
-			pthread_mutex_unlock(&lock);
-			if (abandon) {
-				return;
-			}
-		}
-		started = btstack_discovery(true);
-	}
-	if (!started) {
-		// Said here as well as at the end, because this is the branch a user with
-		// no radio takes: with no line here their log carries nothing about the
-		// search, which reads as a search that ran and found nothing.
-		fprintf(stderr, "bluetooth: the search could not be started; bluez did not take the discovery\n");
-		pthread_mutex_lock(&lock);
-		g_scanning = false;
-		pthread_mutex_unlock(&lock);
-		return;
-	}
+static bool scan_active(unsigned generation) {
+	pthread_mutex_lock(&lock);
+	bool active = g_enabled && g_scanning && generation == g_scan_generation && !user_job_waiting_locked();
+	pthread_mutex_unlock(&lock);
+	return active;
+}
 
-	for (int second = 0; second < SCAN_SECONDS; second++) {
-		sleep_ms(1000);
-		pthread_mutex_lock(&lock);
-		bool abandon = !g_enabled || !g_scanning;
-		pthread_mutex_unlock(&lock);
-		if (abandon) {
-			break;
-		}
-		// Every second, so the list grows in front of the user instead of
-		// appearing when the sweep is over.
-		refresh_devices();
-	}
-
+static void scan_finished(unsigned generation) {
 	btstack_discovery(false);
 	pthread_mutex_lock(&lock);
-	g_scanning = false;
+	if (generation == g_scan_generation) {
+		g_scanning = false;
+		g_serial++;
+	}
 	pthread_mutex_unlock(&lock);
+	btstack_set_discoverable(effective_discoverable());
 	refresh_devices();
+}
 
-	// One line per search, so that "it does not find my headphones" has an
-	// answer: this says whether bluez saw anything at all and how much of it the
-	// list decided not to show.
+static void do_scan(unsigned generation) {
+	if (!scan_active(generation)) {
+		scan_finished(generation);
+		return;
+	}
+	bool started = false;
+	for (int attempt = 0; attempt < SCAN_START_TRIES && scan_active(generation); attempt++) {
+		if (attempt) {
+			sleep_ms(SCAN_START_WAIT_MS);
+			if (!scan_active(generation)) {
+				break;
+			}
+		}
+		// Inquiry and page scan are independent. Advertise before searching so
+		// either side can initiate, including a head unit whose Bluetooth page
+		// was opened first. Visibility is restored by scan_finished().
+		btstack_set_discoverable(effective_discoverable());
+		started = btstack_discovery(true);
+		if (started) {
+			break;
+		}
+		fprintf(stderr, "bluetooth: scan start attempt %d refused\n", attempt + 1);
+	}
+	if (!started) {
+		fprintf(stderr, "bluetooth: the search could not be started; bluez did not take the discovery\n");
+		scan_finished(generation);
+		return;
+	}
+	for (int elapsed = 0; elapsed < SCAN_SECONDS * 1000 && scan_active(generation); elapsed += SCAN_POLL_MS) {
+		sleep_ms(SCAN_POLL_MS);
+		if (elapsed % 1000 == 0) {
+			refresh_devices();
+		}
+	}
+	scan_finished(generation);
 	pthread_mutex_lock(&lock);
 	fprintf(stderr, "bluetooth: scan over, bluez holds %d devices, %d paired, %d in the list, %d nameless and dropped\n",
 			g_seen_count, g_paired_count, g_found_count, g_hidden_count);
 	pthread_mutex_unlock(&lock);
 }
 
-static void do_scan_stop(void) {
+static void do_scan_stop(unsigned generation) {
 	pthread_mutex_lock(&lock);
-	g_scanning = false;
+	bool current = generation == g_scan_generation;
+	if (current) {
+		g_scanning = false;
+		g_serial++;
+	}
 	pthread_mutex_unlock(&lock);
+	if (!current) {
+		return; // a stale Stop button must not hide a newer scan
+	}
 	btstack_discovery(false);
+	btstack_set_discoverable(effective_discoverable());
+	refresh_devices();
 }
 
 // ---------------------------------------------------------------------------
@@ -2213,9 +2258,8 @@ static bool other_connected_sink(const char *except, char *out, size_t size) {
 
 // Whether the user has asked for something since the job that is running now:
 // a search, a pairing, a connection, a disconnection, a device forgotten.
-static bool user_job_waiting(void) {
+static bool user_job_waiting_locked(void) {
 	bool waiting = false;
-	pthread_mutex_lock(&lock);
 	for (int i = 0; i < queue_count && !waiting; i++) {
 		switch (queue[(queue_head + i) % JOB_QUEUE_LEN].type) {
 		case JOB_SCAN:
@@ -2223,12 +2267,19 @@ static bool user_job_waiting(void) {
 		case JOB_CONNECT:
 		case JOB_DISCONNECT:
 		case JOB_FORGET:
+		case JOB_RECEIVER_PROFILE:
 			waiting = true;
 			break;
 		default:
 			break;
 		}
 	}
+	return waiting;
+}
+
+static bool user_job_waiting(void) {
+	pthread_mutex_lock(&lock);
+	bool waiting = user_job_waiting_locked();
 	pthread_mutex_unlock(&lock);
 	return waiting;
 }
@@ -2393,7 +2444,10 @@ static bool device_is_paired(const char *mac) {
 	return false;
 }
 
-static bool pair_and_connect(const char *mac) {
+static bool pair_and_connect(const char *mac, bool *deferred_to_receiver) {
+	if (deferred_to_receiver) {
+		*deferred_to_receiver = false;
+	}
 	// bluez must currently know this address. It ages a merely-seen device out
 	// after thirty seconds, and between the sweep finishing, the list being
 	// drawn and the user tapping, half a minute goes by very easily -- which is
@@ -2470,6 +2524,10 @@ static bool pair_and_connect(const char *mac) {
 		fprintf(stderr,
 				"bluetooth: %s paired as an A2DP source; deferring audio connection until receiver mode\n",
 				mac);
+		snprintf(g_preferred_source, sizeof(g_preferred_source), "%s", mac);
+		if (deferred_to_receiver) {
+			*deferred_to_receiver = true;
+		}
 		return true;
 	}
 
@@ -2734,13 +2792,12 @@ static bool bring_stack_up(void) {
 	// the other side looks like the player vanishing halfway through a search.
 	btstack_set_pairable(true);
 	btstack_set_discoverable_timeout(0);
-	// Whatever the page last asked for, and not a flat false: turning Bluetooth
-	// on from that page brings the stack up while the page is open, and a false
-	// here would leave it invisible on the one screen where it should not be.
-	pthread_mutex_lock(&lock);
-	bool visible = g_discoverable;
-	pthread_mutex_unlock(&lock);
-	btstack_set_discoverable(visible);
+	if (receiver_profile_wanted()) {
+		// Let bluetoothd finish registering bluealsa's Sink endpoints and
+		// AudioSink (0x110b) SDP record before advertising to phones.
+		sleep_ms(500);
+	}
+	btstack_set_discoverable(effective_discoverable());
 
 	read_local_name();
 	pthread_mutex_lock(&lock);
@@ -2861,6 +2918,8 @@ void bluetooth_power_down_stack(void) {
 	post_job(&job);
 }
 
+static void invite_sources(void);
+
 static void do_power(bool on, bool deliberate) {
 	if (on) {
 		// The bring-up runs every time, not only when a daemon is missing: after
@@ -2894,7 +2953,11 @@ static void do_power(bool on, bool deliberate) {
 		g_busy = false;
 		pthread_mutex_unlock(&lock);
 
-		reconnect_last();
+		if (receiver_profile_wanted()) {
+			invite_sources();
+		} else {
+			reconnect_last();
+		}
 		return;
 	}
 
@@ -3154,30 +3217,21 @@ static void do_set_receiver_codec(const char *codec) {
 }
 
 static void do_read_receiver(void) {
+	pthread_mutex_lock(&lock);
+	unsigned requested = g_rx_requested;
+	pthread_mutex_unlock(&lock);
 	char mac[BT_MAC_MAX];
 	btstack_stream_t info;
 	bool sending = btstack_audio_source(mac, sizeof(mac));
 	bool have = sending && btstack_stream_info(mac, true, &info);
-
-	char codecs[BT_MAX_CODECS][BT_CODEC_MAX];
-	char selected[BT_CODEC_MAX] = "";
-	int codec_count = 0;
-	if (sending) {
-		codec_count = btstack_codecs_dir(mac, true, codecs, BT_MAX_CODECS, selected, sizeof(selected));
+	char current[BT_MAC_MAX];
+	if (sending && (!btstack_audio_source(current, sizeof(current)) || strcasecmp(mac, current) != 0)) {
+		have = false;
+		sending = false;
 	}
 
-	// What the sender is doing, read outright: bluez announces every later
-	// change, but nothing has been announced yet at the moment the link comes
-	// up, and that is exactly when the first key can arrive.
-	//
-	// Asked of the device rather than of the stream: a transport that is
-	// momentarily unreadable is not a device that stopped playing.
-	if (sending) {
-		btstack_refresh_media_status(mac);
-	} else {
-		btstack_forget_media();
-	}
-
+	// Publish the PCM answer before the slower codec and AVRCP queries. The
+	// real-time capture thread needs this promptly to open the right format.
 	pthread_mutex_lock(&lock);
 	if (have) {
 		snprintf(g_rx_stream.codec, sizeof(g_rx_stream.codec), "%s", info.codec);
@@ -3187,12 +3241,29 @@ static void do_read_receiver(void) {
 	} else {
 		memset(&g_rx_stream, 0, sizeof(g_rx_stream));
 	}
+	g_rx_serial++;
+	g_rx_answered = requested;
+	g_serial++;
+	pthread_mutex_unlock(&lock);
+
+	char codecs[BT_MAX_CODECS][BT_CODEC_MAX];
+	char selected[BT_CODEC_MAX] = "";
+	int codec_count = 0;
+	if (sending) {
+		codec_count = btstack_codecs_dir(mac, true, codecs, BT_MAX_CODECS, selected, sizeof(selected));
+		btstack_refresh_media_status(mac);
+		if (!btstack_audio_source(current, sizeof(current)) || strcasecmp(mac, current) != 0) {
+			codec_count = 0;
+			selected[0] = '\0';
+		}
+	}
+
+	pthread_mutex_lock(&lock);
 	g_rx_codec_count = codec_count;
 	for (int i = 0; i < codec_count; i++) {
 		snprintf(g_rx_codecs[i], BT_CODEC_MAX, "%s", codecs[i]);
 	}
 	snprintf(g_rx_codec_selected, sizeof(g_rx_codec_selected), "%s", selected);
-	g_rx_serial++;
 	g_serial++;
 	pthread_mutex_unlock(&lock);
 }
@@ -3293,14 +3364,35 @@ unsigned bluetooth_receiver_stream_serial(void) {
 	pthread_mutex_lock(&lock);
 	unsigned now = g_rx_serial;
 	pthread_mutex_unlock(&lock);
-	// The metadata moves on its own, announced by the sender rather than
-	// noticed here, so it carries its own counter into this one.
-	return now + btstack_media_serial();
+	return now;
 }
 
-void bluetooth_refresh_receiver(void) {
-	job_t job = {.type = JOB_RX_INFO};
-	post_job(&job);
+unsigned bluetooth_receiver_track_serial(void) { return btstack_media_serial(); }
+
+unsigned bluetooth_refresh_receiver(void) {
+	pthread_mutex_lock(&lock);
+	bool queued = queue_has(JOB_RX_INFO);
+	if (!queued && queue_count < JOB_QUEUE_LEN) {
+		job_t job = {.type = JOB_RX_INFO};
+		queue[(queue_head + queue_count) % JOB_QUEUE_LEN] = job;
+		queue_count++;
+		pthread_cond_signal(&wake);
+		queued = true;
+	}
+	unsigned ticket = 0;
+	if (queued) {
+		if (++g_rx_requested == 0) ++g_rx_requested;
+		ticket = g_rx_requested;
+	}
+	pthread_mutex_unlock(&lock);
+	return ticket;
+}
+
+unsigned bluetooth_receiver_answered(void) {
+	pthread_mutex_lock(&lock);
+	unsigned answer = g_rx_answered;
+	pthread_mutex_unlock(&lock);
+	return answer;
 }
 
 void bluetooth_receiver_command(const char *member) {
@@ -3424,9 +3516,9 @@ static bool queue_has(job_type_t type) {
 	return false;
 }
 
-static void post_job(const job_t *job) {
+static bool post_job(const job_t *job) {
 	pthread_mutex_lock(&lock);
-	bool duplicate = job->type == JOB_REFRESH && queue_has(JOB_REFRESH);
+	bool duplicate = (job->type == JOB_REFRESH || job->type == JOB_RX_INFO) && queue_has(job->type);
 	bool queued = duplicate || queue_count < JOB_QUEUE_LEN;
 	if (!duplicate && queued) {
 		queue[(queue_head + queue_count) % JOB_QUEUE_LEN] = *job;
@@ -3438,6 +3530,7 @@ static void post_job(const job_t *job) {
 	if (!queued) {
 		fprintf(stderr, "bluetooth: job queue full (%d); dropping a job of type %d\n", JOB_QUEUE_LEN, (int)job->type);
 	}
+	return queued;
 }
 
 // Stops bluealsa and starts it again with the current options, then asks the
@@ -3523,20 +3616,72 @@ static void invite_remember(const char *mac, bool refused) {
 	invite_backoff[INVITE_BACKOFF_MAX - 1].until = now_ms() + INVITE_BACKOFF_MS;
 }
 
+static bool try_invite_source(const char *mac, bool connected, bool *waited) {
+	if (!*waited) {
+		sleep_ms(800); // the new daemon registers its endpoints after its name
+		*waited = true;
+	}
+	fprintf(stderr, "bluetooth: asking %s to stream here%s\n", mac,
+			connected ? "" : " (reconnecting paired source)");
+	char why[160] = "";
+	bool asked = btstack_connect_a2dp_source_why(mac, CONNECT_TIMEOUT_MS, why, sizeof(why));
+	if (!asked && strstr(why, "NotReady")) {
+		// This side, not that device: bluez has not finished registering
+		// the endpoints the new bluealsa put up, and answers at once. One
+		// more try a moment later is what turns the log's
+		// "ConnectProfile(A2DP source) -> NotReady" a second after
+		// "bluealsa on the bus" into a connection.
+		sleep_ms(1500);
+		asked = btstack_connect_a2dp_source_why(mac, CONNECT_TIMEOUT_MS, why, sizeof(why));
+	}
+	if (!asked) {
+		invite_remember(mac, true);
+		return false;
+	}
+	invite_remember(mac, false);
+	if (!wait_for_receiver_audio(mac, A2DP_CONFIRM_MS)) {
+		fprintf(stderr, "bluetooth: A2DP source profile accepted for %s; receiver PCM not visible yet\n",
+				mac);
+	}
+	return true;
+}
+
 // When receiver mode opens, invite a phone/computer that is already linked,
 // and reconnect a bonded A2DP source that dropped its ACL while the local Sink
 // endpoint was unavailable. Headphones are never invited in this direction.
 static void invite_sources(void) {
 	char active[BT_MAC_MAX];
 	if (btstack_audio_source(active, sizeof(active))) {
+		g_preferred_source[0] = '\0';
 		fprintf(stderr, "bluetooth: already receiving audio from %s\n", active);
 		return;
 	}
 
+	char preferred[BT_MAC_MAX];
+	snprintf(preferred, sizeof(preferred), "%s", g_preferred_source);
+	g_preferred_source[0] = '\0';
+
 	btstack_device_t devices[BT_MAX_DEVICES];
 	int count = btstack_devices(devices, BT_MAX_DEVICES);
 	bool waited = false;
+
+	if (preferred[0]) {
+		bool connected = false;
+		for (int i = 0; i < count; i++) {
+			if (strcasecmp(devices[i].address, preferred) == 0) {
+				connected = devices[i].connected;
+				break;
+			}
+		}
+		if (try_invite_source(preferred, connected, &waited)) {
+			return;
+		}
+	}
+
 	for (int i = 0; i < count; i++) {
+		if (preferred[0] && strcasecmp(devices[i].address, preferred) == 0) {
+			continue;
+		}
 		if (devices[i].audio_sink) {
 			continue;
 		}
@@ -3553,37 +3698,9 @@ static void invite_sources(void) {
 			continue;
 		}
 
-		if (!waited) {
-			sleep_ms(800); // the new daemon registers its endpoints after its name
-			waited = true;
+		if (try_invite_source(devices[i].address, devices[i].connected, &waited)) {
+			return; // only one phone should stream to the receiver at a time
 		}
-		fprintf(stderr, "bluetooth: asking %s to stream here%s\n", devices[i].address,
-				devices[i].connected ? "" : " (reconnecting paired source)");
-		char why[160] = "";
-		bool asked = btstack_connect_a2dp_source_why(devices[i].address, CONNECT_TIMEOUT_MS, why, sizeof(why));
-		if (!asked && strstr(why, "NotReady")) {
-			// This side, not that device: bluez has not finished registering
-			// the endpoints the new bluealsa put up, and answers at once. One
-			// more try a moment later is what turns the log's
-			// "ConnectProfile(A2DP source) -> NotReady" a second after
-			// "bluealsa on the bus" into a connection.
-			sleep_ms(1500);
-			asked = btstack_connect_a2dp_source_why(devices[i].address, CONNECT_TIMEOUT_MS, why, sizeof(why));
-		}
-		if (!asked) {
-			// One unavailable old phone must not keep the worker from servicing
-			// other Bluetooth events for every paired source on the device --
-			// and must not be asked again on the next visit to the page either.
-			invite_remember(devices[i].address, true);
-			continue;
-		}
-		invite_remember(devices[i].address, false);
-		if (!wait_for_receiver_audio(devices[i].address, A2DP_CONFIRM_MS)) {
-			fprintf(stderr,
-					"bluetooth: A2DP source profile accepted for %s; receiver PCM not visible yet\n",
-					devices[i].address);
-		}
-		return; // only one phone should stream to the receiver at a time
 	}
 }
 
@@ -3676,11 +3793,11 @@ static void *bluetooth_worker(void *arg) {
 				break;
 
 			case JOB_SCAN:
-				do_scan();
+				do_scan((unsigned)job.arg_int);
 				break;
 
 			case JOB_SCAN_STOP:
-				do_scan_stop();
+				do_scan_stop((unsigned)job.arg_int);
 				break;
 
 			case JOB_REFRESH:
@@ -3690,11 +3807,18 @@ static void *bluetooth_worker(void *arg) {
 			case JOB_PAIR: {
 				name_for(job.mac, name, sizeof(name));
 				// Headphones pair and connect in one action. A phone is bonded
-				// here and connects as an audio source only after receiver mode
-				// has registered the local A2DP Sink.
-				bool ok = pair_and_connect(job.mac);
+				// here and connects as an audio source after receiver mode
+				// registers the local A2DP Sink.
+				bool deferred = false;
+				bool ok = pair_and_connect(job.mac, &deferred);
 				refresh_devices();
-				set_op(ok ? BT_OP_OK : BT_OP_FAILED, name);
+				if (ok && deferred) {
+					snprintf(g_preferred_source, sizeof(g_preferred_source), "%s", job.mac);
+					invite_remember(job.mac, false);
+					set_op(BT_OP_NEEDS_RECEIVER, name);
+				} else {
+					set_op(ok ? BT_OP_OK : BT_OP_FAILED, name);
+				}
 				break;
 			}
 
@@ -3703,13 +3827,15 @@ static void *bluetooth_worker(void *arg) {
 				bool source_only = device_is_a2dp_source_only(job.mac);
 				if (source_only && !receiver_profile_wanted()) {
 					// Connecting a phone from the Bluetooth list while its local
-					// Sink endpoint is off would repeat the role mismatch. Treat
-					// this as a successful bond; the receiver page will connect it.
+					// Sink endpoint is off would repeat the role mismatch. Hand
+					// it to receiver mode so a2dp-sink starts and invites it.
 					fprintf(stderr,
-							"bluetooth: %s is an A2DP source; deferring connection until receiver mode\n",
+							"bluetooth: %s is an A2DP source; switching to receiver mode to connect it\n",
 							job.mac);
+					snprintf(g_preferred_source, sizeof(g_preferred_source), "%s", job.mac);
+					invite_remember(job.mac, false);
 					refresh_devices();
-					set_op(BT_OP_PAIRED, name);
+					set_op(BT_OP_NEEDS_RECEIVER, name);
 				} else {
 					bool ok = connect_device(job.mac, source_only);
 					refresh_devices();
@@ -3774,25 +3900,61 @@ static void *bluetooth_worker(void *arg) {
 				pthread_mutex_lock(&lock);
 				bool superseded = queue_has(JOB_RECEIVER_PROFILE);
 				pthread_mutex_unlock(&lock);
-				if (superseded) {
-					fprintf(stderr, "bluetooth: receiver profile changed again; leaving it to the newer job\n");
+				if (superseded || !enabled) {
+					if (superseded) {
+						fprintf(stderr,
+								"bluetooth: receiver profile changed again; leaving it to the newer job\n");
+					}
 					break;
 				}
 				bool want = receiver_profile_wanted();
-				if (process_running("bluealsa") && bluealsa_has_sink() != want) {
-					restart_bluealsa(want ? "receiver open" : "receiver closed");
-				}
-				// Opening the receiver is also a reconnect request. Do this even
-				// when the endpoint was already active, since the phone may have
-				// dropped its link before the page was opened.
-				if (want && process_running("bluealsa") && bluealsa_has_sink()) {
-					invite_sources();
+				if (want) {
+					// Mirror stock V1 (hiby_player + /usr/bin/bluealsa_profile):
+					// start bluealsa in a2dp-sink-only mode FIRST so bluetoothd
+					// registers AudioSink (0x110b) in SDP and sets the Rendering
+					// class of device BEFORE Discoverable exposes the adapter to
+					// scanning phones.
+					if (!process_running("bluealsa") || !bluealsa_matches_profile(true)) {
+						restart_bluealsa("receiver open");
+					}
+					btstack_refresh_audio();
+					sleep_ms(500);
+					btstack_set_pairable(true);
+					btstack_set_discoverable_timeout(0);
+					btstack_set_discoverable(effective_discoverable());
+					if (process_running("bluealsa") && bluealsa_matches_profile(true)) {
+						invite_sources();
+					}
+				} else {
+					// Hide from phones before tearing down the sink endpoint, and
+					// cleanly close any phone link so Android marks it Disconnected
+					// rather than seeing the audio endpoint vanish mid-link.
+					btstack_set_discoverable(effective_discoverable());
+					char sender[BT_MAC_MAX];
+					if (btstack_audio_source(sender, sizeof(sender))) {
+						btstack_disconnect(sender);
+						for (int waited = 0; waited < 1000 && btstack_audio_source(NULL, 0);
+							 waited += 100) {
+							sleep_ms(100);
+						}
+					}
+					if (!process_running("bluealsa") || !bluealsa_matches_profile(false)) {
+						restart_bluealsa("receiver closed");
+					}
+					btstack_refresh_audio();
 				}
 				break;
 			}
 
 			case JOB_DISCOVERABLE:
-				btstack_set_discoverable(job.arg_int != 0);
+				// Receiver mode owns discoverability while active; never advertise
+				// before its A2DP sink is registered, and never let a late unload
+				// from the TX list page turn Discoverable off over RX mode.
+				if (receiver_profile_wanted() &&
+					(!process_running("bluealsa") || !bluealsa_matches_profile(true))) {
+					break;
+				}
+				btstack_set_discoverable(effective_discoverable());
 				break;
 
 			case JOB_SET_NAME: {
@@ -3925,6 +4087,7 @@ static void set_enabled(bool on, bool remember) {
 		g_state = BT_STATE_OFF;
 		g_found_count = 0;
 		g_scanning = false;
+		g_scan_generation++;
 		g_serial++;
 
 		// Everything queued concerns a radio that is going off, and whatever the
@@ -4143,8 +4306,10 @@ void bluetooth_scan_start(void) {
 	if (!skip && last_start_ms != 0 && (int32_t)(now_ms() - last_start_ms) < SCAN_RESTART_MS) {
 		skip = true;
 	}
+	unsigned generation = 0;
 	if (!skip) {
 		g_scanning = true;
+		generation = ++g_scan_generation;
 		last_start_ms = now_ms();
 	}
 	pthread_mutex_unlock(&lock);
@@ -4153,12 +4318,24 @@ void bluetooth_scan_start(void) {
 		return;
 	}
 
-	job_t job = {.type = JOB_SCAN};
-	post_job(&job);
+	job_t job = {.type = JOB_SCAN, .arg_int = (int)generation};
+	if (!post_job(&job)) {
+		pthread_mutex_lock(&lock);
+		if (generation == g_scan_generation) {
+			g_scanning = false;
+			g_serial++;
+		}
+		pthread_mutex_unlock(&lock);
+	}
 }
 
 void bluetooth_scan_stop(void) {
-	job_t job = {.type = JOB_SCAN_STOP};
+	pthread_mutex_lock(&lock);
+	g_scanning = false;
+	unsigned generation = ++g_scan_generation;
+	g_serial++;
+	pthread_mutex_unlock(&lock);
+	job_t job = {.type = JOB_SCAN_STOP, .arg_int = (int)generation};
 	post_job(&job);
 }
 

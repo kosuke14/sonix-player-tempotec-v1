@@ -20,6 +20,7 @@ make -C sonix-player/tests quickpanel-layout
 make -C sonix-player/tests corners
 make -C sonix-player/tests playbutton
 make -C sonix-player/tests playerdeck
+make -C sonix-player/tests vinylayout
 make -C sonix-player/tests waveform-overlay
 make -C sonix-player/tests edge-lock
 make -C sonix-player/tests calculator
@@ -36,11 +37,13 @@ make -C sonix-player/tests aamlayout
 make -C sonix-player/tests extractkeys
 ```
 
-The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `peq-ui`, `quickpanel-layout`, `corners`, `playbutton`, `playerdeck`, `waveform-overlay`, `edge-lock` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
+The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `peq-ui`, `quickpanel-layout`, `corners`, `playbutton`, `playerdeck`, `vinylayout`, `waveform-overlay`, `edge-lock` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
 
 `run_subsonic_tests.py` starts a temporary threaded localhost HTTP server plus three HTTPS servers carrying the certificates in `tls_fixtures.py`, runs the C binary with a private temporary config directory, verifies its requests, then shuts down. All account values are synthetic. Build products live in ignored `.build/`; response/PCM fixtures are generated in memory rather than added to Git, and the three test certificates are pasted into that Python file rather than downloaded.
 
 The `waveform-overlay` UI test checks that both scrolling text pills stay clear of the smaller favourite button, across artwork shapes, font sizes and missing-artist metadata.
+
+The `vinylayout` UI test checks the Vinyl sleeve/record arithmetic at 240×320 across text sizes, the reference-slanted pressing mark in the exposed lower-right arc, the visible even-diameter 2 px grooves, the larger centre label peeking below the sleeve, the tiny-screen fallback, a no-overlap guarantee against the whole deck (including transparent info/seek rows), repeated apply/take-back and sleeve-over-record layering on the real LVGL renderer. It does not link the player's audio/network shell.
 
 The `playerdeck` UI test exercises the V1 deck's real LVGL flex layout while switching between Standard and Waveform, including large font metrics and the fallback when waveform allocation fails. It checks row spacing and that every playback button stays clear of the bottom edge.
 
@@ -74,6 +77,14 @@ missing ALSA template is created without replacing an existing one (the separate
 per-device rewrite still runs when a sink connects). The real
 D-Bus signal cache is driven with a late simulated signal to check that a close
 clears incoming and outgoing PCMs, transport state and media state.
+
+The discovery fixture marshals the real `SetDiscoveryFilter` D-Bus body and
+checks `Transport="bredr"` with no UUID/RSSI restriction, the order before
+`StartDiscovery`, compatibility fallback for an unsupported filter, and refusal
+of a real start failure. Lifecycle checks cover the temporary pairing window,
+restoration of SonixLink/RX visibility, failed starts, queued user work and stale
+stop requests. These host tests do not establish Tesla interoperability; verify
+both discovery directions and audio on the vehicle after installing the build.
 
 The AFH tests check channel maps and timing for link/frequency changes, retry of
 failed sends and clears, radio parks, refreshes and timer wrap. Fake HCI syscalls check the
@@ -533,3 +544,10 @@ packer's JSON substitution and loading the separate `base_build_version` field
 without confusing it with Sonix's build number. The C test checks older/missing
 metadata and clearing cached values. No stock firmware, LVGL or cross-compiler
 is required.
+
+`make -C sonix-player/tests hiresbadge` checks the hi-res badge's quality
+threshold, unknown stream metadata, lossy exclusion and DSD handling.
+
+`make -C sonix-player/tests quickpanel-layout` also exercises the optional
+V1 dual-slider layout using LVGL hit-testing, both gesture positions, page
+counts, DAC status, persistence, volume limits and separate slider callbacks.

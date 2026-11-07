@@ -16,7 +16,21 @@ void config_set_int(const char *section, const char *key, long value) {
 	(void)value;
 }
 
+const char *config_get(const char *section, const char *key, const char *fallback) {
+	(void)section;
+	(void)key;
+	return fallback;
+}
+
+void config_set(const char *section, const char *key, const char *value) {
+	(void)section;
+	(void)key;
+	(void)value;
+}
+
 bool config_save(void) { return true; }
+
+void audio_set_output_device(const char *pcm) { (void)pcm; }
 
 bool btstack_audio_source(char *address_out, size_t size) {
 	if (address_out && size) {
@@ -316,13 +330,375 @@ static void test_boot_cleanup_queue(void) {
 	worker_running = false;
 }
 
+static btstack_device_t fake_devs[4];
+static int fake_dev_count;
+static int trust_calls;
+static char last_trusted_mac[BT_MAC_MAX];
+static int connect_calls;
+static bool fake_visible;
+static int discovery_starts, discovery_stops, visibility_writes;
+static bool discovery_result = true;
+static bool cancel_on_start;
+static char connected_order[4][BT_MAC_MAX];
+
+int btstack_devices(btstack_device_t *out, int max_out) {
+	int n = fake_dev_count < max_out ? fake_dev_count : max_out;
+	for (int i = 0; i < n; i++) {
+		out[i] = fake_devs[i];
+	}
+	return n;
+}
+
+bool btstack_device_connected(const char *address, bool *out) {
+	for (int i = 0; i < fake_dev_count; i++) {
+		if (strcasecmp(fake_devs[i].address, address) == 0) {
+			if (out) {
+				*out = fake_devs[i].connected;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+bool btstack_trust(const char *address, bool trusted) {
+	trust_calls++;
+	snprintf(last_trusted_mac, sizeof(last_trusted_mac), "%s", address);
+	for (int i = 0; i < fake_dev_count; i++) {
+		if (strcasecmp(fake_devs[i].address, address) == 0) {
+			fake_devs[i].trusted = trusted;
+		}
+	}
+	return true;
+}
+
+bool btstack_pair_why(const char *address, int timeout_ms, char *err_out, size_t err_size) {
+	(void)timeout_ms;
+	if (err_out && err_size) {
+		err_out[0] = '\0';
+	}
+	for (int i = 0; i < fake_dev_count; i++) {
+		if (strcasecmp(fake_devs[i].address, address) == 0) {
+			fake_devs[i].paired = true;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool btstack_cancel_pairing(const char *address) {
+	(void)address;
+	return true;
+}
+
+bool btstack_discovery(bool on) {
+	if (on) {
+		discovery_starts++;
+		assert(fake_visible); // the pairing window precedes inquiry
+		if (cancel_on_start) {
+			pthread_mutex_lock(&lock);
+			g_scanning = false;
+			pthread_mutex_unlock(&lock);
+		}
+		return discovery_result;
+	}
+	discovery_stops++;
+	return true;
+}
+
+bool btstack_set_discoverable(bool on) {
+	fake_visible = on;
+	visibility_writes++;
+	return true;
+}
+
+bool btstack_connect(const char *address, int timeout_ms, char *err_out, size_t err_size) {
+	(void)timeout_ms;
+	if (err_out && err_size) {
+		err_out[0] = '\0';
+	}
+	if (connect_calls < 4) {
+		snprintf(connected_order[connect_calls], BT_MAC_MAX, "%s", address);
+	}
+	connect_calls++;
+	for (int i = 0; i < fake_dev_count; i++) {
+		if (strcasecmp(fake_devs[i].address, address) == 0) {
+			fake_devs[i].connected = true;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool btstack_connect_a2dp(const char *address, int timeout_ms) {
+	(void)address;
+	(void)timeout_ms;
+	return true;
+}
+
+bool btstack_connect_a2dp_source(const char *address, int timeout_ms) {
+	return btstack_connect_a2dp_source_why(address, timeout_ms, NULL, 0);
+}
+
+bool btstack_connect_a2dp_source_why(const char *address, int timeout_ms, char *err_out, size_t err_size) {
+	(void)timeout_ms;
+	if (err_out && err_size) {
+		err_out[0] = '\0';
+	}
+	if (connect_calls < 4) {
+		snprintf(connected_order[connect_calls], BT_MAC_MAX, "%s", address);
+	}
+	connect_calls++;
+	for (int i = 0; i < fake_dev_count; i++) {
+		if (strcasecmp(fake_devs[i].address, address) == 0) {
+			fake_devs[i].connected = true;
+			source_pcm = true;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool btstack_disconnect(const char *address) {
+	for (int i = 0; i < fake_dev_count; i++) {
+		if (strcasecmp(fake_devs[i].address, address) == 0) {
+			fake_devs[i].connected = false;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool btstack_audio_sink(char *address_out, size_t size) {
+	if (address_out && size) {
+		address_out[0] = '\0';
+	}
+	return false;
+}
+
+int btstack_codecs(const char *address, char out[][BT_CODEC_NAME_MAX], int max, char *selected, size_t selected_size) {
+	(void)address;
+	(void)out;
+	(void)max;
+	if (selected && selected_size) {
+		selected[0] = '\0';
+	}
+	return 0;
+}
+
+bool btstack_select_codec(const char *address, const char *codec) {
+	(void)address;
+	(void)codec;
+	return false;
+}
+
+bool btstack_audio_info(const char *address, char *out, size_t size) {
+	(void)address;
+	if (out && size) out[0] = '\0';
+	return false;
+}
+
+bool btstack_stream_info(const char *address, bool receiving, btstack_stream_t *out) {
+	(void)address;
+	(void)receiving;
+	if (out) {
+		memset(out, 0, sizeof(*out));
+	}
+	return false;
+}
+
+bool btreceiver_is_active(void) { return false; }
+bool sonixlink_bt_is_peer(const char *mac) {
+	(void)mac;
+	return false;
+}
+
+static void test_rx_discoverability_and_phone_pairing(void) {
+	/* Idle TX stays hidden unless explicitly requested (e.g. SonixLink). A
+	 * scan opens a temporary pairing window; RX is always discoverable. */
+	g_receiver_profile = false;
+	g_discoverable = false;
+	assert(!bluetooth_receiver_profile());
+	assert(!effective_discoverable());
+
+	g_discoverable = true;
+	assert(effective_discoverable());
+	g_discoverable = false;
+	g_scanning = true;
+	assert(effective_discoverable());
+	g_scanning = false;
+	assert(!effective_discoverable());
+
+	g_receiver_profile = true;
+	g_discoverable = false;
+	assert(bluetooth_receiver_profile());
+	assert(effective_discoverable());
+
+	/* Incoming phone pairings arrive with paired=true, trusted=false:
+	 * refresh_devices() must mark them trusted so subsequent phone-initiated
+	 * A2DP connections are accepted by BlueZ without authorization refusal. */
+	memset(fake_devs, 0, sizeof(fake_devs));
+	fake_dev_count = 2;
+	snprintf(fake_devs[0].address, sizeof(fake_devs[0].address), "11:22:33:44:55:66");
+	snprintf(fake_devs[0].name, sizeof(fake_devs[0].name), "Older Tablet");
+	fake_devs[0].paired = true;
+	fake_devs[0].trusted = true;
+	fake_devs[0].audio_source = true;
+
+	snprintf(fake_devs[1].address, sizeof(fake_devs[1].address), "AA:BB:CC:DD:EE:FF");
+	snprintf(fake_devs[1].name, sizeof(fake_devs[1].name), "Galaxy Z Fold");
+	fake_devs[1].paired = true;
+	fake_devs[1].trusted = false;
+	fake_devs[1].audio_source = true;
+
+	trust_calls = 0;
+	source_pcm = false;
+	g_enabled = true;
+	refresh_devices();
+	assert(trust_calls == 1);
+	assert(strcmp(last_trusted_mac, "AA:BB:CC:DD:EE:FF") == 0);
+	assert(fake_devs[1].trusted);
+
+	/* Tapping an audio-source phone from the TX page trusts and remembers it,
+	 * defers A2DP Connect until RX mode's AudioSink profile is up, and then
+	 * invite_sources() connects that preferred phone first. */
+	g_receiver_profile = false;
+	connect_calls = 0;
+	g_preferred_source[0] = '\0';
+	bool deferred = false;
+	assert(pair_and_connect("AA:BB:CC:DD:EE:FF", &deferred));
+	assert(deferred);
+	assert(connect_calls == 0);
+	assert(strcmp(g_preferred_source, "AA:BB:CC:DD:EE:FF") == 0);
+
+	g_receiver_profile = true;
+	invite_sources();
+	assert(connect_calls == 1);
+	assert(strcmp(connected_order[0], "AA:BB:CC:DD:EE:FF") == 0);
+	assert(g_preferred_source[0] == '\0');
+
+	source_pcm = false;
+	g_enabled = false;
+	g_receiver_profile = false;
+}
+
+static void test_scan_pairing_window(void) {
+	assert(SCAN_SECONDS == 30);
+	g_enabled = true;
+	g_receiver_profile = false;
+	g_discoverable = false;
+	g_scanning = true;
+	unsigned generation = ++g_scan_generation;
+	queue_head = queue_count = 0;
+	fake_visible = false;
+	discovery_starts = discovery_stops = visibility_writes = 0;
+	discovery_result = true;
+	cancel_on_start = true;
+	do_scan(generation);
+	assert(discovery_starts == 1 && discovery_stops == 1);
+	assert(!g_scanning && !fake_visible && visibility_writes == 2);
+
+	// SonixLink owns visibility independently; a scan must not revoke it.
+	g_discoverable = true;
+	g_scanning = true;
+	generation = ++g_scan_generation;
+	discovery_starts = discovery_stops = visibility_writes = 0;
+	do_scan(generation);
+	assert(!g_scanning && fake_visible && discovery_stops == 1);
+
+	// A queued pairing interrupts inquiry rather than waiting thirty seconds.
+	g_scanning = true;
+	generation = ++g_scan_generation;
+	queue[0].type = JOB_PAIR;
+	queue_count = 1;
+	discovery_starts = discovery_stops = 0;
+	do_scan(generation);
+	assert(discovery_starts == 0 && discovery_stops == 1 && !g_scanning);
+	queue_count = 0;
+
+	// A stop from an older page cannot cancel the current request.
+	g_scanning = true;
+	generation = ++g_scan_generation;
+	discovery_stops = visibility_writes = 0;
+	do_scan_stop(generation - 1);
+	assert(g_scanning && discovery_stops == 0 && visibility_writes == 0);
+	do_scan_stop(generation);
+	assert(!g_scanning && fake_visible && discovery_stops == 1);
+
+	// All three start attempts failing must still close the pairing window.
+	g_discoverable = false;
+	g_scanning = true;
+	generation = ++g_scan_generation;
+	discovery_result = false;
+	cancel_on_start = false;
+	discovery_starts = discovery_stops = 0;
+	do_scan(generation);
+	assert(discovery_starts == SCAN_START_TRIES && discovery_stops == 1);
+	assert(!g_scanning && !fake_visible);
+
+	// A full queue must not leave the UI searching with no worker job to finish.
+	worker_running = true;
+	g_enabled = true;
+	g_busy = false;
+	queue_count = JOB_QUEUE_LEN;
+	for (int i = 0; i < JOB_QUEUE_LEN; i++) queue[i].type = JOB_MEDIA;
+	bluetooth_scan_start();
+	assert(!g_scanning);
+	queue_count = 0;
+	worker_running = false;
+
+	// RX visibility survives both a scan and a TX page clearing its own flag.
+	g_receiver_profile = true;
+	g_scanning = true;
+	generation = ++g_scan_generation;
+	discovery_result = true;
+	cancel_on_start = true;
+	do_scan(generation);
+	assert(fake_visible && !g_scanning);
+	g_discoverable = false;
+	assert(effective_discoverable());
+	g_receiver_profile = false;
+	g_enabled = false;
+	fake_visible = false;
+}
+
+static void test_rx_request_queue(void) {
+	pthread_mutex_lock(&lock);
+	queue_head = queue_count = 0;
+	g_rx_requested = g_rx_answered = 0;
+	pthread_mutex_unlock(&lock);
+	unsigned first = bluetooth_refresh_receiver();
+	unsigned second = bluetooth_refresh_receiver();
+	assert(first && second != first && queue_count == 1);
+	job_t job;
+	pthread_mutex_lock(&lock);
+	assert(take_job(&job) && job.type == JOB_RX_INFO);
+	pthread_mutex_unlock(&lock);
+	// An in-flight older response cannot satisfy the newer request.
+	g_rx_answered = first;
+	assert(bluetooth_receiver_answered() != second);
+	unsigned third = bluetooth_refresh_receiver();
+	assert(third != second && queue_count == 1);
+	pthread_mutex_lock(&lock);
+	queue_head = 0; queue_count = JOB_QUEUE_LEN;
+	for (int i = 0; i < JOB_QUEUE_LEN; i++) queue[i].type = JOB_MEDIA;
+	pthread_mutex_unlock(&lock);
+	assert(bluetooth_refresh_receiver() == 0);
+	pthread_mutex_lock(&lock);
+	queue_count = 0;
+	pthread_mutex_unlock(&lock);
+}
+
 int main(void) {
+	test_rx_request_queue();
 	test_a2dp_directions();
 	test_startup_waits();
 	test_process_matching();
 	test_alsa_template();
 	test_rfkill_lookup();
 	test_boot_cleanup_queue();
-	printf("PASS bluetooth (A2DP directions, startup, ALSA template, radio switch and boot cleanup)\n");
+	test_rx_discoverability_and_phone_pairing();
+	test_scan_pairing_window();
+	printf("PASS bluetooth (A2DP directions, RX profile/pairing, scan visibility, startup, ALSA template, radio switch and boot cleanup)\n");
 	return 0;
 }
