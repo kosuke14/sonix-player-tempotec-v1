@@ -15,6 +15,7 @@ LDFLAGS += -Wl,--gc-sections
 CORE = $(ROOT)/src/system/streaming/subsonic.c \
        $(ROOT)/src/system/streaming/streambridge.c \
        $(ROOT)/src/system/streaming/subsonicstream.c \
+       $(ROOT)/src/system/image/tinfl.c \
        $(ROOT)/src/system/image/png_scaled.c \
        $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
        $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/md5.c \
