@@ -1077,7 +1077,7 @@ UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_SRC)) \
 UI_CPPFLAGS = $(CPPFLAGS) -I$(ROOT)/lvgl -DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"'
 # The stock-firmware tag copies format their names with generous room; GCC
 # diagnoses the bounded copies at -O1/O2, so they stay nonfatal here.
-UI_CFLAGS = $(CFLAGS) -Wno-error=format-truncation -MMD -MP
+UI_CFLAGS = $(CFLAGS) -Wno-error=format-truncation -Wno-error=missing-field-initializers -MMD -MP
 
 # The screensaver's Framed style on the same renderer; shares the objects above.
 # The Wi-Fi page and its manual-entry page for hidden networks, on the same
@@ -1321,6 +1321,7 @@ STOCKKEYS_UI_SRC = $(ROOT)/tests/ui/test_stockkeys_ui.c \
                    $(ROOT)/src/gui/streaming/stockkeys_ui.c \
                    $(ROOT)/src/system/streaming/stockkeys.c \
                    $(ROOT)/src/system/streaming/streamkeys.c \
+                   $(ROOT)/src/system/image/tinfl.c \
                    $(ROOT)/src/system/image/png_scaled.c \
                    $(ROOT)/src/system/addons/addons.c \
                    $(ROOT)/src/system/core/sha256.c \

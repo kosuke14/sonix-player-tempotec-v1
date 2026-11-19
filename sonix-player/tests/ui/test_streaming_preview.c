@@ -20,7 +20,10 @@
 // Keep unrelated streaming add-ons off: these two destinations have no plugin
 // switch and must remain visible even with the rest of Streaming empty.
 lv_obj_t *radiopage_screen, *podcast_screen, *soundcloud_screen, *tidal_screen;
-lv_obj_t *qobuz_screen, *subsonic_screen, *jellyfin_screen;
+lv_obj_t *qobuz_screen, *subsonic_screen, *jellyfin_screen, *amp_screen;
+// The Apple Music page is not part of this preview: streaming_init lists it,
+// so the symbols the list references are stubbed here.
+void amppage_init(gui_config_t *cfg) { (void)cfg; }
 bool addons_enabled(const char *id) { assert(id); return false; }
 void qobuzpage_init(gui_config_t *cfg) { (void)cfg; abort(); }
 void tidalpage_init(gui_config_t *cfg) { (void)cfg; abort(); }
