@@ -11,6 +11,7 @@
 #include "src/gui/shell/theme.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/streaming/jellyfin_icon.h"
+#include "src/gui/streaming/amppage.h"
 #include "src/gui/streaming/jellyfinpage.h"
 #include "src/gui/streaming/networkmusicpage.h"
 #include "src/gui/streaming/podcastpage.h"
