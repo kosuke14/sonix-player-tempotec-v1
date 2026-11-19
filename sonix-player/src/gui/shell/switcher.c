@@ -12,6 +12,7 @@
 #include "src/gui/library/audiobooks.h"
 #include "src/gui/library/libraryscan.h"
 #include "src/gui/shell/main_menu.h"
+#include "src/gui/shell/gestures.h"
 #include "src/gui/library/music.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/theme.h"
@@ -50,6 +51,7 @@ static int8_t back_btn_top_bar_height;
 // An arrangement that keeps the status bar (Album Art Max) leaves the chevron
 // no such air: the row is there, and the chevron belongs under it.
 static int8_t back_btn_player_inset;
+static bool back_btn_player_right;
 
 static int back_btn_player_top(void) {
 	return (bp_is_tempotec_v1() ? 4 : BACK_BTN_PLAYER_TOP) + back_btn_player_inset;
@@ -61,7 +63,15 @@ static void place_back_btn(bool below_top_bar) {
 	// the player (below_top_bar false) the status bar is not there to sit
 	// under, so the chevron takes the offset above.
 	int y = back_btn_padding + (below_top_bar ? back_btn_top_bar_height : back_btn_player_top());
-	lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, back_btn_padding, y);
+	bool right = !below_top_bar && back_btn_player_right;
+	lv_obj_align(back_btn, right ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT,
+		right ? -back_btn_padding : back_btn_padding, y);
+}
+
+void back_btn_player_right_set(bool right) {
+	if (back_btn_player_right == right) return;
+	back_btn_player_right = right;
+	if (back_btn && chevron_in_player) place_back_btn(false);
 }
 
 void back_btn_player_top_inset(int inset) {
@@ -77,50 +87,47 @@ void back_btn_player_top_inset(int inset) {
 	}
 }
 
-// Where the chevron's own stroke begins inside its canvas.
-//
-// The icon is a 36 px square drawn from a 24 px viewBox with the arrow in the
-// middle third, so a third of the button is empty margin on either side. A page
-// that lines the chevron up with its own marks -- Album Art Max puts the star
-// the same distance from the right edge -- has to measure from the stroke, not
-// from the canvas, or the way back reads as pushed in towards the middle.
-//
-// Read out of the image rather than assumed: the number belongs to the
-// generated asset, and regenerating the icons would otherwise leave this
-// pointing at the wrong place.
-static int chevron_ink_left(void) {
+// Measure the ink of the chevron, not the transparent canvas or touch slot.
+// Cache it: the player can ask at every playback poll, but the asset is fixed.
+static lv_area_t chevron_ink_bounds(void) {
+	static bool measured;
+	static lv_area_t bounds;
+	if (measured) return bounds;
+	measured = true;
+
 	const lv_image_dsc_t *dsc = &icon_chevron_left;
-	if (!dsc->data || dsc->header.cf != LV_COLOR_FORMAT_ARGB8888) {
-		return 0;
-	}
-	int w = (int)dsc->header.w;
-	int h = (int)dsc->header.h;
-	const uint8_t *px = (const uint8_t *)dsc->data;
-	for (int x = 0; x < w; x++) {
-		for (int y = 0; y < h; y++) {
-			if (px[((size_t)y * (size_t)w + (size_t)x) * 4 + 3] > 24) {
-				return x;
-			}
+	int w = dsc->header.w;
+	int h = dsc->header.h;
+	bounds = (lv_area_t){0, 0, w - 1, h - 1};
+	if (!dsc->data || dsc->header.cf != LV_COLOR_FORMAT_ARGB8888) return bounds;
+
+	lv_area_t ink = {w, h, -1, -1};
+	for (int y = 0; y < h; y++) {
+		const uint8_t *row = dsc->data + (size_t)y * dsc->header.stride;
+		for (int x = 0; x < w; x++) {
+			if (row[x * 4 + 3] <= 24) continue;
+			ink.x1 = LV_MIN(ink.x1, x);
+			ink.y1 = LV_MIN(ink.y1, y);
+			ink.x2 = LV_MAX(ink.x2, x);
+			ink.y2 = LV_MAX(ink.y2, y);
 		}
 	}
-	return 0;
+	if (ink.x2 >= 0) bounds = ink;
+	return bounds;
 }
 
-static int8_t back_btn_ink_inset;
+lv_area_t back_btn_player_ink_bounds(void) {
+	lv_area_t ink = chevron_ink_bounds();
+	int x = back_btn_padding + (back_btn_size - (int)icon_chevron_left.header.w) / 2;
+	int y = back_btn_padding + back_btn_player_top() + (back_btn_size - (int)icon_chevron_left.header.h) / 2;
+	lv_area_move(&ink, x, y);
+	return ink;
+}
 
 void back_btn_player_ink_inset(int inset) {
-	if (inset < 0) {
-		inset = 0;
-	}
-	back_btn_ink_inset = (int8_t)inset;
-	if (!back_btn_icon) {
-		return;
-	}
+	if (!back_btn_icon) return;
 	// Zero is the button as it was built: the glyph centred in its slot.
-	int dx = 0;
-	if (back_btn_ink_inset > 0) {
-		dx = (int)back_btn_ink_inset - back_btn_padding - chevron_ink_left();
-	}
+	int dx = inset > 0 ? inset - back_btn_player_ink_bounds().x1 : 0;
 	lv_obj_set_style_translate_x(back_btn_icon, dx, 0);
 }
 
@@ -154,6 +161,15 @@ static lv_obj_t *history_pop(void) {
 		return NULL;
 	}
 	return screen_history[--screen_history_len];
+}
+
+bool switcher_history_contains(lv_obj_t *screen) {
+	for (int i = 0; i < screen_history_len; i++) {
+		if (screen_history[i] == screen) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void load_screen(lv_obj_t *target_screen);
@@ -321,7 +337,9 @@ static void back_underlay_build(void) {
 		// where there is no status bar, the status bar's height everywhere else.
 		int y = back_btn_padding + (going_to_player ? back_btn_player_top() : back_btn_top_bar_height);
 		int inset = (back_btn_size - 36) / 2;
-		lv_obj_set_pos(chevron, back_btn_padding + inset, y + inset);
+		bool right = going_to_player && back_btn_player_right;
+		lv_obj_align(chevron, right ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT,
+			right ? -back_btn_padding - inset : back_btn_padding + inset, y + inset);
 		if (going_to_player && chevron_over_cover) {
 			lv_obj_set_style_image_recolor(chevron, lv_color_white(), 0);
 		} else {
@@ -367,10 +385,59 @@ static void back_anim_cancel_done_cb(lv_anim_t *a) {
 
 static bool back_gesture_off;
 
+// A deliberate upward drag returns to the main menu. Keep it recognizably
+// vertical, and yield immediately to LVGL scrolling or the player's sheets.
+#define HOME_SWIPE_COMMIT_PX 72
+#define HOME_SWIPE_EDGE_PX 48
+static bool home_swiping;
+static lv_point_t home_swipe_start;
+
+static void home_swipe_cb(lv_event_t *e) {
+	if (back_gesture_off || !gestures_swipe_up_home()) {
+		home_swiping = false;
+		return;
+	}
+	lv_event_code_t code = lv_event_get_code(e);
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev) return;
+	if (code == LV_EVENT_PRESSED) {
+		if (lv_screen_active() == main_menu_screen || player_sheet_is_open() || back_anim_running) {
+			home_swiping = false;
+			return;
+		}
+		lv_indev_get_point(indev, &home_swipe_start);
+		// In stock-gesture mode the bottom edge belongs to the control centre.
+		if (gestures_stock() && home_swipe_start.y >= lv_display_get_vertical_resolution(NULL) - HOME_SWIPE_EDGE_PX) {
+			home_swiping = false;
+			return;
+		}
+		home_swiping = true;
+		return;
+	}
+	if (!home_swiping) return;
+	lv_point_t p;
+	lv_indev_get_point(indev, &p);
+	int dx = p.x - home_swipe_start.x;
+	int dy = p.y - home_swipe_start.y;
+	if (code == LV_EVENT_PRESSING) {
+		if (lv_indev_get_scroll_obj(indev) || (LV_ABS(dx) > LV_ABS(dy) && LV_ABS(dx) > 16)) {
+			home_swiping = false;
+		}
+		return;
+	}
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		home_swiping = false;
+		if (code == LV_EVENT_RELEASED && dy <= -HOME_SWIPE_COMMIT_PX && -dy > LV_ABS(dx) * 1.35f) {
+			switch_screen(main_menu_screen);
+		}
+	}
+}
+
 void back_gesture_blocked(bool blocked) {
 	back_gesture_off = blocked;
 	if (blocked) {
 		back_dragging = false;
+		home_swiping = false;
 	}
 }
 
@@ -479,6 +546,10 @@ void switcher_attach_back_gesture(lv_obj_t *obj) {
 	lv_obj_add_event_cb(obj, back_drag_cb, LV_EVENT_PRESSING, NULL);
 	lv_obj_add_event_cb(obj, back_drag_cb, LV_EVENT_RELEASED, NULL);
 	lv_obj_add_event_cb(obj, back_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+	lv_obj_add_event_cb(obj, home_swipe_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(obj, home_swipe_cb, LV_EVENT_PRESSING, NULL);
+	lv_obj_add_event_cb(obj, home_swipe_cb, LV_EVENT_RELEASED, NULL);
+	lv_obj_add_event_cb(obj, home_swipe_cb, LV_EVENT_PRESS_LOST, NULL);
 }
 
 void switch_screen(lv_obj_t *target_screen) {

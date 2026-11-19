@@ -131,6 +131,10 @@ void audio_resume();
 
 void audio_stop();
 
+// Stops playback and waits up to `timeout_ms` for the playback thread to close
+// its open track descriptor before unmounting the card.
+void audio_stop_and_wait(int timeout_ms);
+
 audio_status_t audio_get_status(void);
 
 // Returns true exactly once if the current track reached its end on its own
@@ -173,6 +177,23 @@ void audio_get_stream_codec(char *out, size_t size);
 int audio_get_dsd_multiple(void);
 
 void audio_seek(double seconds);
+
+// The A-B loop, on the track that is playing. A is where the loop starts and
+// B where it ends: with both points set and the playback reaching B, the
+// file winds back to A and the stretch plays again. The points are set from
+// the player's menu, at the position the player reports, on any track.
+//
+// A point is -1 while unset; the loop is live exactly when 0 <= A < B. The
+// points belong to the track and go when another one starts. A scrub that
+// carries the playhead to B or past it leaves the loop armed off -- the
+// points stay, and the loop takes over again when the playhead comes back
+// inside the region.
+void audio_ab_set_a(double seconds);
+void audio_ab_set_b(double seconds);
+void audio_ab_clear(void);
+bool audio_ab_loop_active(void);
+double audio_ab_a(void);
+double audio_ab_b(void);
 
 // Playback speed. 1.0 is normal; anything else goes through a time stretcher,
 // so the pitch does not move -- see speed.h. Only the 16-bit path honours it,
@@ -232,7 +253,23 @@ bool audio_external_begin(int sample_rate, int channels, int bits);
 // as its metronome -- writing one frame's samples to a blocking PCM lets ALSA
 // keep the pace of 59.73 frames per second.
 bool audio_external_begin_latency(int sample_rate, int channels, int bits, int buffer_ms);
+
+// Exclusive sources must not reuse or close another external source's PCM.
+bool audio_external_is_active(void);
+bool audio_external_begin_exclusive_latency(int sample_rate, int channels, int bits, int buffer_ms);
+// Private PCM lease: while held, even legacy external callers cannot join,
+// write to, or close this stream. Use a stable non-NULL address as the owner.
+bool audio_external_begin_owned(const void *owner, int sample_rate, int channels, int bits, int buffer_ms);
+int audio_external_write_owned(const void *owner, const void *frames, int count);
+void audio_external_end_owned(const void *owner);
+// Writes interleaved frames without modifying the caller's buffer. If the USB
+// output's volume relies on software attenuation, it is applied to a private
+// copy here so external sources (including Bluetooth RX) follow the same level
+// as decoded tracks.
 int audio_external_write(const void *frames, int count);
 void audio_external_end(void);
+
+typedef void (*audio_pcm_tap_cb_t)(const void *buf, int frames, int sample_rate, int channels, int bits);
+void audio_set_pcm_tap_cb(audio_pcm_tap_cb_t cb);
 
 #endif // AUDIO_H

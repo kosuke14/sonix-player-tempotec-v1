@@ -19,6 +19,13 @@ client_secret =
 # falls back to "r_usr" for read-only device keys such as the stock V1 pair.
 # scope = r_usr w_usr
 
+# Optional: Podcasts works with no keys at all, from Apple's public directory,
+# which needs no signup. Fill these in only to use Podcast Index instead -- and
+# then also set, in device_config.ini:
+#   [podcast]
+#   api_base = https://api.podcastindex.org/api/1.0
+# Podcast Index's terms do not allow registrations from a free email service,
+# so the pair has to be requested from an address on a domain you control.
 [podcast]
 api_key = 
 api_secret = 
@@ -26,3 +33,11 @@ api_secret =
 [lastfm]
 api_key = 
 api_secret = 
+
+# Optional: SoundCloud works with no keys at all (client_id is discovered
+# automatically). You can configure your SoundCloud username and/or oauth_token
+# directly in Streaming -> SoundCloud -> Account settings, or place them here:
+[soundcloud]
+# username = your-profile-handle
+# oauth_token = 
+# client_id = 

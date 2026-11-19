@@ -139,6 +139,12 @@ bool btstack_connect(const char *address, int timeout_ms, char *err_out, size_t 
 // Only the headphones' A2DP stream, on a device whose link is already up: what
 // is left to bring back after bluealsa has been restarted under it.
 bool btstack_connect_a2dp(const char *address, int timeout_ms);
+// The same, with the refusal handed back as bluez worded it. The wording is
+// what tells the two refusals apart that need opposite answers: "Device or
+// resource busy" is bluez saying it already has this very stream in hand (the
+// device opened the A2DP channel itself and bluez is giving it time to
+// configure it), where asking again changes nothing until bluez is done.
+bool btstack_connect_a2dp_why(const char *address, int timeout_ms, char *err_out, size_t err_size);
 // The other direction: request a phone or computer's A2DP source profile so it
 // can stream to this device. BlueZ establishes the link if it is not up yet.
 bool btstack_connect_a2dp_source(const char *address, int timeout_ms);
@@ -281,7 +287,19 @@ bool btstack_pcm_volume_get(const char *address, bool receiving, int *out);
 bool btstack_pcm_volume_set(const char *address, bool receiving, int volume);
 // Whether bluealsa applies the PCM's Volume locally or forwards it as AVRCP
 // absolute volume to the remote A2DP endpoint.
+//
+// On the receiving PCM this is the difference between a phone's volume that
+// turns the sound down and one that does not: with it off, bluealsa 4.1.1's
+// decoder leaves the samples alone and only silences them at exactly zero.
 bool btstack_pcm_softvolume_set(const char *address, bool receiving, bool enabled);
+// False when there is no such PCM right now (or it does not answer); `out` is
+// then untouched.
+bool btstack_pcm_softvolume_get(const char *address, bool receiving, bool *out);
+
+// A number that changes whenever a receive PCM object appears: a new link, or a
+// codec change building its transport again. The worker compares it with the
+// one it last dealt with to know that the PCM in front of it is a new object.
+unsigned btstack_rx_pcm_generation(void);
 bool btstack_select_codec(const char *address, const char *codec);
 
 // One line describing the audio path bluealsa has actually built: the codec it

@@ -84,6 +84,11 @@ adb shell "SONIX_FULL_LOG=1     sh /tmp/sonix-bugreport.sh"    # whole logs, not
 | Touch: dead zones, ghost taps, scrolling | The bundle's input section (`/proc/bus/input/devices`, `/dev/input`). For a stock-vs-patched driver question, see [PATCHES.md](../PATCHES.md). |
 | Wi-Fi, DLNA, AirPlay, Wi-Fi file transfer | The bundle's network section. It prints `wpa_cli status` and the network list — no PSKs. Say which access point band and what the other end is. |
 | Audio glitches, wrong output, DAC | The bundle's audio section (`/proc/asound`, mixer). Add the Bluetooth log if it happens over Bluetooth. |
+| A USB-C DAC, dongle or headphones the player does not see | Whether **Developer options → External USB DAC** was on, the maker and model of the dongle, and the start of the player log, which prints the setting's state as `usbhost: startup: ...`. The log also carries `usbaudio:` port lines and, for a DAC that does enumerate, the card it became. |
+| A faint hiss under the music on a USB-C DAC, louder on one dongle than another, absent on a phone or on the stock firmware | Nothing to collect -- it is a setting, not a fault. The player used to hold the dongle's own volume control at full gain and turn the samples down instead, so the music sat close to the amplifier's noise floor. `[usb] hardware_volume` now defaults to 1, which gives the control the work; set it to 0 only for a device whose own control is worse than its noise floor. **The `usbaudio: volume goes to '…'` line** names the control it found, and a dongle with none at all will always do it on the samples. |
+| A USB-C DAC that stops when the screen has been dark for a while, usually around ninety seconds, with the player still playing | The whole log, and the last few lines before the sound stops. Look for `power: parking Bluetooth after …` immediately followed by `audio[…]: the output moves from 'plughw:N,0' to 'default'`: that pairing is the idle park taking a route that belongs to the dongle. Fixed -- on a current build it should not appear at all. |
+| A USB-C DAC that is silent below some volume level and then comes to life | The `usbaudio:` lines from when the dongle was plugged in. **`stops following below -X dB; past that the samples do the work`** is the measurement of where its own volume control gives up, and the smoother of the two halves of the knob is below that; `still follows its whole range` means it was never a problem for this device. If a dongle goes quiet *above* the measured point, that is worth reporting with the log -- it means the measurement and the device disagree. |
+| A USB-C DAC that plays and then goes silent with the player still playing | The log across the whole stretch, from the moment it was plugged in to a few seconds after the sound stops. The line to look at is the 10-second `audio[…]: … s at …  Hz … stream …` one: it names the stream's state and how much is still queued, which is what separates the three causes — a dongle that stopped consuming, a stream that never started, and a track that stopped being decoded. `usbhost: … written again` means the port had gone back to its own default and was taken back; `usbaudio: … falling back` must not appear for a dongle at all. A `replug` that fixes it for the same time again points at the device, not at the player. |
 | Battery, charging, standby, power-off | The player log around the event, with the time you plugged or unplugged it. |
 
 ## Always write down, next to the log
@@ -128,3 +133,87 @@ this protection, compare the `bluealsa: Missing RTP packets` and
 `audio: the external source ran dry` lines in a Bluetooth/player log from
 before and after, with the same source and placement. The policy is not a
 radio-firmware repair and has not been validated on a physical V1 here.
+
+### Bluetooth receiver: stutter, the phone's volume, and a freeze
+
+These are the lines the receiver writes to `sonix_player.log` (the player's log,
+not `bluetooth.log`) and what each one says about the three things reported on
+firmware 1.6.1. None of them has been seen on a physical V1 yet: what is below
+is what to look for, not what was found.
+
+**Stutter.** The count that matters is `audio: external source finished; device
+handed back (N underruns)` at the end of every receiver session, and the lines
+`audio: the external source ran dry` while it plays. Two more say why:
+
+- `btreceiver: aptX gets deeper buffers than the other codecs: 160 ms in and 360
+  ms out` -- the deeper aptX buffers are in force for this session. aptX is the
+  one codec that gets them; SBC, AAC, LDAC and aptX HD keep the receiver's
+  ordinary 80 ms in and 120 ms out.
+- `btreceiver: the capture ring overran (N since it opened); the output was not
+  taking frames as fast as they arrived` -- audio was thrown away on the way in,
+  which is a stutter that has nothing to do with the output running dry. Said at
+  most every two seconds, so the number is the count to read.
+
+The two buffers are settings in the `[bluetooth]` section of
+`/usr/data/device_config.ini`, restart the player after changing them:
+
+```
+[bluetooth]
+receiver_aptx_capture_ms = 160
+receiver_aptx_output_ms  = 360
+```
+
+`0` turns the extra room off for aptX. Both are a floor: a larger
+`receiver_capture_ms` or `receiver_output_ms` still wins. The price is delay --
+240 ms more at the output, and up to 80 ms more when the capture side backs up
+-- which a film will show as sound arriving late. A log that still shows aptX
+underruns with the deeper buffers is worth sending: it means the arrival of the
+audio is not the whole story.
+
+**The phone's volume.** Every time a new receiving stream appears, a link or a
+codec change that builds it again, the player says whether the phone's volume
+will be applied on this side:
+
+- `bluetooth: RX stream on <mac> (new stream): the phone's volume would only
+  have muted at zero; it is now applied here, level 111/127 left, 111/127 right`
+  -- the stream started in the daemon's native-volume mode, in which the
+  player's decoder only silences at exactly zero, and was switched. A log that
+  has this line on a connection where the volume felt like an on/off switch is
+  the confirmation.
+- `... the phone's volume is applied here, level ...` -- it was already.
+- `... and turning the software volume on failed` / `its volume settings did not
+  answer 5 times; leaving them as bluealsa has them` -- the daemon would not say
+  or would not take it; the stream is left as it was.
+
+The word after the address is `new stream` for a stream the phone's own codec
+change or a reconnection made, and `after the codec change` for one made by the
+codec button on the receiver page.
+
+**A freeze.** The log is written once a second, so the last second before a
+hang can be missing; what is there is still the best evidence. For a hang in
+receiver mode, send both `sonix_player.log` and `bluetooth.log`, and note
+whether the screen was on and what was on it. Two lines bracket the moment a
+stream starts and are the last things to look for:
+
+- `btreceiver: first audio N ms after the output opened` -- the stream got as
+  far as sound. If it is the last line of a log, the hang was after the sound
+  started; if the log ends before it, the hang was while the DAC was being
+  opened.
+- `btreceiver: <mac> says it is playing and nothing has arrived in 3000 ms; this
+  PCM is not the live one` -- the first-frame check handing the DAC back and
+  opening it again. It is counted from the moment the phone says it is playing,
+  and no longer from the moment the output opened; a log with this line within a
+  second of the phone starting to play is the behaviour this build fixed, and
+  means the fix is not running.
+
+**The control centre over the receiver.** Three lines trace the receiver being
+parked behind the equaliser and brought back:
+
+- `btreceiver: staying on behind a page opened from the control centre`
+- `btreceiver: back on the receiver's page`
+- `btreceiver: the way back to the receiver's page is gone; ending the receiver`
+  -- the user went somewhere (the main menu, another section) the chevron
+  cannot lead back from, and the receiver ended there.
+
+A log in which the receiver stops with none of these lines, right after a page
+was opened from the control centre, is a bug worth reporting with the page's name.

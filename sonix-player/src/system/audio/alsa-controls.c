@@ -1,4 +1,7 @@
 #include "alsa-controls.h"
+#ifdef HOST_WEB_EMU
+#include "webemu.h"
+#endif
 
 #include "src/system/audio/audio.h"
 #include "src/system/bluetooth/bluetooth.h"
@@ -546,6 +549,20 @@ static long with_dsd_gain(long raw) {
 	return raw;
 }
 
+// What the DAC is given for a volume index right now, as a level: the gain
+// table in force and, while a DoP stream is open, the DSD compensation taken
+// off it. alsa_volume_gain_db100() is the index's place on the curve, which is
+// what the other outputs are matched to; this is what leaves the jacks, which
+// is what a reading of the output has to say. Through with_dsd_gain() rather
+// than a second copy of its arithmetic, so the two cannot come apart.
+long alsa_volume_output_db100(int percent) {
+	long raw = with_dsd_gain(percent_to_raw(percent));
+	if (percent <= 0 || raw >= 255) {
+		return ALSA_VOLUME_MUTE_DB100;
+	}
+	return -raw * 50;
+}
+
 // A temporary digital mute used around an output-route transition, suspend,
 // or power-off. The HBC3000 machine driver mutes its analogue path while it
 // changes sockets; muting the DAC as well prevents its last live samples from
@@ -964,6 +981,7 @@ long get_volume(void) { return current_volume; }
 static volume_output_t profile_out = VOLUME_OUTPUT_PHONES;
 static int level[VOLUME_OUTPUT_COUNT] = {-1, -1, -1, -1}; // -1 = never set, so the first reading adopts it
 static bool profile_dirty;
+static bool suppress_bt_notify;
 
 // Where each level is written down. The first and the last are the historical
 // key names, so a player updating from a build with only two profiles finds its
@@ -1168,7 +1186,16 @@ void volume_profile_set_output(volume_output_t out) {
 		wanted = current_percent; // no level for this output yet: keep the one in hand
 	}
 	printf("volume: %s -> %s, %d%%\n", PROFILE_NAMES[leaving], PROFILE_NAMES[out], wanted);
+	// When switching onto Bluetooth with synchronised volume enabled, btvolume
+	// is waiting in BTV_ADOPT for the headphones' own AVRCP level (or will
+	// fall back to get_volume_percent() after ADOPT_SETTLE_MS). Suppressing the
+	// profile-swap notification avoids treating this automatic profile restore
+	// as "volume turned by hand".
+	if (out == VOLUME_OUTPUT_BLUETOOTH && bluetooth_volume_sync()) {
+		suppress_bt_notify = true;
+	}
 	set_volume_percent(wanted);
+	suppress_bt_notify = false;
 	volume_profile_persist();
 }
 
@@ -1189,6 +1216,9 @@ int get_volume_percent(void) { return current_percent; }
 // making 100 the level the jack is remembered at.
 static void apply_volume_hw(int percent) {
 	current_percent = percent;
+#ifdef HOST_WEB_EMU
+	webemu_notify_volume(percent);
+#endif
 	write_dac_attenuation();
 
 	// And, if the sound is leaving over the USB-C port, on the device out
@@ -1206,7 +1236,9 @@ static void apply_volume_hw(int percent) {
 	// and sent over the air, so connected headphones are told separately over
 	// AVRCP. Free when Bluetooth is off or the setting is: the call looks at
 	// two booleans and returns.
-	bluetooth_notify_volume(percent);
+	if (!suppress_bt_notify) {
+		bluetooth_notify_volume(percent);
+	}
 
 	// The DSD offset is named when it is in force, because otherwise the raw
 	// value in this line does not follow from the index and the gain table and

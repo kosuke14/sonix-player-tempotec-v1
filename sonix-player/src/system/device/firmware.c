@@ -10,12 +10,15 @@
 #include <unistd.h>
 
 #include "src/system/audio/audio.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
 #include "src/system/device/clock.h"
 #include "src/system/device/led.h"
 #include "src/system/core/config.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/podcastcache.h"
+#include "src/system/streaming/jellyfincache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/device/power.h"
@@ -108,8 +111,10 @@ void firmware_update_start(void) {
 	printf("firmware: (host build) would arm recovery and reboot\n");
 #else
 	// Recovery or another firmware may not know how to clear our host
-	// override. Never hand control to it while restoration is outstanding.
-	if (!usbhostprobe_cancel()) {
+	// override. Never hand control to it while restoration is outstanding, and
+	// clear the setting: it describes a port the new firmware will not know it
+	// inherited.
+	if (!usbhostmode_release(true)) {
 		fprintf(stderr, "firmware: USB role could not be restored; update refused\n");
 		return;
 	}
@@ -131,6 +136,8 @@ void firmware_update_start(void) {
 	// update's included.
 	qobuzcache_clear_on_exit();
 	tidalcache_clear_on_exit();
+	soundcloudcache_clear_on_exit();
+	jellyfincache_clear_on_exit();
 	podcastcache_clear_on_exit();
 	dlna_clear_on_exit();
 

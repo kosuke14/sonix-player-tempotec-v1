@@ -10,7 +10,7 @@
 
 **CUE sheets** split a single ripped disc into up to 99 tracks, taking the format from the file the sheet points at (and finding the audio file by stem when its extension differs from the `FILE` line). WAVs carrying their own RIFF markers work the same way.
 
-**Format & tag tolerance** - Containers and codecs are identified from file contents rather than extensions, so misnamed files scan and play cleanly. FLAC files carrying leading ID3v2 headers, broken or non-standard ID3v2 tags (v2.4 non-syncsafe sizes, unsynchronised UTF-16 frames, zlib-compressed frames, BOM-less UTF-16, chained tags), multi-page Ogg Vorbis/Opus comment headers, and APEv2/ASF/MP4/RIFF/AIFF/CAF metadata are all read reliably.
+**Format & tag tolerance** - Containers and codecs are identified from file contents rather than extensions, so misnamed files scan and play cleanly. FLAC files carrying leading ID3v2 headers, broken or non-standard ID3v2 tags (v2.4 non-syncsafe sizes, unsynchronised UTF-16 frames, zlib-compressed frames, BOM-less UTF-16, chained tags), multi-page Ogg Vorbis/Opus comment headers, and APEv2/ASF/MP4/RIFF/AIFF/CAF metadata are all read reliably. Tag text written in Shift-JIS or EUC-JP under the Latin-1 encoding byte — which is what a tagger on a Japanese machine left there, and what made a whole library read as `© ä Þ Ý - é` — is decoded to the characters it was written as, in ID3v2 frames, ID3v1 fields and audiobook chapter titles, alongside Latin-1, UTF-8 and Windows-1251 text.
 
 **WAV and AIFF tags** are read from the ID3 chunk taggers add to them, so titles in any script and the cover come through; a WAV's own INFO list fills in whatever that leaves empty.
 
@@ -23,7 +23,12 @@
 - **Parametric EQ** - 10 bands, each with frequency 20 Hz to 20 kHz, gain
   ±15 dB in tenths, Q from 0.10 to 10.00, and five shapes: peak, low shelf,
   high shelf, low-pass, high-pass. Preamp −15 to +6 dB. The page draws the real
-  response, computed from the coefficients that are running. Presets are
+  response, computed from the coefficients that are running. In a band, tap
+  the frequency, gain or Q above its slider to type the exact value on a
+  keypad: the sliders move in steps, and a published correction rarely lands
+  on one. The frequency is typed in Hz or kHz (the key beside OK switches
+  unit) and is kept to the whole Hz; anything out of range is brought back to
+  the nearest limit. Presets are
   Equalizer APO files in the `PEQ` folder of the card: the `ParametricEQ.txt`
   that AutoEq publishes for your headphones loads as it is, and a preset saved
   on the player opens in APO. Two persistent PEQ profiles keep separate bands,
@@ -60,6 +65,26 @@
   the graphic EQ, PEQ and MSEB process incoming PCM, while DSD passes through
   untouched.
 - **USB audio out** - a DAC or USB-C headphones driven with the player as host.
+- **External USB DAC** - a switch under Developer options that keeps the
+  USB-C port supplying power and acting as host, for a dongle that the
+  default dual-role setting never brings up. It is what made a JCally and
+  an ESR dongle work on a TempoTec V1; it stays on across reboots until it
+  is switched off. **A computer or a charger must not be connected while
+  it is on.** ADB, DAC mode and card sharing take the port over from it and
+  give it back afterwards, and it is given back automatically before a
+  suspend. The port's role is also read back every second while it is held
+  and written again if the controller has returned to its own default, which
+  it does on its own after an attach or a detach. A dongle that goes quiet is
+  never routed around: the track waits for it rather than being played to the
+  built-in DAC, and switching the Bluetooth radio off does not take the route
+  back either. The dongle's own volume control does most of the attenuation
+  rather than being left at full gain with the samples turned down, which is
+  what keeps a sensitive pair of IEMs free of background hiss -- and how far
+  down that control really works is measured as the dongle is picked up, so the
+  knob stays smooth and audible all the way to zero instead of going dead where
+  the dongle's output stops following. The older twenty-second **Try external
+  USB DAC** trial is still there, underneath it, for a one-off test that leaves
+  no setting behind.
 - **In-line remote** - the three-button cable remote: one click play/pause, two
   next, three previous.
 
@@ -84,11 +109,12 @@
 
 - **Start from a track** - choose **Start Smart Mix** in a track's menu, its details card, a search result or a one-track list's play menu, then choose **10, 15, 20, 25 or 30 tracks** in the popup (including the starting track). The player builds a mix up to that size in the background, with a progress page and a cancel button. Episodes and streamed cache tracks are not offered as seeds.
 - **Saved as a playlist** - on the Playlist page, **Create Smart Mix** walks the library's own album and track lists to choose the starting track, or takes the single track being added to a playlist. After choosing the starting track, the same track-count popup lets you choose 10–30 tracks or cancel without creating anything. Fewer tracks may be returned when similar tracks run out. The mix is written to the card as an ordinary playlist named after the seed (`Smart Mix - <track>`, with a ` (2)` tail when the name is taken), opens as its own track list, and leaves whatever is playing alone. The same action is reachable from selection mode's **Add to playlist**.
-- **Built entirely on the player** - after a scan or change check, the same library worker builds missing or outdated Smart Mix data from the scanned tags, as its own phase after the music scan. An existing library can build it when the card returns even with Detect changes disabled, without rescanning its files. No computer or network is required; the graph lives beside the index in `.local/genius.db`.
-- **Genre-based candidates** - one genre per cluster, ranked by shared album, artist and year. Each track keeps at most 32 candidates, with at most two per artist and three per album. Empty tags are treated as ordinary values rather than dropping the track.
+- **Built entirely on the player** - after a scan or change check, the same library worker builds missing or outdated Smart Mix data from the scanned tags, as its own phase after the music scan. Disabling Detect changes also suppresses this automatic work when the card returns; a manual library scan still builds it. No computer or network is required; the graph lives beside the index in `.local/genius.db`.
+- **Genre-based candidates** - one genre per cluster, ranked by shared album, artist and year. Each track keeps up to 32 candidates, with at most two per artist and three per album; a large library keeps fewer per track (never under four) so the whole neighbour list stays inside a fixed memory budget. Empty tags are treated as ordinary values rather than dropping the track.
 - **Progress and background work** - the scan page keeps its tracks-written count and shows Smart Mix indexing separately, with its own completed/total percentage and a time estimate. **Continue in background** leaves the job running and returns to the same page later; the display may turn off while the device stays awake. Cancel stops the active phase and prevents the later phases.
 - **Complete generations** - a bounded staging database is synced and then published by a same-directory rename, so a half-written graph never replaces the working one. Cancellation, a changed input, a reached limit or a write error leaves the previous graph in place. Removing the card stops and waits for the worker before unmount, and abandoned staging is discarded on the next build. The generation records the producer, the algorithm and the SHA-256 of the exact normalized input paths and tags, plus the static graph digest, so a graph built from the same inputs elsewhere is recognized without rebuilding.
-- **Bounded indexing** - up to 4,096 library rows (including ignored empty paths), 1 MiB of retained path/tag text, 4,096 bytes per field, 4 MiB of builder allocations and a 2 MiB snapshot. Ranking evaluates at most 4,096 scores and seven passes of that genre per track. Reaching a limit preserves the old graph and leaves the library usable; a Smart Mix failure never fails an otherwise successful scan.
+- **Large libraries** - the graph is built in two streaming walks of the index rather than from a whole-library copy: the first counts the rows and keeps each distinct artist, album and genre once, the second writes one path and one fixed-width record per track. Tags are reduced to their sorted ranks, and the graph is encoded straight into the staging database in 16 KiB pieces. A 25,000-track library therefore builds in a few megabytes of memory and mounts a graph of about five, and a 50,000-track library is supported the same way.
+- **Bounded indexing** - up to 65,535 library rows (including ignored empty paths), 6 MiB of path and tag text, 4,096 bytes per field, 12 MiB of builder allocations, a 12 MiB decoded snapshot and a 2 MiB neighbour array. Ranking scores at most 4,096 tracks of a genre per seed, sampling a larger genre with a fixed stride instead of scanning all of it, and keeps the reference producer's order. Reaching a limit preserves the old graph and leaves the library usable; a Smart Mix failure never fails an otherwise successful scan.
 - **An ordered queue** - spacing and selection decide the sequence, so shuffle and repeat do not alter a playing mix, and the fixed order survives a reboot.
 - Missing data, too few similar tracks and a resource limit each raise their own message, and snapshot memory and graph traversal have explicit limits.
 
@@ -103,21 +129,24 @@
 - **Poster layout** - the sleeve scaled to the edges of the screen without the crop Immersive takes: the whole picture from side to side at the width of the panel, held at the top with square corners and nothing stretched, and the deck below it on its own opaque ground rather than over the artwork - as much of the sleeve as the deck leaves room for, at the largest size the screen allows. Anything holding artwork gets one, and without a picture the empty sleeve stands edge to edge in the cover's colour with the controls in the theme's ink; the favourite marker is a heart on this deck, kept a step smaller than the star it stands in for; and the foot of the sleeve fades into the deck over its last pixels instead of meeting the controls at a line.
 - **Album Art Max layout** - the sleeve instead of the controls: the picture at the width of the panel with the status bar kept above it, the format, the shuffle mode, the menu and the heart in one row under that bar, and a minimal scrub bar along the foot of the artwork, with the artist, the track name and the place in the queue on a black strip below. There is no transport on the page - the physical keys are the transport, which the status bar's play/pause mark confirms - and double-tapping the left or right side of the picture is the previous or next track. Nothing is written over the photograph and the strip carries everything that names the track: the artist first, in the record's colour, then the title in the theme's ink, each given the width of its own words so that neither scrolls unless it has to. The scrub bar, the heart, the format line and the queue count are all drawn in the colour of the album art, so the page belongs to the record rather than to the theme. The bar is a thin band of colour that deepens towards the playhead, which is a tab rather than a knob. The two clocks appear in the middle of the picture, large, only while a track is being scrubbed (a finger on the bar or a held skip key), with the artwork dimmed behind them. *Scrub bar on the left* moves the bar up the left edge instead, where the thumb travels vertically. The V1's panel only, where every number in it is measured; the other boards keep the standard arrangement.
 - **Vinyl layout** - a thin white rounded border around the sleeve, with a static black record peeking out below it and a compact deck (names, seek bar and transport) underneath. The record's exposed lower arc has clean 2 px concentric grooves in lifted greys and a slightly larger centre label peeking below the sleeve; its small pressing mark matches the reference: a thin rounded stroke leaning down to the right in the exposed lower arc. The exposed record ends above the deck with a clear gap, so it never overlaps the text, seek bar or buttons. The record is drawn once per layout/theme change rather than animated, to keep redraws and battery use down. The V1's 240×320 panel only.
-- **Player layout** - Standard, Waveform, Alternative, Immersive, Poster, Album Art Max or Vinyl, in Settings → Music → Display options; the choice is remembered across restarts.
+- **Sticker layout** - a pop-art neon arrangement on a deep violet-black ground (`#080510`): the rounded sleeve wears a straight hot-pink border (`#ff2b93`) and a outer cyan border (`#18e0f8`) over a counter-tilted (`-6°`) double neon frame, with four corner stickers (tilted yellow queue badge at top-left, tilted cyan format badge at top-right, pink shuffle/repeat disc at bottom-left, and golden-yellow favourite heart disc at bottom-right). Below the sleeve, the track title sits on a tilted hot-pink tape strip (`-2.5°`), the artist on a counter-tilted bright-yellow tape strip (`+2.0°`), the album title on a cyan line underneath, and the seek bar inline between the two cyan clocks (hot-pink played fill, yellow knob, dark-purple track) above the ringed hot-pink/yellow play button. The V1's 240×320 panel only.
+- **Player layout** - Standard, Waveform, Alternative, Immersive, Poster, Album Art Max, Vinyl or Sticker, in Settings → Music → Display options; the choice is remembered across restarts.
 - **Tint controls from album art** - optional, off by default, in the same Display options: the play/pause button and the played part of the progress bar take the main colour of the playing track's artwork, in every layout, while previous and next keep their colour. The colour is the one already worked out from the decoded artwork, so nothing extra is decoded and playback is untouched; a track with no artwork keeps the theme's colours.
 - **Legacy play button** - optional, off by default, in the same Display options: the play/pause button sits on a filled circle as big as the button, as it did in the original player, instead of standing as a bare glyph. The circle is white over artwork and in the dark palettes and the palette's grey on the light page, with the glyph in the accent. Where the accent would wash out on it - a yellow, lime or green accent, Tokyo Night's violet, OLED's white - the circle takes the accent and the glyph turns black (or white where that reads better), and Amber on Black and OLED always fill it with their colour. With album-derived tint (including Waveform), the circle stays white and the glyph takes the album colour, even if the tint is pale. A finger on it darkens it.
 - **The control centre** - pulled down from the status bar, or up from the bottom edge with **Appearance → Stock gestures** on: the round quick controls, the brightness bar under them -- or the volume, with **Screen → Volume in control centre** -- and the playing track over its transport. **Tap the title or the artist to open Now Playing** for what is playing, and the control centre closes on the way: the player comes up over the page, or is simply revealed when it was already open behind the panel. The two lines do nothing while the card says there is nothing playing.
   **A second page of round buttons** is a swipe away -- a pair of dots under the brightness bar shows which page you are on, and tapping them turns the page too. A fresh install ships the second page filled in with ten toggles for things that used to be several taps deep in Settings: **Airplane mode** (Wi-Fi and Bluetooth off together; the next tap puts back only the radios that were on), **Crossfeed**, **Soundfield**, **ReplayGain** (off, or back to the mode you used last), **Mono**, **Key lock** (lock the keys when the screen is off), **LED**, **Rotate screen**, **Screen off** and the **Power menu**. A long press opens the Settings page behind a toggle that has one. Screen off and the Power menu are actions rather than switches and are never lit. Which buttons are on which page is set in **Settings → More → Control centre**: the first eight in use are page one, the next eight page two. Players that already have a saved layout keep it exactly as it is; the new buttons wait in that page's "not in use" list until you add them. **Edit mode** rearranges the tiles in place: long-press the card where there is no button (the margins, the gaps between buttons, the dots) and every tile gets a ring and the slider turns into a **Done** button. Tap a tile to pick it up and tap another to swap the two -- across pages too, swiping or tapping the dots to reach the other page; tap the picked-up tile again, or empty space, to put it down. Each swap is saved at once, and the panel never opens in edit mode. Adding and removing tiles stays in Settings → More → Control centre. A button for a module switched off in Plugins is not drawn, and the ones after it close up the gap.
 - **Cover Flow** - an album carousel: pull up from the bottom of the main menu and it follows the finger up over the page; drag it back down -- from anywhere on the sheet, or from the grip under the status bar -- and it goes away. With **Appearance → Stock gestures** on it comes down from the top edge of any page instead, and goes back up, as on the original firmware. Off by default in Settings → Music → Display options.
-- **Lyrics and LRCLIB** - swipe left on the artwork to show the playing track's lyrics, read from a sidecar `.lrc` or `.txt` file beside the track or from its embedded tags; synced lyrics follow the song line by line, tapping a line seeks there, and the screen stays lit while reading. On a local track with no lyrics, the same swipe offers to look them up on **LRCLIB** (and offers to turn Wi-Fi on first when Wi-Fi is off, starting the search automatically once connected), lists the ranked synced and plain matches with a full-text preview, and saves the chosen lyrics atomically as `<track>.lrc` beside the file; while lyrics are open, the corner search button looks up alternatives on LRCLIB to replace them.
+- **Lyrics and LRCLIB** - swipe left on the artwork to show the playing track's lyrics, read from a sidecar `.lrc` or `.txt` file beside the track or from its embedded tags; synced lyrics follow the song line by line, tapping a line seeks there, and the screen stays lit while reading. On a local track with no lyrics, the same swipe offers to look them up on **LRCLIB** (and offers to turn Wi-Fi on first when Wi-Fi is off, starting the search automatically once connected), lists the ranked synced and plain matches with a full-text preview, and saves the chosen lyrics atomically as `<track>.lrc` beside the file; while lyrics are open, the corner search button looks up alternatives on LRCLIB to replace them. If the lookup finds no match, or the track has a title but no artist, the player asks **Search by title only?** This lets you find the original lyrics for a cover without changing its tags.
 - **Queue**, **Details** and, while an audiobook is loaded, **Chapters**.
+- **A-B loop** - set two points on any track and play just the stretch between them, over and over. Tap **A-B loop** in the now-playing menu and pick **Set point A** and **Set point B**: each marks the position the player is at, and the moment playback reaches B the file winds back to A and the stretch plays again. The two points are drawn as ticks on the progress bar, labelled A and B, so the region is visible at a glance; marking the points arms the loop, clearing them (or scrubbing past B) takes it apart, and the points belong to the track and go when another one starts. As with every position on the player, the points are marked in the file's own time, so what the bar shows is what the loop plays, whatever the playback speed. The menu row is toggled in **Settings → Music → Playback options**: off, it is not built for a listener who never marks points.
 
 ## Streaming
 
-- **Subsonic / Gonic** - a new Streaming destination for your own server. Test the connection, browse music folders or artists/albums in pages of 200, and play the page as a queue. MP3 256/320, Opus, or original FLAC/MP3/Opus; transcoding runs on the server. Two fixed 1 MiB RAM rings isolate HTTP/TLS from decoding, refill near 50%, and pre-cache 512 KiB of the upcoming track near 90%. No growing disk cache or playback seeking; compatible-format gapless uses the existing ALSA handoff. Remembering credentials is optional and stores an unencrypted private file. See [setup and limitations](docs/subsonic.md).
+- **Jellyfin** - native Jellyfin music streaming destination with **Quick Connect** (6-digit code + QR) and username/password sign-in (token-only `0600` persistence, passwords never written to disk, optional self-signed TLS, strict origin-isolated `MediaBrowser` auth headers). Browse Folders, Playlists, Artists, Albums (with A–Z / Recently added toggle), Genres, Favourites, Search, and offline Saved tracks (`Music/Jellyfin`). Streams **Original (Direct Play)** or server-transcoded **MP3 320**, **MP3 192**, and **Opus 128** through a bounded microSD cache (`.local/jellyfin-cache/`, **512 MB** default up to **Unlimited**, 256 MB free-space floor) with `growfile` progressive start, 80% lookahead prefetch, single and bulk offline **Keep on card**, Now Playing / Quick Panel favourite sync, and asynchronous Jellyfin playback reporting (`/Sessions/Playing`, `/Progress`, `/Stopped`). See [setup and design notes](docs/jellyfin.md).
+- **Subsonic / Gonic** - a new Streaming destination for your own server. Test the connection, browse music folders or artists/albums in pages of 200, and play the page as a queue. MP3 256/320, Opus, or original FLAC/MP3/Opus; transcoding runs on the server. Two fixed 1 MiB RAM rings isolate HTTP/TLS from decoding, refill near 50%, and pre-cache 512 KiB of the upcoming track near 90%. No growing disk cache or playback seeking; compatible-format gapless uses the existing ALSA handoff. Remembering credentials is optional and stores an unencrypted private file. Long-press a track, or the first track of an album, to **save it to the SD card** as ordinary files under `Music/Subsonic Downloads` in the current Quality's format, one background download at a time, with a progress card, an on-card list that plays and deletes, and artwork saved per album. See [setup and limitations](docs/subsonic.md).
 - **Apple Music** - playback of your Apple Music account through a wrapper-v2 daemon you run yourself on another machine (a PC, a NAS, a small server in Docker); the device has no Apple libraries and carries none, and FairPlay ships as Android libraries the MIPS player cannot run, which is why the decrypt leg lives on the wrapper daemon — or, with the on-device translation mode, on the card itself under a qemu guest. Everything else happens on the player: you sign in to your Apple ID from its own settings page — Apple ID, password, and the six-digit two-factor code typed on its keyboard, nothing stored on the card or anywhere else — then search the catalog by storefront — unset, it follows the player's language (Japanese → `jp`, English → `us`, and so on for all eleven) —, play the results as a queue, and sign out again the same way. The daemon holds no password of its own and is just the network peer: an HTTP side for the playback dispatch and the sign-in flow, and a raw TCP port that turns batches of encrypted AAC samples back into plaintext. The player walks the enhanced HLS itself (master → the AAC variant, HE-AAC as fallback), slices the fMP4 segments into samples, decrypts the first few locally with Apple's public prefetch key, and sends the rest to the daemon in batches of up to 128 samples, re-emitting the result as plain ADTS AAC into the same RAM rings the other streaming services use. Configure the wrapper's URL, decrypt port and storefront in its settings page; the account row shows whose session is live. A decrypt-on-device mode (`translate=1` in the wrapper settings) additionally runs the FairPlay libraries on the card itself under a qemu guest and takes the decrypt port over from the network daemon — see the Apple Music on-device section in [PATCHES](PATCHES.md).
-- **Tidal** - sign in with the code on screen or with the QR-Code; Low, High, CD and Hi-res quality. Search, albums, artists, playlists, favourites, favourite artists and the featured lists. Favourites and playlists can be managed from the player; the V1-sized page keeps the last eight searches, lets home rows be hidden and reordered, removes playlist tracks by position, and selects several rows for one action. First pages of lists are cached on the card for half a day, API and sync requests are serialized, and playback downloads can be queued, cancelled or saved permanently under `Music/Tidal/<artist>/<album>`. The playback cache lives on the card with free-space checks and a 1 GiB ceiling.
-- **Qobuz** - sign in with the account; MP3 320, FLAC 16/44.1, 24/96 and 24/192. Search, albums, artists, playlists, favourites and the featured lists. Favourites and playlists can be managed from the player.
+- **Tidal** - sign in with the code on screen or with the QR-Code; Low, High, CD and Hi-res quality. Search, albums, artists, playlists, favourites, favourite artists, favourite playlists (the ones somebody else made that the account keeps) and the featured lists. Favourites and playlists can be managed from the player; the V1-sized page keeps the last eight searches, lets home rows be hidden and reordered, removes playlist tracks by position, and selects several rows for one action. First pages of lists are cached on the card for half a day, API and sync requests are serialized, and playback downloads can be queued, cancelled or saved permanently under `Music/Tidal/<artist>/<album>`. The playback cache lives on the card with free-space checks and a 1 GiB ceiling.
+- **Qobuz** - sign in with the account; MP3 320, FLAC 16/44.1, 24/96 and 24/192. Search, albums, artists, playlists, favourites and new releases by genre. Favourites and playlists can be managed from the player. Track and album row menus can download MP3 320, FLAC 16/44.1 or hi-res FLAC (up to 24/192) for offline listening; Qobuz may supply a lower quality depending on the release and subscription. The download arrow opens live progress and groups the latest 100 saved tracks by album for offline browsing. New downloads are stored under `Music/Qobuz Downloads` in album folders named for the artist, album and year; metadata is stored in Sonix `.tags` sidecars and artwork as `cover.jpg` or `cover.png` when available. Album progress is estimated by track count. Downloads require a writable card and an eligible Qobuz subscription; unavailable tracks are skipped and reported.
 - **Podcasts** - the Podcast Index catalogue: search, trending, follow up to 100
 shows kept on the device. Downloaded episodes land in the card's `Podcast`
 folder, which also takes podcasts copied there by hand — see
@@ -165,16 +194,38 @@ a self-signed certificate), and HLS.
   control: off, cancellation, transparency, adaptive.
 - **Bluetooth in** - a phone or laptop connects and the player becomes its
   speaker, decoding through its own DAC. The incoming codec, rate and depth are
-  shown.
+  shown. The receiving stream's software volume is switched on every
+  time a stream appears, so the phone's volume keys scale the sound on the player
+  instead of only muting it at zero. aptX gets deeper buffers than the other
+  codecs because it is the one that ran dry in the logs
+  (`receiver_aptx_capture_ms`, `receiver_aptx_output_ms` in `[bluetooth]`; 0
+  turns each off). The graphic EQ, MSEB and PEQ process the incoming audio.
+  **The control centre works over the receiver**: pull it down from the status
+  bar (or up from the bottom edge, if Appearance has the stock gestures on) as
+  anywhere else for volume, brightness, EQ, MSEB and PEQ on/off, and the other
+  toggles. Its card shows the phone's track and the codec in place of the local
+  transport; the side keys still go to the phone. A long press on **EQ**,
+  **MSEB** or **PEQ** opens its page *without leaving the receiver*: it keeps
+  playing behind it, and backing out lands on the receiver page again (a swipe
+  home or a jump to another section ends it, as leaving the receiver always
+  has). Bluetooth and airplane mode are not offered while it lasts, and any
+  other long press asks before it leaves, since that would silence the phone.
+  Cover Flow stays shut.
 - **AirPlay** - the player appears as an AirPlay target.
 - **DLNA** - the player appears as a renderer.
 - **Wi-Fi** - scan and join the networks in the air, and hidden ones too:
   "Add hidden network" at the foot of the Wi-Fi page takes a name and
   passphrase typed by hand (blank for an open network) and probes for the
   network by name, since it never appears in the scan list.
-- **Wi-Fi transfer** - a browser on the same network gets the card: upload
-  files and whole folders, rename, move, delete, download, show hidden files.
-  Reachable at `sonix-transfer.local`.
+- **Wi-Fi file transfer** - open **Wireless → Transfer**, then scan the on-screen
+  QR code or enter the displayed address and session code in a browser on the
+  same Wi-Fi. Drag albums or individual FLACs onto the page to copy them directly
+  to microSD. The browser also lists, downloads, renames, moves and deletes files.
+  The embedded server closes when you leave the transfer page. See [Wi-Fi transfer](docs/wi-fi-transfer.md).
+- **Network folders** - under **Streaming**, browse a remote WebDAV or FTP
+  server and save individual tracks or all tracks in an album folder directly
+  to microSD. Save and play opens the completed local file for offline playback.
+  See [Network folders](docs/network-folders.md).
 - **SonixLink** - a control protocol for a phone: the phone fetches the index
   once and queries it locally instead of paging over the wire. Playback state,
   queue, favourites, artwork and commands.
@@ -244,7 +295,10 @@ a self-signed certificate), and HLS.
 
 - **Calculator** - a display and the twenty keys of an ordinary pocket
   calculator: the four operations, sign, percent, backspace and clear. The sum
-  in progress is kept while you leave the page and come back. The keys are
+  in progress is kept while you leave the page and come back. The display's
+  keyline wears the accent -- the only edge on the page -- so the sum is framed
+  in the colour the rest of the interface marks its own with, and it follows a
+  change of accent or theme without a restart. The keys are
   laid out from the panel's own measurements, so the page fills the V1's 240×320
   screen. The operator keys are drawn a size up and in bold: a
   face sets a multiplication sign a little over half the height of the digits
@@ -287,6 +341,15 @@ a self-signed certificate), and HLS.
   glass cannot drift from what is in the ear. The tempo and the bar are
   remembered across visits and across a reboot; leaving the page stops the
   click, because the page is the only place it can be stopped from.
+
+- **Tape Deck** - an optional More tool with a peak input meter, clipping
+  indicator and voice memos saved as mono WAVs in `Recordings/` on the microSD.
+  A capture-capable ALSA input is required; the headset remote ADC is not a
+  microphone. The 16-pad sampler can play the factory drums without a mic or
+  card, import drums and long vocal WAVs, and overdub a 16-step loop. Save and
+  reopen editable sequences, toggle filter/echo/drive during playback, and
+  record the wet stereo mix directly to microSD. See the
+  [Tape Deck guide](docs/tape-deck.md) for setup.
 
 - **Pet** - a small creature fed by the music it can actually be heard by: a
   local track, a stream, internet radio or a phone over Bluetooth, at a volume
@@ -410,10 +473,16 @@ a self-signed certificate), and HLS.
 > The `.gb` and `.gbc` ROMs need to be inside the `Games` folder, each in a separate folder: `GB` for Game Boy and `GBC` for Game Boy Color.
 > The boot ROMS need to be inside the `Games/Bios` folder, dmg_boot.bin for Game Boy cgb_boot.bin for Game Boy Color. (This step is optional).
 
-- Games show their real cartridge names, matched by CRC32 against the libretro
-  databases.
+- Games show two at a time in large cover-art cards, with the real cartridge
+  names matched by CRC32 against the libretro databases. Optional local art goes in
+  `Games/GB/Cover Art` or `Games/GBC/Cover Art`, named after the game (for
+  example `Tetris.png`); PNG and JPEG are supported. Artwork is loaded only
+  for games near the visible part of the shelf.
 - Save states, battery RAM, five palettes, shaders and GBC color
-  correction.
+  correction. Mute game sound in Gearboy settings (also accessible from the
+  in-game pause menu) to keep listening to music started before the game. The
+  setting is remembered; enabling game sound pauses the current track, and
+  muting it again or quitting resumes a track that was playing.
 - On the V1 the picture fills the panel width at 240x216 with crisp
   nearest-neighbour scaling, leaving a compact touch D-pad and A/B buttons
   below. The physical Play/Pause button acts as Game Boy Start, and the skip
@@ -429,12 +498,14 @@ a self-signed certificate), and HLS.
 - **Appearance → Show Books on home screen** - replaces the Audiobooks tile with Books, opening the EPUB shelf directly from home. Off by default; Audiobooks remain available when switched off. Switched on, the two swap places in **More** as well: its Books row becomes Audiobooks, so both libraries stay one tap away and neither is listed twice.
 - **Appearance → Main menu icons only** - optionally hide the six main-menu tile labels and show larger, centered icons. Dedicated native-pixel art avoids stretching small toolbar glyphs or repeatedly filtering the colored illustrations. Applies immediately in every theme and is saved across restarts; other menus, the status bar and the now-playing strip are unchanged. Off by default.
 - **Appearance → Stock gestures** - moves the two sheets to the edges the original firmware pulls them from: Cover Flow down from the top edge of any page, and the control centre up from the bottom of the screen. Off by default, which keeps this player's own arrangement — the control centre pulled down from the status bar, Cover Flow pulled up from the bottom of the main menu — so an update never moves a gesture that is already in the fingers. Both sheets pick the new edges up at the next pull, with no restart; the grip each one is dragged out by moves with them, and the second page of control-centre buttons is turned to the same way in both arrangements, by a swipe or a tap on the dots under the slider.
+- **Appearance → Swipe up to go home** - enables or disables the upward swipe on non-scrolling screens that returns straight to the home screen. On by default, and saved across restarts.
 - **Appearance → Boot screen** - the picture the next power-on opens with: Retrospace (the default), Space, Travelling in space, Stock, the firmware's own light and dark pictures, or **Custom**, one of your own. The choice is written to the flash marker the boot script reads, so it takes effect at the next boot.
   > **Custom** is a JPEG or PNG from the `Bootlogo` folder in the root of the card, picked from the list under **Custom picture** on the same page. Any size will do: it is scaled to fill the panel and cropped where it overflows, so a landscape photograph boots as a full-screen picture rather than a band between two black bars. The chosen picture is copied into the player, which is why it still boots with the card out — and why a change to the file on the card means choosing it again.
-- **Appearance → Font** - the face the whole interface is drawn with: MiSans (the default), Neon 80s and, where the image carries them, Roboto or Roboto Mono. Text can also be sized Normal or Large. Any `.ttf` or `.otf` file put in the `Fonts` folder on the card is offered beside those, so people can install their own; a face without Cyrillic, Hangul, kanji or Greek still draws the whole interface, because MiSans stays behind it for the letters it does not have.
-- **Screen** - brightness (5% to 100%), screen-off timeout, double-tap to wake, screensaver,
-  and 180° rotation with the touch rotated with it.
+- **Appearance → Font** - the face the whole interface is drawn with: MiSans (the default) and Neon 80s. Text can also be sized Normal or Large. Any `.ttf` or `.otf` file put in the `Fonts` folder on the card is offered beside those, so people can install their own; a face without Cyrillic, Hangul, kanji or Greek still draws the whole interface, because MiSans stays behind it for the letters it does not have.
+- **Screen** - brightness (5% to 100%), screen-off timeout, screensaver, and 180° rotation with the touch rotated with it. Double-tap-to-wake is intentionally unavailable on the V1: blanking the panel powers down its GT9xx touch controller, and its driver has no low-power gesture mode or wake interrupt to leave armed. Pretending otherwise would either never wake or keep the whole touch/panel rail awake; the power button remains the reliable wake path.
 - **Screen → Volume in control centre** - what the slider under the control centre's round buttons does. Off, the default, it is the brightness bar, exactly where the stock firmware has it and where this player has always had it. On, the same bar sets the output volume instead: the sun becomes a speaker that changes with the level (silent, quiet, loud) and the bar turns red past 55%, the warning colour the volume pill over the player uses. It is the same level the volume keys, the status bar and the pill carry. The switch takes effect at the next pull, with no restart.
+- **Screen → Volume as voltage** - shows the volume as what the headphone socket puts out instead of its place on the 0–100 scale: `502mV` where the status bar and the volume pill over the player read `88` (3.5 mm jack, low gain). Off by default, and off, nothing changes. On, the reading is in volts RMS to three figures, in `V`, `mV` or `µV` as the level calls for: on the 3.5 mm jack in low gain it runs from `39.9µV` at 1 to `1.00V` at 100, and in high gain to `2.00V`. It follows the gain switch and, while a DSD track plays as DoP, the DSD gain compensation, so one figure means one level whichever of them is in force. The player cannot tell its two sockets apart, so the socket the figure is for is picked with two pills under the switch: **3.5 mm**, the default, or **4.4 mm**, which reads twice as high. Bluetooth headphones and a USB-C DAC set the level themselves and keep the 0–100; the reading goes back to volts when the sound comes back to a socket. Everything else still goes by the scale: the keys and the slider move it one step at a time, the speaker glyph changes at the same levels, the pill's reading turns red past 55, and the volume limit is still set on the scale. A voltage is about twice as wide as the number, so the pill's scale is about a quarter shorter, and a centred clock steps aside for it in the status bar. Both settings take effect at once, with no restart.
+  > The figure is **nominal: worked out, not measured**. It is the most TempoTec publishes for each socket (2 Vrms on 3.5 mm, 4 Vrms on 4.4 mm), taken to be the top of the high-gain scale, less the attenuation the DAC has been given: the level of a full-scale sine with nothing plugged in. Music sits below it by however far the recording does, and so does anything done to the samples on the way (ReplayGain, the equaliser's preamp, channel balance). A low-impedance load pulls the top of the balanced scale down as well: the 215 mW published for 32 Ω is 2.6 V across it, not 4. It has not been checked against a meter, so read it as a guide to how levels compare rather than as a measurement.
 - **Screensaver visualizer** - in Settings → Screen, enable Screensaver visualizer to replace Album artwork with a live spectrum. Two styles, picked with pills under the switch: **Neon** draws eight wide segmented bars in the theme’s accent colour on black over a matching rail; **LED** draws the classic bench analyzer — sixteen narrower bars of horizontal segments on a dark red field that glows toward the floor. Every slot of every bar is drawn all the time: unlit ones as dark red ghosts of the segment to come, lit ones blazing orange, the bottom few brightening to white where the light pools at the floor, with a warm glow behind each lit stack that shows in the gaps between its segments and a bright cap riding each bar’s peak and falling behind it as the music moves on. The bars are weighted perceptually, so the bass end keeps the movement the treble has, however the mix leans. The track information and clock remain visible. Pictures mode is unchanged. The bars rest when audio is paused or silent, and while nothing is playing the rail is replaced by a musical note in the theme's accent colour, centred in the field — the line comes back when playback resumes.
 - **Screensaver** - choose to show the cover of the current playing track or pictures from the `Screensaver` folder. On the V1's Tokyo Night, Amber on Black and OLED themes the artwork fills the whole panel and the title, artist and clock are read on a translucent field of the palette's own colour over its foot; Dark and Light keep the blurred strip. Under **Album art**, **Fill** keeps that full-bleed look (the default). **Framed** shows the whole cover instead, at its own resolution, in a rounded frame with margins round it, above the title, artist and clock. That frame is 160 px on the V1. The cover is decoded for exactly that size and never enlarged, so it never turns into blocks.
   > Pictures must be baseline (not progressive) JPEGs, portrait, and no larger than 480x800. The V1 crops and scales them to fill its 240x320 screen. For the sharpest result with nothing cropped, make them 240x320 or 480x640, the screen's own 3:4 shape.
@@ -465,6 +536,9 @@ a self-signed certificate), and HLS.
   shutdown at one percent is worth more than the sleep. The warning is given
   once per discharge; it comes back after the battery has been charged past
   7 %.
+- **System → About** - scroll to **Forked by** and scan the QR code with your phone to open the [TempoTec V1 fork on GitHub](https://github.com/mr-f0xx/sonix-player-tempotec-v1). The code uses dark accent-colored squares on a light background tinted by the theme and accent, including the clear border needed for scanning. The player displays it without Wi-Fi.
+- **Battery history (Settings → System → Battery profiler)** - below the live battery readings, the profiler shows the last charge point and the player-on time since it. A charge point is either the moment a connected battery first reaches the configured target (100 %, or 80 % when the cap is on) or when the cable is unplugged; the page says which one. The timestamp and accumulated duration are checkpointed every five minutes and on a clean shutdown. Duration uses the boot-time clock, including standby but excluding all time while the player is switched off, so it can be used to compare screen, radio, gain and output choices without an overnight power-off inflating the figure. A newly updated player deliberately shows “Not recorded yet” until it sees a real cable/target transition rather than inventing a historical date.
+- **Battery profiler (Settings → System)** - live AXP2101 voltage and its programmed charge-current limit, plus estimated runtime and draw. Save an unplugged baseline, change the output, gain, PEQ or Wi-Fi, and compare estimated draw in mA and percent. The V1 does not report live charge current or battery wear. See [Battery profiler](docs/battery-profiler.md) for a repeatable A/B test.
 - **Charging with the player off** - a player that was switched off and is then
   put on a charger comes up on a battery screen rather than the library: the
   level as a filling battery, the percentage, and whether the charger is still
@@ -488,6 +562,21 @@ a self-signed certificate), and HLS.
   power-on, cross-fades between colours, breathes red while charging, turns
   green when the charge is done and fades out on the way down. Brightness (1-5)
   and transition speed (20 ms to 2 s) are set under Power.
+- **Power → Smart LED** (off by default) adds a choice of playback effects.
+  **Bass Pulse** (default) briefly reaches the selected brightness on bass
+  attacks. **Energy Glow** rises and falls smoothly with overall PCM level.
+  **Rainbow Breath** sweeps through the RGB colour wheel while brightening and
+  dimming automatically. All three respect the brightness limit and the
+  chosen style is remembered. Bass Pulse and Energy Glow keep the sample-rate
+  colour: warm yellow through 48 kHz, aqua above 48 through 192 kHz, and
+  orange above 192 kHz. DSD remains steady white. Three red blinks accompany the
+  usual 5% battery warning, and two green blinks confirm successful Wi-Fi
+  Transfer uploads once the browser's uploads settle. Charging still gets
+  its normal indication.
+- **Power → Stealth mode** (off by default) turns the status light off
+  immediately, including while charging. The setting survives reboot; turning
+  it back off restores the previous LED settings. It does not silence the
+  on-screen battery warning or change the automatic low-battery shutdown.
 - **Date and time** - first-run setup guides you to connect to Wi-Fi, then sets
   the clock automatically (including the time zone, estimated from the internet
   connection, and daylight-saving rules) or lets you set it by hand; the clock
@@ -508,19 +597,42 @@ a self-signed certificate), and HLS.
   the card.
 - **System** - device, DAC, serial number, card space, OS version, firmware
   update from a `.upt` on the card, and factory reset.
-- **Developer options** - unlocked by tapping the build number: ADB, log to the
-  card, database log, disabling the software volume attenuation, and a page of
-  running processes and memory.
+- **Developer options** - unlocked by tapping the build number: ADB, **External
+  USB DAC** (see *USB audio out* above) with the timed trial under it, log to
+  the card, database log, disabling the software volume attenuation, and a
+  page of running processes and memory.
+
+### Player status bar
+
+On the TempoTec V1, Music > Display options can show a status bar above the
+player. The player fits in the remaining space; Album Art Max already includes
+the status bar. The option is off by default. The bar automatically follows the
+layout’s background: its blurred backdrop where used, the theme panel for
+Poster, or black for Vinyl. If a blurred layout has no artwork, it falls back
+to the theme.
+
+The independent Album-colored status bar switch tints the volume, playback,
+Wi-Fi, Bluetooth and battery icons with the cover’s dominant color. The battery
+fill and charging bolt follow the album color too; turn the option off to
+restore the normal battery status colors.
 
 ### Hi-res artwork badge
 
 Music > Display options offers an optional HI-RES badge on the now-playing
-artwork. Choose Off, Top right or Top left separately for each player layout;
-it is off by default. It appears for lossless audio above 16-bit or 48 kHz,
-and for DSD, once the stream's format is known. Lossy audio and podcasts do
-not show it. When a source badge occupies the right corner, the hi-res badge
-uses the left corner instead. Album Art Max reserves its corners for text and
-has no badge. Waveform's Standard fallback uses the Standard setting.
+screen. Choose Off, Top right or Top left separately for each player layout;
+it is off by default. A shared Badge design choice offers the original
+two-line HI-RES text (the default), one-line HI-RES, HR, or the official
+gold-and-black Hi-Res Audio logo. Changing the design does not change which
+layouts show the badge or where they put it. It appears for lossless audio
+above 16-bit or 48 kHz, and for DSD, once the stream's format is known. Lossy
+audio and podcasts do not show it. When a source badge occupies the right
+corner of the artwork, the hi-res badge uses the left corner instead. With the
+Vinyl art shape selected, the badge uses the chosen corner of the player
+header in Standard, Waveform, Alternative and Vinyl. The back chevron takes
+the opposite corner, and the two have matching edge insets and vertical
+centers. The logo measures 27 × 27 pixels in the V1 header. Album Art Max
+reserves its corners for text and has no badge. Waveform's Standard fallback
+uses the Standard setting.
 
 ### Both control-centre sliders
 

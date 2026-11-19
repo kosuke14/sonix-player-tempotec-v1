@@ -1,6 +1,5 @@
 #include "lvgl/lvgl.h"
-// The touch panel's read callback, called directly to drain the panel (see
-// panel_touch_flush() below).
+// Touch indev state reset when flushing the panel (see panel_touch_flush()).
 #include "lvgl/src/indev/lv_indev_private.h"
 
 #include <dirent.h>
@@ -24,8 +23,10 @@
 #include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/gui.h"
+#include "src/gui/shell/theme.h"
 #include "src/gui/shell/chargescreen.h"
 #include "src/gui/nowplaying/player.h"
+#include "src/gui/library/libraryscan.h"
 #include "src/gui/settings/language.h"
 #include "src/gui/settings/powersettings.h"
 #include "src/gui/settings/settings.h"
@@ -34,6 +35,7 @@
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/playback/sleeptimer.h"
 #include "src/system/audio/usbaudio.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
 #include "src/system/audio/audio.h"
 #include "src/system/library/audiobookdb.h"
@@ -55,10 +57,15 @@
 #include "src/system/gearboy/gearboy.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/core/panel.h"
+#include "src/system/device/touch_evdev.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/podcastplayed.h"
+#include "src/system/streaming/jellyfin.h"
+#include "src/system/streaming/jellyfincache.h"
+#include "src/system/streaming/soundcloud.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/streaming/stockkeys.h"
 #include "src/system/streaming/streamkeys.h"
@@ -78,12 +85,17 @@
 #include "src/system/device/system.h"
 #include "src/system/device/usb.h"
 #include "src/system/core/utils.h"
-#include "src/system/net/webcgi.h"
 #include "src/system/net/wifi.h"
+#include "src/system/net/wifitransfer.h"
+#include "src/system/streaming/networkmusic.h"
 #include "src/system/library/geniusdb.h"
 
 
 static volatile sig_atomic_t running = 1;
+
+#ifdef HOST_WEB_EMU
+#include "webemu.h"
+#endif
 
 #ifdef HOST_BUILD
 // Screenshot trigger on the simulator. The device uses volume-up plus power,
@@ -91,6 +103,12 @@ static volatile sig_atomic_t running = 1;
 // place and runs the same screenshot path (copy, flash, PNG writer).
 static void host_shot_poll_cb(lv_timer_t *timer) {
 	(void)timer;
+#ifdef HOST_WEB_EMU
+	if (webemu_take_screenshot_request()) {
+		screenshot_request();
+		return;
+	}
+#endif
 	if (access("/tmp/sonix/shot", F_OK) == 0) {
 		remove("/tmp/sonix/shot");
 		screenshot_request();
@@ -105,8 +123,11 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 static bool restore_saved_track(void) {
 	char saved_track[512];
 	double saved_pos = 0;
-	if (!library_playback_state_load(saved_track, sizeof(saved_track), &saved_pos) ||
-		access(saved_track, R_OK) != 0) {
+	if (!library_playback_state_load(saved_track, sizeof(saved_track), &saved_pos)) {
+		return false;
+	}
+	if (!library_playback_track_readable(saved_track)) {
+		fprintf(stderr, "remember track: saved track is not readable: %s\n", saved_track);
 		return false;
 	}
 
@@ -160,6 +181,9 @@ static bool restore_saved_track(void) {
 static void restore_track_timer_cb(lv_timer_t *timer) {
 	lv_timer_delete(timer);
 	restore_saved_track();
+	// Only now may automatic library work start: the restore timer and the
+	// old independent boot timer could otherwise become due in the wrong order.
+	libraryscan_boot_check_schedule();
 }
 
 static void sigint_handler(int sig) {
@@ -946,7 +970,9 @@ static void install_signal_guards(void) {
 }
 
 #ifdef HOST_BUILD
+#ifndef HOST_WEB_EMU
 #include <SDL2/SDL.h>
+#endif
 
 #define GET_MUSIC_DIR() (snprintf((char[256]){0}, 256, "%s/Music", getenv("HOME") ? getenv("HOME") : ""))
 #else
@@ -1104,6 +1130,25 @@ static void post_gui_popup(const char *message, void *user_data) {
 }
 
 #ifdef HOST_BUILD
+#ifdef HOST_WEB_EMU
+static lv_display_t *init_host_display(void) {
+	int width = 0, height = 0;
+	panel_size(&width, &height, 0, 0);
+
+	lv_display_t *disp = webemu_init_display(width, height);
+	if (!disp) {
+		fprintf(stderr, "Error: Failed to create web emulator display\n");
+		return NULL;
+	}
+
+	lv_indev_t *mouse = webemu_init_pointer(disp);
+	if (mouse) {
+		tune_pointer(mouse);
+	}
+
+	return disp;
+}
+#else
 static lv_display_t *host_display;
 
 // The keyboard stands in for the buttons on the case.
@@ -1175,6 +1220,7 @@ static lv_display_t *init_host_display(void) {
 
 	return disp;
 }
+#endif /* HOST_WEB_EMU */
 
 // No panel to re-arm on the host: the SDL window never blanks.
 void display_wake_begin(lv_display_t *disp) { (void)disp; }
@@ -1246,13 +1292,21 @@ static void host_card_root(char *out, size_t size) {
 	}
 }
 
-// The simulator draws through SDL, which owns its own texture: there is no
-// framebuffer page to rotate into. The setting is still remembered so the
-// switch behaves the same way, it just has nothing to turn upside down.
+// The simulator draws through SDL (or the web framebuffer bridge). The web
+// emulator implements 180-degree software rotation; SDL keeps the setting only.
 static bool host_rotated;
+#ifdef HOST_WEB_EMU
+bool display_rotation_supported(void) { return true; }
+bool display_get_rotated(void) { return host_rotated; }
+void display_set_rotated(bool rotated) {
+	host_rotated = rotated;
+	webemu_set_rotated(rotated);
+}
+#else
 bool display_rotation_supported(void) { return false; }
 bool display_get_rotated(void) { return host_rotated; }
 void display_set_rotated(bool rotated) { host_rotated = rotated; }
+#endif
 
 // The touch panel on the simulator is the mouse inside the SDL window: there
 // is no evdev node to hand over, and nothing to switch off.
@@ -1260,10 +1314,13 @@ void panel_touch_enable(bool enabled) { (void)enabled; }
 const char *panel_touch_device(void) { return NULL; }
 void panel_touch_flush(void) {}
 
-// There is no framebuffer to read on the simulator, but the SDL renderer can
-// be read back. The rest of the path is identical (same copy, same flash, same
-// PNG writer); only the source of the pixels differs.
+// There is no framebuffer to read on the simulator, but the SDL renderer (or
+// web emulator shadow framebuffer) can be read back. The rest of the path is
+// identical (same copy, same flash, same PNG writer).
 uint16_t *display_capture_frame(int *out_w, int *out_h) {
+#ifdef HOST_WEB_EMU
+	return webemu_capture_frame(out_w, out_h);
+#else
 	SDL_Renderer *renderer = host_display ? (SDL_Renderer *)lv_sdl_window_get_renderer(host_display) : NULL;
 	if (!renderer) {
 		return NULL;
@@ -1299,6 +1356,7 @@ uint16_t *display_capture_frame(int *out_w, int *out_h) {
 		*out_h = h;
 	}
 	return copy;
+#endif
 }
 #else
 // ---------------------------------------------------------------------------
@@ -1649,31 +1707,29 @@ static void free_rot_pages_cb(void *unused) {
 
 bool display_rotation_supported(void) { return fb_display != NULL; }
 
-// The node lv_evdev_create() actually opened. Remembered because the emulator
-// must open exactly that one instead of guessing: touch is event1 on this
-// device, but the event0 fallback exists because that is not guaranteed.
+// The node touch_evdev_create() actually opened. Remembered because the
+// emulator must open exactly that one instead of guessing: touch is event1 on
+// this device, but the event0 fallback exists because that is not guaranteed.
 static char fb_touch_node[32];
 
 const char *panel_touch_device(void) { return fb_touch_node[0] ? fb_touch_node : NULL; }
 
-// Hands the touch panel over and takes it back. While disabled the indev is
-// not polled and stops reading the node, so events pile up unread in the
-// kernel queue. Whatever re-enables it must wait a moment before trusting the
-// first touch (see gearboyplay.c).
 // Throws away what the panel sent while nobody was reading it. A disabled indev
 // is not polled, so the kernel queue fills with whatever the glass did during
 // the blank -- wake transients, a palm on the screen, the tap that woke it --
 // and the first poll afterwards would replay all of it as presses and swipes.
-// The read callback is called by hand to consume the queue and its result is
-// dropped; the indev is then told to ignore the pointer until the finger is up.
+// touch_evdev_flush() drains the descriptor, checks the kernel's live key state
+// via EVIOCGKEY, and suppresses any finger still physically on the glass until
+// it lifts; when the glass is clear, wait_until_release is cleared too so the
+// very first post-wake touch lands cleanly even inside the first timer tick.
 void panel_touch_flush(void) {
-	if (!fb_touch || !fb_touch->read_cb) {
+	if (!fb_touch) {
 		return;
 	}
-	lv_indev_data_t discard;
-	memset(&discard, 0, sizeof(discard));
-	fb_touch->read_cb(fb_touch, &discard);
-	lv_indev_wait_release(fb_touch);
+	(void)touch_evdev_flush(fb_touch);
+	lv_indev_reset(fb_touch, NULL);
+	fb_touch->state = LV_INDEV_STATE_RELEASED;
+	fb_touch->wait_until_release = 0;
 }
 
 void panel_touch_enable(bool enabled) {
@@ -1721,9 +1777,9 @@ void display_set_rotated(bool rotated) {
 	// the top-left corner of the glass to the bottom-right of the screen.
 	if (fb_touch) {
 		if (fb_rotated) {
-			lv_evdev_set_calibration(fb_touch, (int)fb_var.xres - 1, (int)fb_var.yres - 1, 0, 0);
+			touch_evdev_set_calibration(fb_touch, (int)fb_var.xres - 1, (int)fb_var.yres - 1, 0, 0);
 		} else {
-			lv_evdev_set_calibration(fb_touch, 0, 0, (int)fb_var.xres - 1, (int)fb_var.yres - 1);
+			touch_evdev_set_calibration(fb_touch, 0, 0, (int)fb_var.xres - 1, (int)fb_var.yres - 1);
 		}
 	}
 
@@ -1817,20 +1873,20 @@ static lv_display_t *init_target_display(void) {
 	char found[sizeof(fb_touch_node)];
 	lv_indev_t *touch = NULL;
 	if (find_touch_node(found, sizeof(found))) {
-		touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, found);
+		touch = touch_evdev_create(found);
 		if (touch) {
 			snprintf(fb_touch_node, sizeof(fb_touch_node), "%s", found);
 		}
 	}
 	if (!touch) {
-		touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event1");
+		touch = touch_evdev_create("/dev/input/event1");
 		if (touch) {
 			snprintf(fb_touch_node, sizeof(fb_touch_node), "%s", "/dev/input/event1");
 		}
 	}
 	if (!touch) {
 		fprintf(stderr, "Warning: Failed to open /dev/input/event1. Trying event0...\n");
-		touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event0");
+		touch = touch_evdev_create("/dev/input/event0");
 		if (touch) {
 			snprintf(fb_touch_node, sizeof(fb_touch_node), "%s", "/dev/input/event0");
 		}
@@ -1890,15 +1946,6 @@ static void limit_realtime_share(void) {
 #endif
 
 int main(int argc, char **argv) {
-	// Before anything at all -- before the signal guards, before the allocator
-	// is tuned, before a display is opened. thttpd runs this same binary as the
-	// transfer page's directory listing (see src/system/webcgi.h), and in that
-	// role it is a small program that prints JSON and exits. None of the player
-	// belongs on that path.
-	if (webcgi_should_run(argc, argv)) {
-		return webcgi_main();
-	}
-
 	// On this device dying means rebooting (see above).
 	install_signal_guards();
 
@@ -2069,8 +2116,12 @@ int main(int argc, char **argv) {
 	// It is one more LVGL timer on the interface thread, not a process.
 	petwatch_init();
 
-#ifdef HOST_BUILD
+#ifdef HOST_WEB_EMU
+	printf("Initializing Host Build (TempoTec V1 Web Emulator)...\n");
+#elif defined(HOST_BUILD)
 	printf("Initializing Host Build (SDL2 simulation)...\n");
+#endif
+#ifdef HOST_BUILD
 	lv_display_t *disp = init_host_display();
 	if (!disp) {
 		return 1; // on a PC, exiting is the right thing to do
@@ -2098,7 +2149,11 @@ int main(int argc, char **argv) {
 		// Both NULL: the player probes the block devices and the mount-point
 		// names the stock firmware uses and reports what it found in the log.
 		.device = NULL,
+#ifdef HOST_WEB_EMU
+		.mount_point = music_path,
+#else
 		.mount_point = NULL,
+#endif
 #ifdef HOST_BUILD
 		.manage_mount = false, // never touch the developer's own filesystem
 #else
@@ -2134,6 +2189,14 @@ int main(int argc, char **argv) {
 	// Press power to bring the screen back after it has gone dark, hold power
 	// to start the player after all.
 	//
+	// The palette is resolved here, before the branch, because the charging
+	// screen draws from it (the added palettes paint from the user's theme;
+	// Dark and Light keep the black screen they always had). No styles or
+	// flash marker are touched -- the full theme_init() runs in gui_init as
+	// always. A Custom palette cannot load yet (the card is not mounted), so
+	// it falls back to Dark for this screen only.
+	theme_resolve_boot_palette();
+
 	// Here, and not later, for two reasons: the screen reads the gauge itself
 	// (battery_read_now), so it needs nothing the services would start, and the
 	// input threads those services start must not be running while it owns the
@@ -2144,6 +2207,11 @@ int main(int argc, char **argv) {
 	// display, the fonts and the language are already up; everything below this
 	// point is what the hold releases.
 	if (chargemode_wanted()) {
+		// The charger-only screen normally leaves the status light alone. If
+		// blackout was saved, clear any LED left on by the previous boot too.
+		if (config_get_bool("power", "led_stealth", false)) {
+			led_init();
+		}
 		chargescreen_run(disp, &battery_cfg);
 	}
 	// Whatever came of that -- a hold on the power key, or a boot with no
@@ -2309,6 +2377,9 @@ int main(int argc, char **argv) {
 		if (addons_enabled("lastfm")) {
 			lastfm_init();
 		}
+		if (addons_enabled("soundcloud")) {
+			soundcloud_reload_streamkeys();
+		}
 	}
 
 	qobuzcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
@@ -2318,6 +2389,13 @@ int main(int argc, char **argv) {
 	// track fits.
 	tidalcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	tidalcache_clear(); // remove leftovers from a crash or power loss
+	soundcloudcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
+	soundcloudcache_clear_on_exit();
+	if (addons_enabled("jellyfin")) {
+		jellyfin_init();
+	}
+	jellyfincache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
+	jellyfincache_clear_on_exit();
 	podcastcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	podcastsubs_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	// Which episodes were heard. The marks live in podcast.db beside the
@@ -2339,6 +2417,8 @@ int main(int argc, char **argv) {
 	// rather than to the local database.
 	library_forget_under(qobuzcache_dir());
 	library_forget_under(tidalcache_dir());
+	library_forget_under(soundcloudcache_dir());
+	library_forget_under(jellyfincache_dir());
 	if (!tls_available()) {
 		fprintf(stderr, "tls: unavailable; https radio stations cannot be opened\n");
 	}
@@ -2362,6 +2442,8 @@ int main(int argc, char **argv) {
 	// they are built, and read before this they all say off, 0 minutes.
 	sleeptimer_init();
 
+	// The Power page offers RGB effects only after the controller is acquired.
+	led_init();
 	gui_init(&gui_cfg);
 
 	// "Rotate screen", as it was left. After gui_init so there are screens to
@@ -2375,6 +2457,10 @@ int main(int argc, char **argv) {
 	// lands on it rather than on a CS43198 nobody is listening to.
 	usbaudio_init();
 	usbaudio_poll();
+	// What the external USB DAC setting was left as, in the log's own words:
+	// whether the port is held as host is the first thing to check in a bug
+	// report about a dongle that did or did not play.
+	usbhostmode_log_state("startup");
 
 	// "Remember volume": the saved levels replace audio_init's default. Every
 	// output's, not only the one in use, because which output is in force at
@@ -2423,9 +2509,13 @@ int main(int argc, char **argv) {
 			if (restore_saved_track()) {
 				player_sheet_open(false);
 			}
+			libraryscan_boot_check_schedule();
 		} else {
+			// The restore callback schedules the boot check after it finishes.
 			lv_timer_create(restore_track_timer_cb, 600, NULL);
 		}
+	} else {
+		libraryscan_boot_check_schedule();
 	}
 
 
@@ -2437,9 +2527,6 @@ int main(int argc, char **argv) {
 	// the transport commands it receives are sent onto the GUI thread; it does
 	// nothing at all until Bluetooth is switched on.
 	btplayer_init();
-
-	// The status LED: aqua from power-on, exactly like the stock firmware.
-	led_init();
 
 #ifndef HOST_BUILD
 	// USB mass storage: hand the card to a PC when one is attached, exactly
@@ -2468,6 +2555,10 @@ int main(int argc, char **argv) {
 		.power_state_path = "/sys/power/state",
 #endif
 		.brightness = -1, // adopt the panel's current level as the on-brightness
+		// A boot out of the charging screen already left the panel up with a
+		// frame on it -- power_init() must not reset its glass. See
+		// chargescreen_panel_lit() and power_config_t.panel_up.
+		.panel_up = chargescreen_panel_lit(),
 		.screen_off_enabled = false,
 		// Off unless asked for in Settings. Blanking this panel powers the
 		// touch controller down with it, so the screen cannot be woken by
@@ -2526,10 +2617,24 @@ int main(int argc, char **argv) {
 	// nothing wakes it while the queue is empty. With no descriptor (eventfd
 	// not opened) poll() on a negative fd is exactly a timed sleep, and the
 	// bridge timer polls fast in that case.
+	// Before the watchdog, whose report of a real-time thread that never
+	// sleeps can only reach the card if that thread is not allowed the whole
+	// core. Issue 265 has three stops that look exactly like that: everything
+	// dead within a second of a Bluetooth stream starting, no watchdog lines,
+	// and a reset ten to twenty seconds later.
+	//
+	//   [system]
+	//   rt_throttle = 0    leave the kernel's setting as it is found
+	rt_throttle_ensure("/proc/sys/kernel", config_get_int("system", "rt_throttle", 1) != 0);
+
 	watchdog_start();
 
 	printf("Entering main event loop...\n");
+#ifdef HOST_WEB_EMU
+	while (running && !webemu_quit_requested()) {
+#else
 	while (running) {
+#endif
 		ui_heartbeat++;
 		uint32_t time_till_next = lv_timer_handler();
 		if (time_till_next > MAIN_LOOP_MAX_SLEEP_MS) {
@@ -2544,7 +2649,14 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	wifitransfer_release_card();
+	networkmusic_cancel();
+	networkmusic_release_card();
 	printf("\n");
+
+#ifdef HOST_WEB_EMU
+	webemu_shutdown();
+#endif
 
 	return 0;
 }

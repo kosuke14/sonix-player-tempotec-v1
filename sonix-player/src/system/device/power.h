@@ -42,7 +42,7 @@ typedef struct {
 	// "mem" to the developer's own /sys/power/state.
 	const char *brightness_path;	 // e.g. /sys/class/backlight/backlight_pwm0/brightness
 	const char *max_brightness_path; // e.g. /sys/class/backlight/backlight_pwm0/max_brightness
-	const char *blank_path;			 // e.g. /sys/class/graphics/fb0/blank (screen on/off: 0=on, 1=off)
+	const char *blank_path;			 // e.g. /sys/class/graphics/fb0/blank (0=on, 4=power down)
 	const char *power_state_path;	 // e.g. /sys/power/state ("mem" = suspend to RAM); NULL = never
 
 	// Desired on-screen backlight level in raw backlight units. If <= 0 at
@@ -51,6 +51,12 @@ typedef struct {
 
 	bool screen_off_enabled;
 	uint32_t screen_off_timeout_ms;
+
+	// True when the charging screen already brought the panel up in the
+	// documented order (frame on the glass, then the light). power_init()
+	// then skips its own unconditional unblank: writing UNBLANK again resets
+	// the glass to white behind a lit backlight. False for an ordinary boot.
+	bool panel_up;
 
 } power_config_t;
 
@@ -174,8 +180,8 @@ void power_slow_in_standby(lv_timer_t *timer, uint32_t standby_period_ms);
 // power.c whether the extra repaint is worth doing. NULL clears it.
 void power_set_wake_hook(bool (*cb)(void));
 // Queue a power-button action. The physical key reader posts this on key-down
-// for a dark-screen wake when no volume chord is armed (and consumes key-up);
-// otherwise short presses post on release. Touch wake uses the same queue.
+// for a dark-screen wake (and consumes key-up); otherwise short presses post
+// on release. A volume chord already held still takes precedence. Touch wake uses the same queue.
 // Consumed on the next state-machine tick, which toggles the screen or absorbs
 // a wake press after suspend.
 void power_notify_power_button(void);
@@ -186,9 +192,11 @@ void power_notify_power_button(void);
 bool power_headset_keys_settling(void);
 
 // --- Runtime configuration (driven by the settings pages) ---
-void power_set_brightness(long value); // raw backlight units, clamped to [0, max]
-long power_get_brightness(void);	   // current on-level
-long power_get_max_brightness(void);   // -1 if unknown
+// User-facing raw units, clamped to [1, max]. The hardware writer avoids the
+// V1 PWM driver's full-duty endpoint without changing a saved 100% setting.
+void power_set_brightness(long value);
+long power_get_brightness(void);	   // requested on-level, not the guarded PWM value
+long power_get_max_brightness(void);   // driver's maximum, or the default if unknown
 long power_get_min_brightness(void);   // dimmest level the sliders offer
 
 // While held, the idle timer never blanks the screen. Used by anything the
@@ -197,8 +205,9 @@ long power_get_min_brightness(void);   // dimmest level the sliders offer
 void power_hold_screen_on(bool hold);
 
 // Stops charging once the battery reaches `percent` (80..100; 100 means no
-// limit). Whether this can be enforced depends on the charger driver exposing
-// a control node -- power_charge_limit_supported() says whether it found one.
+// limit). Enforcement uses the V1 AXP2101 charge-enable control or, on other
+// supported builds, the MP2731 driver's control node. The support query reports
+// whether either hardware path is available.
 void power_set_charge_limit(int percent);
 int power_get_charge_limit(void); // 100 when no limit is set
 bool power_charge_limit_supported(void);

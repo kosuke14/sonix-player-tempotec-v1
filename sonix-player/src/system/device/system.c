@@ -1,4 +1,7 @@
 #include "system.h"
+#if defined(HOST_WEB_EMU) && defined(__EMSCRIPTEN__)
+#include "webemu.h"
+#endif
 
 #include <dirent.h>
 #include <errno.h>
@@ -29,11 +32,18 @@
 #include "src/system/bluetooth/btplayer.h"
 #include "src/system/audio/audio.h"
 #include "src/system/audio/alsa-controls.h"
+#include "src/system/audio/tapepads.h"
+#include "src/system/audio/taperecorder.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
+#include "src/system/audio/waveform.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/library/audiobookdb.h"
 #include "src/system/audio/eq.h"
+#include "src/system/net/wifitransfer.h"
+#include "src/system/streaming/networkmusic.h"
 #include "src/system/remote/dlna.h"
+#include "src/system/remote/sonixlink.h"
 #include "src/system/gearboy/gbdb.h"
 #include "src/system/input/hookclicks.h"
 #include "src/system/input/keymap.h"
@@ -43,7 +53,11 @@
 #include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/podcastplayed.h"
 #include "src/system/streaming/radio.h"
+#include "src/system/streaming/jellyfincache.h"
+#include "src/system/streaming/soundcloudcache.h"
+#include "src/system/streaming/streamkeys.h"
 #include "src/system/streaming/tidalcache.h"
+#include "src/system/lastfm/lastfm.h"
 #include "src/system/library/library.h"
 #include "src/system/core/logging.h"
 #include "src/system/library/playlists.h"
@@ -262,7 +276,7 @@ bool battery_read_now(const battery_config_t *cfg, int *percent, bool *charging)
 				// icon and the red LED in their charging state long after the
 				// charge has finished. The cable is still there, and for the
 				// charging screen that is the answer that matters -- see
-				// usb_vbus_present() there.
+				// charger_attached().
 				on_cable = (strcmp(content, "Charging") == 0);
 				free(content);
 			}
@@ -603,11 +617,31 @@ static int mount_ntfs_rw(const char *device, const char *mount_point) {
 			continue;
 		}
 
+		long open_max = sysconf(_SC_OPEN_MAX);
+		if (open_max < 64 || open_max > 4096) {
+			open_max = 4096;
+		}
+
 		pid_t pid = fork();
 		if (pid < 0) {
 			return -1;
 		}
 		if (pid == 0) {
+			if (chdir("/") != 0) {
+				_exit(126);
+			}
+			int devnull = open("/dev/null", O_RDWR);
+			if (devnull >= 0) {
+				dup2(devnull, STDIN_FILENO);
+				dup2(devnull, STDOUT_FILENO);
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > STDERR_FILENO) {
+					close(devnull);
+				}
+			}
+			for (int fd = 3; fd < (int)open_max; fd++) {
+				close(fd);
+			}
 			// big_writes and the default uid/gid: the player is the only user of
 			// this card, and the helper otherwise leaves everything owned by
 			// whoever mounted it.
@@ -831,13 +865,19 @@ static void card_databases_detach(void) {
 		return;
 	}
 	card_attached = false;
+	taperecorder_finish(); // release the recording file before unmounting
+	tapepads_release_card();
 
 	// The Tidal cache is on the card now, so with the card gone there is
 	// nowhere to download to. Clearing its root also keeps a transfer that was
 	// already running from writing to the bare mount point: after the unmount
 	// that is a directory on the player's own UBIFS, which is precisely the
 	// storage the cache must not fill.
+	wifitransfer_release_card();
+	networkmusic_release_card();
 	tidalcache_set_root(NULL);
+	soundcloudcache_set_root(NULL);
+	jellyfincache_set_root(NULL);
 
 	// Playback first. The playback thread keeps the track's descriptor open for
 	// the whole track -- and with "remember track" a track is loaded and paused
@@ -848,7 +888,9 @@ static void card_databases_detach(void) {
 	// Where the track was, first of all: the stop below is what the next press
 	// of play would otherwise read as "the track ended, start it again".
 	device_state_note_storage_gone();
-	audio_stop();
+	audio_stop_and_wait(2000);
+	waveform_set_cache_dir(NULL);
+	sonixlink_set_thumbs_path(NULL);
 
 	logging_suspend_for_usb(); // closes the on-card log file
 	btlog_card_release();
@@ -874,10 +916,14 @@ static void card_databases_attach(const char *root) {
 	const int room = (int)sizeof(path) - 32;
 	snprintf(path, sizeof(path), "%.*s/.local/library.db", room, root);
 	library_open(path);
+	sonixlink_set_db_path(path);
 	snprintf(path, sizeof(path), "%.*s/.local/audiobooks.db", room, root);
 	audiobookdb_open(path);
 	snprintf(path, sizeof(path), "%.*s/.local/genius.db", room, root);
 	geniusdb_open(path);
+	snprintf(path, sizeof(path), "%.*s/.local/thumbs", room, root);
+	sonixlink_set_thumbs_path(path);
+	sonixlink_set_card_root(root);
 
 	// Radio favourites and recents follow the card across a hot swap too. If
 	// the replacement is read-only, keep them usable for this session in /tmp,
@@ -901,6 +947,7 @@ static void card_databases_attach(const char *root) {
 	screensaver_set_card_root(root);
 	bootpic_set_root(root);
 	cover_set_cache_dir(root);
+	waveform_set_cache_dir(root);
 	eq_presets_set_dir(root);
 	peq_presets_set_dir(root);
 	mseb_presets_set_dir(root);
@@ -909,6 +956,8 @@ static void card_databases_attach(const char *root) {
 	// does not fit the internal data partition, so the card has to be the
 	// storage that is measured and filled.
 	tidalcache_set_root(root);
+	soundcloudcache_set_root(root);
+	jellyfincache_set_root(root);
 	podcastcache_set_root(root);
 	podcastsubs_set_root(root);
 	podcastplayed_set_root(root);
@@ -920,6 +969,11 @@ static void card_databases_attach(const char *root) {
 	// logging_attach_sd() re-derives the path and honours the setting.
 	logging_attach_sd(root);
 	btlog_card_attach(root);
+
+	// A card that mounts late or arrives via hot-insert can carry streaming
+	// keys (or simply bring back the card that holds .local/lastfm.queue).
+	(void)streamkeys_load_card(root);
+	lastfm_reload_keys();
 
 	printf("storage: card databases reopened on %s\n", root);
 }
@@ -964,6 +1018,31 @@ bool storage_usb_begin(void) {
 
 void storage_usb_end(void) { pthread_mutex_unlock(&card_lock); }
 
+int storage_card_file_job_begin(bool writable) {
+	// The file jobs start on the UI thread. Don't block on a mount or a
+	// USB handover in progress; the user can retry once the card is available.
+	if (pthread_mutex_trylock(&card_lock) != 0) return -1;
+	int fd = -1;
+	if (g_storage_cfg && g_storage_cfg->manage_mount && !getenv("SONIX_NO_MOUNT") &&
+		!card_released && card_attached && !usb_storage_active() && sd_root[0] &&
+		is_mounted(sd_root) && mount_is_alive(sd_root)) {
+		// sd_root can be a trusted firmware alias. Descendants are opened
+		// without following symlinks by the caller.
+		fd = open(sd_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	}
+	if (fd >= 0 && writable) {
+		struct statvfs fs;
+		if (fstatvfs(fd, &fs) != 0 || (fs.f_flag & ST_RDONLY)) {
+			close(fd);
+			fd = -1;
+		}
+	}
+	if (fd < 0) pthread_mutex_unlock(&card_lock);
+	return fd;
+}
+
+void storage_card_file_job_end(void) { pthread_mutex_unlock(&card_lock); }
+
 void storage_recheck_card(void) {
 	if (!g_storage_cfg || !g_storage_cfg->manage_mount || getenv("SONIX_NO_MOUNT")) {
 		return;
@@ -1003,8 +1082,41 @@ void storage_recheck_card(void) {
 	pthread_mutex_unlock(&card_lock);
 }
 
-// Every descriptor of this process that points into the card, for the log
-// when the card cannot be released.
+// Every descriptor or working directory across /proc that points into the
+// card, for the log when the card cannot be released. Scanning only /proc/self
+// misses inherited descriptors held by background daemons.
+static bool proc_decimal(const char *s) {
+	if (!*s) {
+		return false;
+	}
+	for (; *s; s++) {
+		if (*s < '0' || *s > '9') {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool path_under_card(const char *target, const char *root, size_t root_len) {
+	return strncmp(target, root, root_len) == 0 && (target[root_len] == '/' || target[root_len] == '\0');
+}
+
+static void read_proc_comm(const char *pid, char *out, size_t out_size) {
+	out[0] = '\0';
+	char path[320];
+	if ((size_t)snprintf(path, sizeof(path), "/proc/%s/comm", pid) >= sizeof(path)) {
+		return;
+	}
+	FILE *f = fopen(path, "re");
+	if (!f) {
+		return;
+	}
+	if (fgets(out, (int)out_size, f)) {
+		out[strcspn(out, "\r\n")] = '\0';
+	}
+	fclose(f);
+}
+
 static void log_open_on_card(void) {
 	char root[PATH_MAX];
 	if (!realpath(sd_root, root)) {
@@ -1012,31 +1124,76 @@ static void log_open_on_card(void) {
 	}
 	size_t root_len = strlen(root);
 
-	DIR *dir = opendir("/proc/self/fd");
-	if (!dir) {
+	DIR *proc = opendir("/proc");
+	if (!proc) {
 		return;
 	}
-	struct dirent *de;
-	while ((de = readdir(dir)) != NULL) {
-		char link[16 + sizeof(de->d_name)], target[PATH_MAX];
-		snprintf(link, sizeof(link), "/proc/self/fd/%s", de->d_name);
-		ssize_t n = readlink(link, target, sizeof(target) - 1);
-		if (n <= 0) {
+	struct dirent *pe;
+	while ((pe = readdir(proc)) != NULL) {
+		if (!proc_decimal(pe->d_name)) {
 			continue;
 		}
-		target[n] = '\0';
-		if (strncmp(target, root, root_len) == 0 && (target[root_len] == '/' || target[root_len] == '\0')) {
-			fprintf(stderr, "storage:   still open on the card: %s (fd %s)\n", target, de->d_name);
+		char comm[64];
+		read_proc_comm(pe->d_name, comm, sizeof(comm));
+
+		char link[600], target[PATH_MAX];
+		if ((size_t)snprintf(link, sizeof(link), "/proc/%s/cwd", pe->d_name) < sizeof(link)) {
+			ssize_t n = readlink(link, target, sizeof(target) - 1);
+			if (n > 0) {
+				target[n] = '\0';
+				if (path_under_card(target, root, root_len)) {
+					fprintf(stderr, "storage:   still open on the card: %s (pid %s %s, cwd)\n", target, pe->d_name,
+							comm[0] ? comm : "?");
+				}
+			}
 		}
+
+		char fd_dir[320];
+		if ((size_t)snprintf(fd_dir, sizeof(fd_dir), "/proc/%s/fd", pe->d_name) >= sizeof(fd_dir)) {
+			continue;
+		}
+		DIR *dir = opendir(fd_dir);
+		if (!dir) {
+			continue;
+		}
+		struct dirent *de;
+		while ((de = readdir(dir)) != NULL) {
+			if (!proc_decimal(de->d_name)) {
+				continue;
+			}
+			if ((size_t)snprintf(link, sizeof(link), "%s/%s", fd_dir, de->d_name) >= sizeof(link)) {
+				continue;
+			}
+			ssize_t n = readlink(link, target, sizeof(target) - 1);
+			if (n <= 0) {
+				continue;
+			}
+			target[n] = '\0';
+			if (path_under_card(target, root, root_len)) {
+				fprintf(stderr, "storage:   still open on the card: %s (pid %s %s, fd %s)\n", target, pe->d_name,
+						comm[0] ? comm : "?", de->d_name);
+			}
+		}
+		closedir(dir);
 	}
-	closedir(dir);
+	closedir(proc);
 }
 
 void storage_release_for_shutdown(void) {
+	pthread_mutex_lock(&card_lock);
+	bool already = card_released;
+	card_released = true;
+	taperecorder_finish(); // finalize before the USB input or the card goes away
+	tapepads_finish();
+	pthread_mutex_unlock(&card_lock);
+
 	// This common exit path also runs for reboot and firmware recovery. End a
 	// manual USB host override while the process can still retry or leave its
 	// persistent recovery journal intact, even when no SD card is configured.
-	if (!usbhostprobe_cancel()) {
+	// The external USB DAC setting stays as it was left -- the player is
+	// expected to come back with the port held again -- but the port itself is
+	// given back now.
+	if (!usbhostmode_release(false)) {
 		fprintf(stderr, "usbhost: could not restore the port before shutdown; keep computers and chargers disconnected\n");
 	}
 	if (!g_storage_cfg || !g_storage_cfg->manage_mount) {
@@ -1044,8 +1201,8 @@ void storage_release_for_shutdown(void) {
 	}
 
 	pthread_mutex_lock(&card_lock);
-	bool already = card_released;
-	card_released = true;
+	wifitransfer_release_card();
+	networkmusic_release_card();
 
 	// A card handed to a computer is already off this device's hands.
 	if (already || !sd_root[0] || !is_mounted(sd_root) || usb_storage_active()) {
@@ -1057,6 +1214,8 @@ void storage_release_for_shutdown(void) {
 	// The card lifecycle may already be detached even though logging was
 	// reopened independently. Always release these idempotent handles before
 	// attempting the unmount, including in that case.
+	waveform_set_cache_dir(NULL);
+	sonixlink_set_thumbs_path(NULL);
 	logging_suspend_for_usb();
 	btlog_card_release();
 	cover_set_cache_dir(NULL); // the thumbnail cache moves to /tmp
@@ -1350,6 +1509,8 @@ static pthread_mutex_t combo_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool combo_up_held;
 static bool combo_down_held;
 static bool combo_power_held;
+// Preserve dark-screen eligibility if power wakes the screen before volume down.
+static bool combo_power_dark_lock;
 static bool combo_fired;
 
 static bool combo_key(int code) { return code == KEY_VOLUMEUP || code == KEY_VOLUMEDOWN || code == KEY_POWER; }
@@ -1382,12 +1543,13 @@ static bool combo_press(int code) {
 		combo_down_held = true;
 	} else {
 		combo_power_held = true;
+		combo_power_dark_lock = lock;
 	}
 	if (combo_power_held && !combo_fired) {
 		if (combo_up_held && screenshot) {
 			combo_fired = true;
 			fire_screenshot = true;
-		} else if (combo_down_held && lock) {
+		} else if (combo_down_held && (lock || combo_power_dark_lock)) {
 			combo_fired = true;
 			fire_lock = true;
 		}
@@ -1419,6 +1581,7 @@ static bool combo_release(int code) {
 		combo_down_held = false;
 	} else {
 		combo_power_held = false;
+		combo_power_dark_lock = false;
 	}
 	bool consumed = combo_fired;
 	// Rearm only with all of them back up: releasing one and pressing it again
@@ -1712,6 +1875,16 @@ static void *input_thread_func(void *arg) {
 	const char *node = info->node;
 
 	int fd = info->preopened_fd;
+#if defined(HOST_WEB_EMU) && defined(__EMSCRIPTEN__)
+	const bool wasm_queue = (fd == -2);
+	if (!wasm_queue && fd < 0) {
+		fd = open(node, O_RDONLY);
+	}
+	if (!wasm_queue && fd < 0) {
+		fprintf(stderr, "input: cannot open %s: %s\n", node, strerror(errno));
+		return NULL;
+	}
+#else
 	if (fd < 0) {
 		fd = open(node, O_RDONLY);
 	}
@@ -1719,6 +1892,7 @@ static void *input_thread_func(void *arg) {
 		fprintf(stderr, "input: cannot open %s: %s\n", node, strerror(errno));
 		return NULL;
 	}
+#endif
 
 	int held = -1;			   // key currently down, or -1
 	uint32_t held_since = 0;   // when it went down
@@ -1727,6 +1901,15 @@ static void *input_thread_func(void *arg) {
 	// A power press on a dark screen starts waking on key-down. Remember that
 	// here so the matching release does not toggle the screen straight back off.
 	bool power_wake_started_on_press = false;
+	// Whether this thread ever saw the matching press. A bare power release
+	// with no press is not a short press: it is the tail of a hold another
+	// reader owned. The charging screen reads the same evdev node for the
+	// hold that starts the player, closes it on the way out, and the
+	// release arrives here afterwards -- after this thread has opened its
+	// own fd but long after it could have seen the press. Toggling the
+	// screen on that orphan toggles a panel the player has only just lit:
+	// the screen goes dark at the exact moment the boot finishes.
+	bool power_press_seen = false;
 	// Next and previous do their work on the way up, so that holding them can
 	// mean something else. `deferred` says the press left a job for the release;
 	// `seeked` says the hold took it over and there is no longer one.
@@ -1769,8 +1952,24 @@ static void *input_thread_func(void *arg) {
 			}
 		}
 
+#if defined(HOST_WEB_EMU) && defined(__EMSCRIPTEN__)
+		struct input_event wasm_ev;
+		int ready;
+		if (wasm_queue) {
+			int wcode = 0, wval = 0;
+			ready = webemu_wasm_wait_key_event(&wcode, &wval, timeout);
+			memset(&wasm_ev, 0, sizeof(wasm_ev));
+			wasm_ev.type = EV_KEY;
+			wasm_ev.code = (uint16_t)wcode;
+			wasm_ev.value = wval;
+		} else {
+			struct pollfd pfd = {.fd = fd, .events = POLLIN};
+			ready = poll(&pfd, 1, timeout);
+		}
+#else
 		struct pollfd pfd = {.fd = fd, .events = POLLIN};
 		int ready = poll(&pfd, 1, timeout);
+#endif
 
 		if (ready < 0) {
 			if (errno == EINTR) {
@@ -1841,9 +2040,17 @@ static void *input_thread_func(void *arg) {
 		}
 
 		struct input_event ev;
+#if defined(HOST_WEB_EMU) && defined(__EMSCRIPTEN__)
+		if (wasm_queue) {
+			ev = wasm_ev;
+		} else if (read(fd, &ev, sizeof(ev)) != sizeof(ev)) {
+			break;
+		}
+#else
 		if (read(fd, &ev, sizeof(ev)) != sizeof(ev)) {
 			break;
 		}
+#endif
 
 		if (ev.type != EV_KEY) {
 			continue;
@@ -1893,16 +2100,10 @@ static void *input_thread_func(void *arg) {
 			// consumed so it cannot immediately blank the screen again.
 			if (ev.code == KEY_POWER) {
 				power_wake_started_on_press = false;
+				power_press_seen = true;
 				if (!combo && !power_screen_is_on()) {
-					// Leave the chord window alone when either power+volume
-					// gesture is armed. In particular, key-lock is intentionally
-					// available while the screen is dark.
-					bool chord_armed = !info->headset &&
-								   (screenshot_enabled() || key_lock_gesture_armed());
-					if (!chord_armed) {
-						power_wake_started_on_press = true;
-						power_notify_power_button();
-					}
+					power_wake_started_on_press = true;
+					power_notify_power_button();
 				}
 			}
 
@@ -1983,7 +2184,14 @@ static void *input_thread_func(void *arg) {
 			bool combo = !info->headset && combo_release(ev.code);
 
 			if (ev.code == KEY_POWER) {
-				if (!long_press_done && !combo && !power_wake_started_on_press) {
+				// Had this thread seen the press? An orphaned release -- the
+				// tail of the hold that left the charging screen, delivered
+				// after this thread opened the node but with the press itself
+				// read elsewhere -- is the end of that gesture, not a short
+				// press, and must not put the panel down.
+				bool had_press = power_press_seen;
+				power_press_seen = false;
+				if (had_press && !long_press_done && !combo && !power_wake_started_on_press) {
 					// Short press: the screen toggle. A wake from the dark
 					// screen was already queued on key-down.
 					power_notify_power_button();
@@ -2022,7 +2230,9 @@ static void *input_thread_func(void *arg) {
 		}
 	}
 
-	close(fd);
+	if (fd >= 0) {
+		close(fd);
+	}
 	return NULL;
 }
 
@@ -2055,14 +2265,21 @@ static void start_input_thread(const char *node, bool headset) { start_input_thr
 static int host_key_pipe[2] = {-1, -1};
 
 static void start_host_input_thread(void) {
+#if defined(HOST_WEB_EMU) && defined(__EMSCRIPTEN__)
+	start_input_thread_fd("keyboard", false, -2);
+#else
 	if (pipe(host_key_pipe) != 0) {
 		perror("input: pipe");
 		return;
 	}
 	start_input_thread_fd("keyboard", false, host_key_pipe[0]);
+#endif
 }
 
 void input_host_button(int code, bool down) {
+#if defined(HOST_WEB_EMU) && defined(__EMSCRIPTEN__)
+	webemu_wasm_push_key_event(code, down);
+#else
 	if (host_key_pipe[1] < 0) {
 		return;
 	}
@@ -2070,6 +2287,7 @@ void input_host_button(int code, bool down) {
 	if (write(host_key_pipe[1], &ev, sizeof(ev)) != (ssize_t)sizeof(ev)) {
 		perror("input: write");
 	}
+#endif
 }
 #endif
 

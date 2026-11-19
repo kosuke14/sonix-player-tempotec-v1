@@ -3,6 +3,10 @@
  */
 
 #include "power.h"
+#include "backlight.h"
+#ifdef HOST_WEB_EMU
+#include "webemu.h"
+#endif
 
 // LVGL 9.2 made lv_timer_t opaque. There is a lv_timer_set_period() but no
 // getter, and both places here have to read the period before changing it.
@@ -11,6 +15,7 @@
 #include "src/system/audio/waveform.h"
 #include "src/system/device/ota.h"
 #include "src/gui/library/browser.h"
+#include "src/gui/settings/screensaver.h"
 #include "src/system/device/system.h"
 #include "src/system/core/panel.h"
 
@@ -21,6 +26,8 @@
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/audio/audio.h"
 #include "src/system/audio/headset.h"
+#include "src/system/audio/tapepads.h"
+#include "src/system/audio/taperecorder.h"
 #include "src/system/library/audiobookdb.h"
 #include "src/system/device/clock.h"
 #include "src/system/pet/petwatch.h"
@@ -28,10 +35,18 @@
 #include "src/system/remote/dlna.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/qobuzdl.h"
 #include "src/system/streaming/subsonicstream.h"
+#include "src/system/streaming/subsonicdl.h"
 #include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
+#include "src/system/streaming/jellyfin.h"
+#include "src/system/streaming/jellyfincache.h"
+#include "src/gui/streaming/jellyfinpage.h"
+#include "src/system/streaming/soundcloud.h"
+#include "src/system/streaming/soundcloudcache.h"
+#include "src/gui/streaming/soundcloudpage.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/device/adb.h"
 #include "src/system/library/library.h"
@@ -39,6 +54,7 @@
 #include "src/system/streaming/radio.h"
 #include "src/system/net/wifi.h"
 #include "src/system/net/wifitransfer.h"
+#include "src/system/streaming/networkmusic.h"
 #include "src/system/lastfm/lastfm.h"
 #include "src/system/listenbrainz/listenbrainz.h"
 #include "src/system/bluetooth/bluetooth.h"
@@ -49,12 +65,15 @@
 #include "src/system/device/usb.h"
 #include "src/system/audio/usbdac.h"
 #include "src/system/audio/usbaudio.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
 #include "src/system/gearboy/gearboy.h"
 #include "src/system/device/led.h"
 #include "src/system/device/sysinfo.h"
 #include "src/system/device/axpcharge.h"
 #include "src/system/device/batteryguard.h"
+#include "src/system/device/batteryhistory.h"
+#include "src/system/device/chargelimit.h"
 #include "src/system/device/chargemode.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/topbar.h"
@@ -91,7 +110,6 @@ static uint32_t since(uint32_t mark, uint32_t now) {
 // backlight driver and put the PWM out, but it would leave a black screen on a
 // fully powered panel: turning the screen off is the blank node's job.
 #define BRIGHTNESS_MIN 1
-#define BRIGHTNESS_MAX_DEFAULT 100
 
 // The two blank levels written to the framebuffer node, spelled out here
 // rather than pulled in from linux/fb.h so the host build compiles unchanged.
@@ -181,11 +199,6 @@ static uint32_t since(uint32_t mark, uint32_t now) {
 #define FADE_STEP 6
 #define FADE_STEP_DELAY_US 12000
 
-// The ramp back up at a wake, over a picture that is already drawn: a few
-// steps, so the screen is there almost at once and still does not snap on.
-#define WAKE_FADE_STEPS 4
-#define WAKE_FADE_STEP_DELAY_US 8000
-
 // --- Module state (owned by the LVGL/main thread unless noted) ---
 static power_config_t g_cfg;
 static lv_display_t *g_disp;
@@ -253,7 +266,7 @@ static void write_long_to_file(const char *path, long value) {
 	fclose(f);
 }
 
-static long brightness_max(void) { return g_max_brightness > 0 ? g_max_brightness : BRIGHTNESS_MAX_DEFAULT; }
+static long brightness_max(void) { return g_max_brightness > 0 ? g_max_brightness : BACKLIGHT_MAX_DEFAULT; }
 
 // The dimmest level the UI offers: 5% of the panel's range, or 1 if the
 // driver's scale is under 20. Below it the screen is too dim to read
@@ -267,20 +280,20 @@ long power_get_min_brightness(void) {
 	return floor > 0 ? floor : 1;
 }
 
-// Write a backlight level to sysfs, clamped to [BRIGHTNESS_MIN, max]. No-op on
-// the host build (no brightness path), but still tracks the value.
+// Every hardware brightness write goes through the same endpoint guard,
+// including init, live changes and both wake paths. Keep g_cfg.brightness in
+// the user's range; g_hw_brightness tracks the actual, safe PWM level instead.
+// Zero is reserved for screen-off / wake holds, not offered to the user.
+// No-op on the host build (no brightness path), but still tracks the value.
 static void backlight_write(long value) {
-	long max = brightness_max();
-	if (value > max) {
-		value = max;
-	}
-	if (value < BRIGHTNESS_MIN) {
-		value = BRIGHTNESS_MIN;
-	}
+	value = backlight_safe_level(value, brightness_max());
 	g_hw_brightness = value;
 	if (g_cfg.brightness_path) {
 		write_long_to_file(g_cfg.brightness_path, value);
 	}
+#ifdef HOST_WEB_EMU
+	webemu_notify_backlight(value, brightness_max());
+#endif
 }
 
 static uint32_t monotonic_ms(void);
@@ -289,23 +302,12 @@ static uint32_t monotonic_ms(void);
 // (see WAKE_HOLD_LEVEL_DEFAULT), which is darker than anything the user can
 // choose. Written whether or not the tracked value already says so, because
 // the unblank path in the kernel writes the hardware without telling anyone.
-static void backlight_hold(void) {
-	g_hw_brightness = g_wake_hold_level;
-	if (g_cfg.brightness_path) {
-		write_long_to_file(g_cfg.brightness_path, g_wake_hold_level);
-	}
-}
+static void backlight_hold(void) { backlight_write(g_wake_hold_level); }
 
-// A true zero, whatever [screen] wake_hold_level says. Used by the two halves
-// of a held panel: one that is left unblanked must not be looked at through
-// anything at all, and a hold level restored for a board that needs its floor
-// back is a level a *wake* is allowed to be seen at, not a dark screen.
-static void backlight_black(void) {
-	g_hw_brightness = 0;
-	if (g_cfg.brightness_path) {
-		write_long_to_file(g_cfg.brightness_path, 0);
-	}
-}
+// A true zero, whatever [screen] wake_hold_level says. The override applies
+// only during a wake; a dark screen must not retain a dimly visible picture,
+// especially when a Bluetooth stream keeps the panel powered.
+static void backlight_black(void) { backlight_write(0); }
 
 // Re-asserts the hold every WAKE_HOLD_STEP_MS for `ms` in total. Used for the
 // windows the panel spends doing something of its own -- its init after the
@@ -361,6 +363,9 @@ static void backlight_hold_until_panel_shows(void) {
 // stock/Rockbox dim-to-off feel. Blocking, but only for ~200ms during a screen
 // transition (the UI isn't visible mid-transition anyway).
 static void fade_to(long target) {
+	// Compare against the actual PWM target, not an unreachable full-duty
+	// request, or a fade towards 100% could loop forever at max - 1.
+	target = backlight_safe_level(target, brightness_max());
 	if (g_hw_brightness < 0) {
 		backlight_write(target);
 		return;
@@ -374,17 +379,6 @@ static void fade_to(long target) {
 		backlight_write(next);
 		if (g_hw_brightness != target) {
 			usleep(FADE_STEP_DELAY_US);
-		}
-	}
-}
-
-// The same ramp in WAKE_FADE_STEPS even steps.
-static void fade_up_quickly(long target) {
-	long from = g_hw_brightness < 0 ? BRIGHTNESS_MIN : g_hw_brightness;
-	for (int i = 1; i <= WAKE_FADE_STEPS; i++) {
-		backlight_write(from + (target - from) * i / WAKE_FADE_STEPS);
-		if (i < WAKE_FADE_STEPS) {
-			usleep(WAKE_FADE_STEP_DELAY_US);
 		}
 	}
 }
@@ -542,7 +536,14 @@ static uint32_t boottime_ms(void) {
 	return (uint32_t)(ts.tv_sec * 1000) + (uint32_t)(ts.tv_nsec / 1000000);
 }
 
-// current idle time in ms considering both touch (LVGL) and physical buttons
+// Current idle time in ms considering touch (LVGL) and physical buttons.
+//
+// While the lock-screen screensaver is up, use the explicit activity marker
+// instead of LVGL's pointer timestamp. The screensaver is a display that may
+// be left in a pocket: a pointer held against it can keep LVGL's timestamp
+// fresh forever, defeating the timeout that is supposed to save the battery.
+// Its only gesture is a swipe to dismiss, which reports activity explicitly
+// from drag_cb; physical keys already report through power_notify_activity().
 static uint32_t input_idle_ms(uint32_t now) {
 	uint32_t touch_idle = lv_display_get_inactive_time(g_disp);
 
@@ -550,6 +551,9 @@ static uint32_t input_idle_ms(uint32_t now) {
 	uint32_t btn_idle = now - g_last_button_activity_ms;
 	pthread_mutex_unlock(&g_lock);
 
+	if (screensaver_is_visible()) {
+		return btn_idle;
+	}
 	return touch_idle < btn_idle ? touch_idle : btn_idle;
 }
 
@@ -621,6 +625,9 @@ static void find_charge_node(void) {
 }
 
 bool power_charge_limit_supported(void) {
+	if (axpcharge_applies()) {
+		return true;
+	}
 	find_charge_node();
 	return g_charge_node != NULL;
 }
@@ -632,6 +639,11 @@ bool power_charging_held(void) { return g_charging_suspended || axpcharge_holdin
 static void charger_run(bool run);
 
 void power_charging_release(void) {
+	if (axpcharge_applies()) {
+		axpcharge_set_charging_enabled(true);
+		g_charging_suspended = false;
+		return;
+	}
 	find_charge_node();
 	if (!g_charge_node) {
 		return;
@@ -662,22 +674,23 @@ static void charger_run(bool run) {
 // what the last decision was: the charger is written only when the answer has
 // changed, so this can be called as often as anything likes.
 static void apply_charge_limit(void) {
-	find_charge_node();
-	if (!g_charge_node) {
-		return;
+	bool axp = axpcharge_applies();
+	if (!axp) {
+		find_charge_node();
+		if (!g_charge_node) {
+			return;
+		}
 	}
 
 	bool allow;
-	if (!usb_vbus_present()) {
-		// No cable, nothing to hold off -- and this is the case that must not
-		// be got wrong. The bit survives the charger being unplugged, so a
-		// player that left it off would meet the next cable with a charger that
-		// does nothing, until the next reboot reset it.
-		allow = true;
-	} else if (g_charging_blocked) {
+	if (g_charging_blocked) {
 		// DAC mode with charging switched off. Outranks the percentage limit
 		// and outlasts it: the tick must not undo a choice the user made.
 		allow = false;
+	} else if (!usb_vbus_present()) {
+		// Do not leave the charger disabled when the cable is removed: its
+		// enable bit survives unplugging on both charger implementations.
+		allow = true;
 	} else if (g_charge_limit >= 100) {
 		allow = true;
 	} else {
@@ -686,8 +699,7 @@ static void apply_charge_limit(void) {
 			return; // no reading to judge by; leave the charger as it is
 		}
 		int percent = atoi(level);
-		// Three percent of hysteresis, so it does not chatter at the boundary.
-		allow = g_charging_suspended ? percent <= g_charge_limit - 3 : percent < g_charge_limit;
+		allow = charge_limit_should_allow(g_charge_limit, percent, g_charging_suspended);
 	}
 
 	// Written once at startup whatever the answer, so the player's idea of the
@@ -699,26 +711,31 @@ static void apply_charge_limit(void) {
 	}
 	ever_written = true;
 
-	charger_run(allow);
+	if (axp) {
+		axpcharge_set_charging_enabled(allow);
+	} else {
+		charger_run(allow);
+	}
 	g_charging_suspended = !allow;
-	printf("power: charging %s\n", allow ? "on" : "held off at the limit");
+	printf("power: charging %s%s\n", allow ? "on" : "held off",
+		   allow ? "" : (g_charging_blocked ? " (forbidden)" : " at the limit"));
 }
 
 // Forbids or allows charging outright, on top of whatever the percentage limit
 // is doing. DAC mode is the one caller: the choice is the user's and the
 // percentage limit must not undo it.
 void power_set_charging_allowed(bool allowed) {
-	find_charge_node();
 	g_charging_blocked = !allowed;
-
-	if (!g_charge_node) {
-		printf("power: charging cannot be controlled on this firmware\n");
-		return;
+	if (!axpcharge_applies()) {
+		find_charge_node();
+		if (!g_charge_node) {
+			printf("power: charging cannot be controlled on this firmware\n");
+			return;
+		}
 	}
 
 	printf("power: charging %s\n", allowed ? "allowed again" : "forbidden");
 	apply_charge_limit(); // one place decides, including this
-
 }
 
 // ---------------------------------------------------------------------------
@@ -848,8 +865,8 @@ static bool streaming_playback_active(void) {
 	if (!path[0]) {
 		return false;
 	}
-	return subsonicstream_owns(path) || ampstream_owns(path) || qobuzcache_owns(path) ||
-		   tidalcache_owns(path) || podcastcache_owns(path);
+	return subsonicstream_owns(path) || ampstream_owns(path) || qobuzcache_owns(path) || tidalcache_owns(path) ||
+		   soundcloudcache_is_soundcloud_path(path) || jellyfincache_owns(path) || podcastcache_owns(path);
 }
 
 // Whether the network is the point rather than an idle drain: an AirPlay
@@ -865,11 +882,14 @@ static bool wifi_in_use(void) {
 	// A scan or a connect in flight counts as use: parking the radio out from
 	// under wpa_supplicant mid-association leaves the driver to sort out a
 	// teardown it did not expect.
-	return subsonic_api_busy() || subsonicstream_network_wanted() || ampstream_network_wanted() ||
-		   wifi_busy() || wifi_scan_running() || streaming_playback_active() || airplay_get_enabled() ||
+	return networkmusic_busy() || subsonic_api_busy() || subsonicstream_network_wanted() || ampstream_network_wanted() || subsonicdl_busy() || soundcloud_api_busy() ||
+		   soundcloudcache_downloading() || soundcloudpage_waiting_for_track() || jellyfin_api_busy() ||
+		   jellyfincache_downloading() || jellyfinpage_waiting_for_track() || jellyfinpage_download_busy() ||
+		   wifi_busy() || wifi_scan_running() ||
+		   streaming_playback_active() || airplay_get_enabled() ||
 		   dlna_get_enabled() || sonixlink_get_enabled() ||
 		   wifitransfer_get_enabled() || qobuzcache_downloading_id() > 0 ||
-		   qobuzcache_network_wanted() || tidalcache_downloading_id() > 0 || tidalcache_network_wanted() ||
+		   qobuzcache_network_wanted() || qobuzdl_busy() || tidalcache_downloading_id() > 0 || tidalcache_network_wanted() ||
 		   podcastcache_downloading_id() > 0 || podcastcache_network_wanted() || podcastdl_busy() ||
 		   lastfm_network_wanted() || listenbrainz_network_wanted() || ota_busy();
 }
@@ -925,9 +945,11 @@ static bool player_is_busy(bool playing, uint32_t input_idle) {
 		   usb_storage_active() ||				   // the card exported over USB
 		   gearboy_running() ||					   // the emulator
 		   library_scan_running() ||			   // a scan, which is also writing to the card
-		   audiobookdb_scan_running() || wifitransfer_running() || dlna_running() || airplay_running() ||
+		   audiobookdb_scan_running() || networkmusic_busy() || wifitransfer_running() || dlna_running() || airplay_running() ||
 		   sonixlink_is_connected() || // a phone driving the player, not a switch left on
-		   qobuzcache_downloading_id() > 0 || tidalcache_downloading_id() > 0 || podcastcache_downloading_id() > 0 ||
+		   qobuzcache_downloading_id() > 0 || tidalcache_downloading_id() > 0 ||
+		   soundcloudcache_downloading() || jellyfincache_downloading() || jellyfinpage_download_busy() ||
+		   podcastcache_downloading_id() > 0 ||
 		   ota_busy(); // a firmware update being fetched
 }
 
@@ -1247,6 +1269,11 @@ void power_shutdown(void) {
 	// shutdown should not be the one that drops the difference.
 	petwatch_flush();
 
+	// Battery history is checkpointed separately from its five-minute cadence
+	// before the writable settings partition is released. This is the final
+	// powered-on slice; time after power-off deliberately never reaches it.
+	batteryhistory_flush();
+
 	// Dark the panel immediately, then fade/close audio before the kernel takes
 	// power away from the output stage. In particular, the HBC3000 is parked on
 	// its unused socket while its amplifier is still powered, avoiding a pop in
@@ -1273,6 +1300,8 @@ void power_shutdown(void) {
 	// the user never put there and will not listen to again.
 	qobuzcache_clear_on_exit();
 	tidalcache_clear_on_exit();
+	soundcloudcache_clear_on_exit();
+	jellyfincache_clear_on_exit();
 	podcastcache_clear_on_exit();
 	dlna_clear_on_exit();
 
@@ -1287,6 +1316,14 @@ void power_shutdown(void) {
 	// unmounted.
 	storage_release_for_shutdown();
 	sync();
+
+#ifdef HOST_WEB_EMU
+	webemu_notify_power("poweroff");
+	fflush(stdout);
+	fflush(stderr);
+	webemu_shutdown();
+	_exit(42);
+#endif
 
 	int rc = system("poweroff");
 	(void)rc;
@@ -1568,6 +1605,24 @@ static void suspend_if_idle(uint32_t now, bool playing) {
 		mem_skip("the charger is plugged in");
 		return;
 	}
+	// A forced host role is not a reason to stay awake. The external USB DAC
+	// setting makes the port the host for as long as it is switched on, which
+	// is for ever -- and the cable has just answered that nothing is plugged
+	// in, so there is no DAC to cut. A role left forced with the SoC asleep
+	// would also be one the resume could not account for, so it is given back
+	// here, on the way into the sleep; the setting is untouched and the port
+	// is taken again a second after the wake. This has to come before the
+	// "controller in use" test below, which it would otherwise trip.
+	if (usbhostmode_active() && !usb_vbus_present()) {
+		usbhostmode_release(false);
+		if (usbhostprobe_active()) {
+			// Restoration could not be confirmed: do not sleep on an override
+			// that may not survive it.
+			mem_skip("the USB host role could not be given back");
+			return;
+		}
+	}
+
 	// And what the cable is carrying: the card exported over USB, or a computer
 	// feeding the DAC, both of which the suspend would cut. Below the cable
 	// itself now, and kept because a host can hold the port without VBUS.
@@ -1732,6 +1787,13 @@ void power_screen_off(void) {
 		return;
 	}
 	g_screen_on = false;
+	// A level check belongs to the visible meter. An explicit recording can
+	// keep running in a pocket even when the backlight times out.
+	tape_rec_status_t tape;
+	taperecorder_status(&tape);
+	if (!tape.record && (tape.state == TAPE_REC_OPENING || tape.state == TAPE_REC_MONITORING)) {
+		taperecorder_request_stop();
+	}
 	g_screen_off_at = lv_tick_get();
 	// The screen going dark opens a new idle window: the standby countdown
 	// starts here, unless activity keeps pushing it back.
@@ -1760,22 +1822,14 @@ void power_screen_off(void) {
 		screen_power(false);
 	}
 
-	// And left at the hold level rather than at the fade's floor: the
-	// backlight driver restores the level it held before the blank when the
-	// panel is next unblanked, and the floor is a level the panel is *looked
-	// at through*. Left at a true zero the panel comes back invisible whatever
-	// the driver restores, which is half of what keeps the wake free of the
-	// white reset frame (see WAKE_HOLD_LEVEL_DEFAULT). The user's level is not
-	// lost: the wake's fade ends at g_cfg.brightness.
-	//
-	// A held panel gets a true zero instead: it is still powered and still
-	// holding a picture, so a hold level meant for a blanked panel would be a
-	// dark screen someone can just make out.
-	if (g_panel_held) {
-		backlight_black();
-	} else {
-		backlight_hold();
-	}
+	// Off is always a true zero, not the fade's floor or a configured wake
+	// hold. Leave the driver's saved level dark too, so an unblank cannot
+	// restore a visible reset frame. The user's level is retained separately
+	// in g_cfg.brightness and restored through the PWM endpoint guard on wake.
+	backlight_black();
+#ifdef HOST_WEB_EMU
+	webemu_notify_screen(false);
+#endif
 
 	// With the panel dark, draw what the next wake should open on straight
 	// into the framebuffer. Unblanking presents whatever the framebuffer
@@ -1909,12 +1963,6 @@ void power_screen_on(void) {
 	g_mem_blocked_this_dark = false;
 	g_mem_instant_wakes = 0;
 
-	// Whatever the screen coming back is for, the radios are probably part of
-	// it. Asked for first, because associating and rebuilding a Bluetooth
-	// stack take seconds, and they may as well be the seconds the panel spends
-	// waking up.
-	unpark_radios();
-
 	// The level the screen comes back at is the one the user chose, however dim.
 	// No too-dim floor is applied here: that guess belongs at init, where the
 	// stored level is adopted from the panel (see power_init). Applied here it
@@ -1937,8 +1985,8 @@ void power_screen_on(void) {
 	// --- The wake, in the order this panel needs it -----------------------
 	//
 	// The backlight goes down first and stays down until the picture has
-	// reached the glass. Nothing below is meant to be visible before the fade
-	// at the end, so the panel may be white and the controller may still be
+	// reached the glass. Nothing below is meant to be visible before the backlight
+	// is restored, so the panel may be white and the controller may still be
 	// waking up: what matters is that the level comes back over the *picture*,
 	// never over the panel's reset white (see WAKE_PANEL_SETTLE_MS).
 	//
@@ -2015,13 +2063,28 @@ void power_screen_on(void) {
 		// the panel -- the moment before this is when the reset white could show.
 		backlight_hold_until_panel_shows();
 	}
+	// The picture is on the glass. Restore brightness in one write rather than
+	// adding a visible fade to every wake. Do not shorten the guarded panel
+	// initialization above: that would expose its white reset frame.
+	backlight_write(g_cfg.brightness);
+#ifdef HOST_WEB_EMU
+	webemu_notify_screen(true);
+#endif
+	fprintf(stderr, "power: wake visible after %ums%s\n",
+			(unsigned)(monotonic_ms() - wake_started), panel_was_held ? " (panel kept)" : "");
+
 	panel_touch_flush();
 	set_indevs_enabled(true);
 	indev_timers_set_paused(false);
-
-	// The picture is on the glass: bring the user's level back over it.
-	fade_up_quickly(g_cfg.brightness);
 	lv_display_trigger_activity(g_disp);
+	// A touch gesture can wake the panel without going through the queued
+	// power-button path. Keep the explicit activity clock in step as well: the
+	// screensaver's idle policy uses it while its lock screen is visible.
+	power_notify_activity();
+
+	// Radio restoration can involve slow hardware work and does not belong
+	// between the power press and the first visible frame.
+	unpark_radios();
 
 	// The panel blank/unblank cycle can disturb shared clock or power
 	// domains and leave the CS43198's volume register stale, which is
@@ -2037,7 +2100,15 @@ void power_screen_on(void) {
 	// the one thing a wake must not do while the music plays. The Bluetooth
 	// receiver is not this case: there the DAC is playing, and the rewrite is
 	// exactly what it is for.
-	if (!audio_output_is_bluetooth()) {
+	//
+	// And skipped over the USB-C port, for a reason of its own: that call is
+	// the whole volume chain for whatever the sound is leaving through, and
+	// the USB device's own control is at the end of it. It rewrites the
+	// CS43198 -- which is not in that path -- and then re-parks the dongle's
+	// control, and both writes land in the middle of a live stream. The CS43198
+	// has a register worth putting back after a blank; a dongle on the USB bus
+	// was never blanked, never lost its power, and has nothing to restore.
+	if (!audio_output_is_bluetooth() && !usbaudio_active()) {
 		set_volume_percent(get_volume_percent());
 	}
 
@@ -2119,6 +2190,7 @@ static void battery_guard_tick(void) {
 			power_screen_on();
 			g_low_battery_woke_at = lv_tick_get();
 		}
+		led_notify_low_battery();
 		gui_notify_battery_low();
 		return;
 	}
@@ -2195,6 +2267,7 @@ static void power_timer_cb(lv_timer_t *timer) {
 	if (playing) {
 		g_last_playing_ms = now;
 	}
+	bool audio_busy = playing || taperecorder_active() || tapepads_active();
 
 	// 3. idle computations
 	uint32_t input_idle = input_idle_ms(now);
@@ -2206,8 +2279,12 @@ static void power_timer_cb(lv_timer_t *timer) {
 	// cannot fall in the middle of a track change.
 	bool usb_now = usb_vbus_present();
 	g_usb_now = usb_now; // read once: the guard and the sleep rule below reuse it
+	// Record a full/limited charge or an unplug edge, and add only this running
+	// session to the on-time shown under System > About. The gauge is cached by
+	// the status-bar poll, so this is not another sysfs read every 250 ms.
+	batteryhistory_tick(battery_percent_cached(), usb_now, power_get_charge_limit());
 	bool usb_changed = g_usb_present_known && usb_now != g_usb_present_last;
-	if (playing || input_idle < POWER_TICK_MS * 2 || usb_changed) {
+	if (audio_busy || input_idle < POWER_TICK_MS * 2 || usb_changed) {
 		g_mem_active_ms = now;
 	}
 	g_usb_present_last = usb_now;
@@ -2222,7 +2299,7 @@ static void power_timer_cb(lv_timer_t *timer) {
 	// It counts on CLOCK_BOOTTIME, which keeps running while the SoC is
 	// suspended, so a device that spends the wait asleep still switches off at
 	// the right moment.
-	if (g_screen_on || player_is_busy(playing, input_idle)) {
+	if (g_screen_on || player_is_busy(audio_busy, input_idle)) {
 		g_last_active_boot_ms = boottime_ms();
 	}
 	uint32_t off_idle_wall = boottime_ms() - g_last_active_boot_ms;
@@ -2282,10 +2359,10 @@ static void power_timer_cb(lv_timer_t *timer) {
 	// 4a-bis-3. the real sleep, a minute after the screen goes dark. Stopped and
 	//           off the network, the SoC halts the way the stock binary makes it
 	//           halt.
-	suspend_if_idle(now, playing);
+	suspend_if_idle(now, audio_busy);
 
-	// 4b. the charger, if it is being held below full: the MP2731 by the
-	//     percentage, or the PMIC by its own two switches on the R1
+	// 4b. enforce the percentage limit: through the MP2731 control node or the
+	//     V1 PMIC's charge-enable bit. Reassert PMIC voltage/current options too.
 	apply_charge_limit();
 	axpcharge_tick();
 
@@ -2422,7 +2499,22 @@ void power_init(const power_config_t *cfg, lv_display_t *disp) {
 	if (g_cfg.brightness < power_get_min_brightness()) {
 		g_cfg.brightness = power_get_min_brightness();
 	}
-	screen_power(true); // make sure the panel is unblanked (in case a prior run left it off)
+	if (g_cfg.brightness > brightness_max()) {
+		g_cfg.brightness = brightness_max();
+	}
+	// The two cases that need this line, in one place. An ordinary boot may be
+	// coming up over a panel a previous run left blanked, so the panel is
+	// unblanked unconditionally. A boot out of the charging screen is the other
+	// case: the panel was blanked at some point during this process, but the
+	// charging screen has since put it back up in the order this file documents
+	// (frame on the glass, then the light) with the charge frame still on the
+	// fb pages -- re-writing UNBLANK here would reset the glass to white behind
+	// a lit backlight, before the interface's first frame has been drawn.
+	if (g_cfg.panel_up) {
+		g_panel_blanked = false;
+	} else {
+		screen_power(true); // make sure the panel is unblanked (in case a prior run left it off)
+	}
 	backlight_write(g_cfg.brightness);
 
 
@@ -2465,6 +2557,11 @@ void power_init(const power_config_t *cfg, lv_display_t *disp) {
 	// process started belonged to the session that ended.
 	g_battery_guard = (batteryguard_t){0};
 	g_low_battery_woke_at = 0;
+
+	// The charge history survives a shutdown, but begins a new powered-on
+	// session here. Its BOOTTIME accounting includes suspend and excludes every
+	// second during which the player is actually switched off.
+	batteryhistory_init();
 
 	g_power_timer = lv_timer_create(power_timer_cb, POWER_TICK_MS, NULL);
 

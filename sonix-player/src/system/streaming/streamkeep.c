@@ -16,8 +16,10 @@
 #include "src/system/device/system.h"
 #include "src/system/device/sysinfo.h"
 #include "src/system/device/usb.h"
+#include "src/system/streaming/jellyfincache.h"
 #include "src/system/streaming/podcastdl.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/tidalcache.h"
 
 #define KEEP_MUSIC_DIR "Music"
@@ -54,7 +56,8 @@ bool streamkeep_is_stream_track(const char *path) {
 	if (!path || !path[0]) {
 		return false;
 	}
-	return tidalcache_owns(path) || qobuzcache_owns(path);
+	return tidalcache_owns(path) || qobuzcache_owns(path) || soundcloudcache_is_soundcloud_path(path) ||
+		   jellyfincache_owns(path);
 }
 
 bool streamkeep_busy(void) {
@@ -356,7 +359,11 @@ static void *keep_worker(void *arg) {
 	char service[16];
 	snprintf(path, sizeof(path), "%s", request->path);
 	bool notify_result = request->notify_result;
-	snprintf(service, sizeof(service), "%s", tidalcache_owns(path) ? "Tidal" : "Qobuz");
+	snprintf(service, sizeof(service), "%s",
+			 tidalcache_owns(path) ? "Tidal"
+			 : soundcloudcache_is_soundcloud_path(path) ? "SoundCloud"
+			 : jellyfincache_owns(path) ? "Jellyfin"
+			 : "Qobuz");
 	free(request);
 	thread_be_low_priority("stream keep"); // the card is also playing from it
 

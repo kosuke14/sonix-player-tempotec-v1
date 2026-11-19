@@ -249,6 +249,7 @@ static const lv_color_t ACCENT_COLORS[THEME_ACCENT_COUNT] = {
 	LV_COLOR_MAKE(139, 142, 148), // slate (#8b8e94)
 };
 static int accent_index;
+static lv_color_t custom_accent_color = LV_COLOR_MAKE(53, 132, 228);
 
 static lv_color_t default_accent(theme_kind_t kind) {
 	switch (kind) {
@@ -471,6 +472,79 @@ void theme_set_boot_screen_custom(const char *name) {
 	config_save();
 }
 
+// The palette the config describes, and nothing else: kind, accent, dynamic
+// tint, resolved into `active`. Shared by theme_init() and the charging
+// screen's pre-GUI call (theme_resolve_boot_palette), so the two cannot
+// drift apart. Idempotent, and free of every other side effect -- no styles,
+// no flash marker -- which is why the boot path may run it before the
+// interface exists.
+static void select_active(void) {
+	// Read the named theme choice when present; configs from older builds have
+	// only `dark_theme`, so they keep their original Dark/Light setting.
+	const char *saved_theme = config_get("ui", "theme", NULL);
+	if (saved_theme && strcmp(saved_theme, "light") == 0) {
+		selected_kind = THEME_KIND_LIGHT;
+	} else if (saved_theme && strcmp(saved_theme, "tokyo-night") == 0) {
+		selected_kind = THEME_KIND_TOKYO_NIGHT;
+	} else if (saved_theme && strcmp(saved_theme, "amber-on-black") == 0) {
+		selected_kind = THEME_KIND_AMBER_ON_BLACK;
+	} else if (saved_theme && strcmp(saved_theme, "oled") == 0) {
+		selected_kind = THEME_KIND_OLED;
+	} else if (saved_theme && strcmp(saved_theme, "custom") == 0) {
+		selected_kind = load_custom(&palette_custom) ? THEME_KIND_CUSTOM : THEME_KIND_DARK;
+		if (selected_kind == THEME_KIND_CUSTOM) custom_accent = palette_custom.accent;
+	} else if (saved_theme && strcmp(saved_theme, "dark") == 0) {
+		selected_kind = THEME_KIND_DARK;
+	} else {
+		selected_kind = config_get_bool("ui", "dark_theme", true) ? THEME_KIND_DARK : THEME_KIND_LIGHT;
+	}
+
+	// The accent slot is shared across themes; slot zero resolves to each new
+	// palette's native accent while the other slots retain their shared colors.
+	// Slot -1 means a user-picked custom colour in [ui] accent_custom.
+	accent_index = (int)config_get_int("ui", "accent", 0);
+	if (accent_index == -1) {
+		int rgb = (int)config_get_int("ui", "accent_custom", 0x3584e4);
+		custom_accent_color = lv_color_make((uint8_t)((rgb >> 16) & 0xFF),
+											(uint8_t)((rgb >> 8) & 0xFF),
+											(uint8_t)(rgb & 0xFF));
+	} else if (accent_index < 0 || accent_index >= THEME_ACCENT_COUNT) {
+		accent_index = 0;
+	}
+	if (config_get_int("ui", "accent_scheme", 0) == 0) {
+		// No marker: the value came from the six-preset palette. Move the
+		// choice to its place among the twelve and write the marker, so a
+		// boot after this one reads the index as it is.
+		if (accent_index >= 0 && accent_index < 6) {
+			accent_index = LEGACY_ACCENT_MAP[accent_index];
+		}
+		config_set_int("ui", "accent", accent_index);
+		config_set_int("ui", "accent_scheme", 1);
+		config_save();
+	}
+	if (accent_index == -1) {
+		palette_dark.accent = custom_accent_color;
+		palette_light.accent = custom_accent_color;
+		palette_tokyo.accent = custom_accent_color;
+		palette_amber.accent = custom_accent_color;
+		palette_oled.accent = custom_accent_color;
+		palette_custom.accent = custom_accent_color;
+	} else {
+		palette_dark.accent = ACCENT_COLORS[accent_index];
+		palette_light.accent = ACCENT_COLORS[accent_index];
+		palette_tokyo.accent = accent_index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[accent_index];
+		palette_amber.accent = accent_index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[accent_index];
+		palette_oled.accent = accent_index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[accent_index];
+		palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
+	}
+
+	dynamic_tint = config_get_bool("ui", "dynamic_tint", false);
+
+	rebuild_active();
+}
+
+void theme_resolve_boot_palette(void) { select_active(); }
+
 void theme_init(void) {
 	lv_style_init(&theme_style_screen);
 	lv_style_set_bg_opa(&theme_style_screen, LV_OPA_COVER);
@@ -509,25 +583,7 @@ void theme_init(void) {
 	lv_style_set_bg_opa(&theme_style_slider_track, LV_OPA_40);
 	lv_style_set_radius(&theme_style_slider_track, LV_RADIUS_CIRCLE);
 
-	// Read the named theme choice when present; configs from older builds have
-	// only `dark_theme`, so they keep their original Dark/Light setting.
-	const char *saved_theme = config_get("ui", "theme", NULL);
-	if (saved_theme && strcmp(saved_theme, "light") == 0) {
-		selected_kind = THEME_KIND_LIGHT;
-	} else if (saved_theme && strcmp(saved_theme, "tokyo-night") == 0) {
-		selected_kind = THEME_KIND_TOKYO_NIGHT;
-	} else if (saved_theme && strcmp(saved_theme, "amber-on-black") == 0) {
-		selected_kind = THEME_KIND_AMBER_ON_BLACK;
-	} else if (saved_theme && strcmp(saved_theme, "oled") == 0) {
-		selected_kind = THEME_KIND_OLED;
-	} else if (saved_theme && strcmp(saved_theme, "custom") == 0) {
-		selected_kind = load_custom(&palette_custom) ? THEME_KIND_CUSTOM : THEME_KIND_DARK;
-		if (selected_kind == THEME_KIND_CUSTOM) custom_accent = palette_custom.accent;
-	} else if (saved_theme && strcmp(saved_theme, "dark") == 0) {
-		selected_kind = THEME_KIND_DARK;
-	} else {
-		selected_kind = config_get_bool("ui", "dark_theme", true) ? THEME_KIND_DARK : THEME_KIND_LIGHT;
-	}
+	theme_resolve_boot_palette();
 
 	// The marker the boot script reads has to agree with the setting too, not
 	// only with the theme. The added palettes use the dark variant of that
@@ -539,33 +595,6 @@ void theme_init(void) {
 	// stops waiting for a file that is not there.
 	bootlogo_set(theme_boot_screen(), selected_palette()->dark);
 
-	// The accent slot is shared across themes; slot zero resolves to each new
-	// palette's native accent while the other slots retain their shared colors.
-	accent_index = (int)config_get_int("ui", "accent", 0);
-	if (accent_index < 0 || accent_index >= THEME_ACCENT_COUNT) {
-		accent_index = 0;
-	}
-	if (config_get_int("ui", "accent_scheme", 0) == 0) {
-		// No marker: the value came from the six-preset palette. Move the
-		// choice to its place among the twelve and write the marker, so a
-		// boot after this one reads the index as it is.
-		if (accent_index < 6) {
-			accent_index = LEGACY_ACCENT_MAP[accent_index];
-		}
-		config_set_int("ui", "accent", accent_index);
-		config_set_int("ui", "accent_scheme", 1);
-		config_save();
-	}
-	palette_dark.accent = ACCENT_COLORS[accent_index];
-	palette_light.accent = ACCENT_COLORS[accent_index];
-	palette_tokyo.accent = accent_index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[accent_index];
-	palette_amber.accent = accent_index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[accent_index];
-	palette_oled.accent = accent_index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[accent_index];
-	palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
-
-	dynamic_tint = config_get_bool("ui", "dynamic_tint", false);
-
-	rebuild_active();
 	apply_palette();
 }
 
@@ -892,7 +921,8 @@ bool theme_reload_custom(void) {
 	if (!load_custom(&next)) return false;
 	custom_accent = next.accent;
 	palette_custom = next;
-	palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
+	palette_custom.accent = accent_index == -1 ? custom_accent_color
+						  : (accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index]);
 	if (selected_kind == THEME_KIND_CUSTOM) {
 		rebuild_active();
 		apply_palette();
@@ -913,10 +943,17 @@ void theme_set_kind(theme_kind_t kind) {
 	}
 
 	selected_kind = kind;
-	palette_tokyo.accent = accent_index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[accent_index];
-	palette_amber.accent = accent_index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[accent_index];
-	palette_oled.accent = accent_index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[accent_index];
-	palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
+	if (accent_index == -1) {
+		palette_tokyo.accent = custom_accent_color;
+		palette_amber.accent = custom_accent_color;
+		palette_oled.accent = custom_accent_color;
+		palette_custom.accent = custom_accent_color;
+	} else {
+		palette_tokyo.accent = accent_index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[accent_index];
+		palette_amber.accent = accent_index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[accent_index];
+		palette_oled.accent = accent_index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[accent_index];
+		palette_custom.accent = accent_index == 0 ? custom_accent : ACCENT_COLORS[accent_index];
+	}
 	rebuild_active();
 	apply_palette();
 
@@ -944,10 +981,35 @@ void theme_set_accent(int index) {
 	palette_tokyo.accent = index == 0 ? default_accent(THEME_KIND_TOKYO_NIGHT) : ACCENT_COLORS[index];
 	palette_amber.accent = index == 0 ? default_accent(THEME_KIND_AMBER_ON_BLACK) : ACCENT_COLORS[index];
 	palette_oled.accent = index == 0 ? default_accent(THEME_KIND_OLED) : ACCENT_COLORS[index];
+	palette_custom.accent = index == 0 ? custom_accent : ACCENT_COLORS[index];
 	rebuild_active(); // the tint is drawn from the accent, so it moves with it
 	apply_palette();
 
 	config_set_int("ui", "accent", index);
+	config_save();
+
+	refresh_all();
+}
+
+bool theme_has_custom_accent(void) { return accent_index == -1; }
+
+lv_color_t theme_get_custom_accent(void) { return custom_accent_color; }
+
+void theme_set_custom_accent(lv_color_t color) {
+	accent_index = -1;
+	custom_accent_color = color;
+	palette_dark.accent = color;
+	palette_light.accent = color;
+	palette_tokyo.accent = color;
+	palette_amber.accent = color;
+	palette_oled.accent = color;
+	palette_custom.accent = color;
+	rebuild_active();
+	apply_palette();
+
+	int rgb = ((int)color.red << 16) | ((int)color.green << 8) | (int)color.blue;
+	config_set_int("ui", "accent", -1);
+	config_set_int("ui", "accent_custom", rgb);
 	config_save();
 
 	refresh_all();

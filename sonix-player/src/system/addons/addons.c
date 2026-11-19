@@ -21,6 +21,8 @@ static const addon_t ADDONS[] = {
 	{"radio", "radio", "addon_radio_note", "plugins_section_services"},
 	{"subsonic", "subsonic", "addon_subsonic_note", "plugins_section_services"},
 	{"applemusic", "applemusic", "addon_applemusic_note", "plugins_section_services"},
+	{"jellyfin", "jellyfin", "addon_jellyfin_note", "plugins_section_services"},
+	{"soundcloud", "soundcloud", "addon_soundcloud_note", "plugins_section_services"},
 	// What talks to a pair of earbuds over the Bluetooth link: the AirPods'
 	// battery and noise control through Apple's own protocol. Off means the
 	// worker that speaks it is never started and its page is not built.
@@ -49,6 +51,7 @@ static const addon_t ADDONS[] = {
 	{"notes", "notes", "addon_notes_note", "plugins_section_tools"},
 	{"tagmanager", "addon_tagmanager_label", "addon_tagmanager_note", "plugins_section_tools"},
 	{"metronome", "metronome", "addon_metronome_note", "plugins_section_tools"},
+	{"tapedeck", "tape_deck", "addon_tapedeck_note", "plugins_section_tools"},
 #if GB_CORE
 	{"gearboy", "gearboy", "addon_gearboy_note", "plugins_section_games"},
 #endif
@@ -88,6 +91,8 @@ static bool addon_is_default_on(const char *id) {
 		return false;
 	}
 	if (strcmp(id, "subsonic") == 0) return true;
+	if (strcmp(id, "jellyfin") == 0) return true;
+	if (strcmp(id, "soundcloud") == 0) return true;
 	if (strcmp(id, "eq") == 0) return true;
 	if (strcmp(id, "peq") == 0) return true;
 	if (strcmp(id, "mseb") == 0) return true;

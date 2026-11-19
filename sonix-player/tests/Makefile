@@ -20,10 +20,46 @@ CORE = $(ROOT)/src/system/streaming/subsonic.c \
        $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/md5.c \
        $(ROOT)/src/system/core/config.c $(ROOT)/src/system/playback/playlist.c
 
-.PHONY: test sanitize clean extractkeys qobuz
+.PHONY: test sanitize clean extractkeys qobuz gbdb
 
 test: $(BUILD)/test_subsonic
 	python3 run_subsonic_tests.py $(BUILD)/test_subsonic
+
+# Tape Deck worker tests: a fake capture/output PCM and a real temporary card.
+.PHONY: tapedeck tools-ui
+tapedeck: $(BUILD)/test_taperecorder $(BUILD)/test_tapepads
+	$(BUILD)/test_taperecorder
+	$(BUILD)/test_tapepads
+
+$(BUILD)/test_taperecorder: test_taperecorder.c $(ROOT)/src/system/audio/taperecorder.c \
+                            $(ROOT)/src/system/audio/taperecorder.h $(ROOT)/webemu/alsa/asoundlib.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -I$(ROOT)/webemu $(CFLAGS) -DTAPE_SOUND_CLASS='"sound"' -DTAPE_ASOUND_ROOT='"asound"' \
+		-DTAPE_REC_LIMIT_SECONDS=1 -o $@ $(filter %.c,$^) $(LDFLAGS) -Wl,--wrap=time,--wrap=fsync $(LDLIBS)
+
+$(BUILD)/test_tapepads: test_tapepads.c $(ROOT)/src/system/audio/tapepads.c $(ROOT)/src/system/audio/tapepads.h \
+                       $(ROOT)/src/system/audio/tapewav.c $(ROOT)/src/system/audio/tapewav.h \
+                       $(ROOT)/src/system/audio/tapemix.c $(ROOT)/src/system/audio/tapemix.h \
+                       $(ROOT)/src/system/audio/tapestore.c $(ROOT)/src/system/audio/tapestore.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DTAPE_MIX_LIMIT_SECONDS=2 -o $@ $(filter %.c,$^) $(LDFLAGS) \
+		-Wl,--wrap=time,--wrap=fsync,--wrap=write $(LDLIBS)
+
+tools-ui: $(BUILD)/test_tools_pages
+	$(BUILD)/test_tools_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+# Game Boy ROM naming and optional Cover Art matching. No LVGL or emulator core.
+gbdb: $(BUILD)/test_gbdb
+	$(BUILD)/test_gbdb
+
+$(BUILD)/test_gbdb: test_gbdb.c $(ROOT)/src/system/gearboy/gbdb.c $(ROOT)/src/system/gearboy/gbdb.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_gbdb.c $(ROOT)/src/system/gearboy/gbdb.c $(LDFLAGS) $(LDLIBS)
+
+# Everything Subsonic: the bridge and its mock server, the download worker
+# against a real temporary card, and the pages drawn with LVGL.
+.PHONY: subsonic-all
+subsonic-all: test subsonicdl subsonic-ui
 
 # Pseudo-files (procfs/configfs) can have zero size or reject seeking.
 .PHONY: readfile
@@ -78,12 +114,34 @@ $(BUILD)/test_qobuz: $(QOBUZ_SRC) $(ROOT)/build_gen/streamkeys_key.h $(ROOT)/src
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DHOST_BUILD -o $@ $(QOBUZ_SRC) $(LDFLAGS) $(LDLIBS)
 
+# Download worker with fake Qobuz and HTTP transport. Requires the same LVGL
+# headers as the player (run make in the parent directory to fetch them).
+.PHONY: qobuzdl
+qobuzdl: $(BUILD)/test_qobuzdl
+	$(BUILD)/test_qobuzdl
+
+$(BUILD)/test_qobuzdl: test_qobuzdl.c $(ROOT)/src/system/streaming/qobuzdl.c $(ROOT)/src/system/streaming/qobuzdl.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -I$(ROOT)/lvgl $(CFLAGS) -Wno-error=format-truncation -DLV_CONF_INCLUDE_SIMPLE=1 -DHOST_BUILD -o $@ test_qobuzdl.c $(ROOT)/src/system/streaming/qobuzdl.c $(ROOT)/src/system/streaming/podcastdl.c $(LDFLAGS) $(LDLIBS)
+
+# The Subsonic download worker against a fake transport and a real temporary
+# card: what is saved, what is not, and what a cut or cancelled transfer
+# leaves behind. No LVGL.
+.PHONY: subsonicdl
+subsonicdl: $(BUILD)/test_subsonicdl
+	$(BUILD)/test_subsonicdl
+
+$(BUILD)/test_subsonicdl: test_subsonicdl.c $(ROOT)/src/system/streaming/subsonicdl.c \
+                          $(ROOT)/src/system/streaming/subsonicdl.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DHOST_BUILD -o $@ test_subsonicdl.c $(ROOT)/src/system/streaming/subsonicdl.c $(LDFLAGS) $(LDLIBS)
+
 $(BUILD)/test_subsonic: test_subsonic.c support.c $(CORE) $(shell find $(ROOT)/src/system -name '*.h')
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_subsonic.c support.c $(CORE) $(LDFLAGS) $(LDLIBS)
 
 sanitize:
-	$(MAKE) BUILD=.build/sanitize CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' test
+	$(MAKE) BUILD=.build/sanitize CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' test soundcloud jellyfin tapedeck
 
 # The same for the ampstream suite: the pipeline allocates through every step
 # (fragments, batches, plaintexts), which is exactly where a slip hides.
@@ -106,9 +164,56 @@ GUARD_SRC = test_batteryguard.c $(ROOT)/src/system/device/batteryguard.c
 batteryguard: $(BUILD)/test_batteryguard
 	$(BUILD)/test_batteryguard
 
+# batteryhistory is listed separately below: it owns persistent charge points
+# and powered-on duration, while the guard only enforces the low-battery rule.
+
 $(BUILD)/test_batteryguard: $(GUARD_SRC) $(ROOT)/src/system/device/batteryguard.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(GUARD_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The persistent charge-history state machine: charge-target and unplug edges,
+# with on-time made up only from the player's running sessions.
+BATTERYHISTORY_SRC = test_batteryhistory.c $(ROOT)/src/system/device/batteryhistory.c $(ROOT)/src/system/core/config.c
+.PHONY: batteryhistory
+batteryhistory: $(BUILD)/test_batteryhistory
+	$(BUILD)/test_batteryhistory
+
+$(BUILD)/test_batteryhistory: $(BATTERYHISTORY_SRC) $(ROOT)/src/system/device/batteryhistory.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(BATTERYHISTORY_SRC) $(LDFLAGS) $(LDLIBS)
+
+# Live battery profiler: stock sysfs units, rate estimation, comparison and
+# read-only PMIC access. No hardware or LVGL required.
+BATTERYPROFILE_SRC = test_batteryprofile.c $(ROOT)/src/system/device/batteryprofile.c $(ROOT)/src/system/device/axpcharge.c
+.PHONY: batteryprofile
+batteryprofile: $(BUILD)/test_batteryprofile
+	$(BUILD)/test_batteryprofile
+
+$(BUILD)/test_batteryprofile: $(BATTERYPROFILE_SRC) $(ROOT)/src/system/device/batteryprofile.h $(ROOT)/src/system/device/batteryguard.h $(ROOT)/src/system/device/axpcharge.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(BATTERYPROFILE_SRC) $(LDFLAGS) $(LDLIBS) \
+		-Wl,--wrap=open,--wrap=open64,--wrap=ioctl,--wrap=close
+
+# Exact percentage cutoff and hysteresis used by both charger paths.
+.PHONY: chargelimit
+chargelimit: $(BUILD)/test_chargelimit
+	$(BUILD)/test_chargelimit
+
+$(BUILD)/test_chargelimit: test_chargelimit.c $(ROOT)/src/system/device/chargelimit.c $(ROOT)/src/system/device/chargelimit.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_chargelimit.c $(ROOT)/src/system/device/chargelimit.c $(LDFLAGS) $(LDLIBS)
+
+# The charger-presence probe the charging screen stands on: online bits,
+# USB-sized voltages, and the battery in its Full / Not charging states --
+# the case the 80% charge limit produces. Fake supplies in a temporary
+# directory, no hardware.
+.PHONY: chargerattached
+chargerattached: $(BUILD)/test_chargerattached
+	$(BUILD)/test_chargerattached
+
+$(BUILD)/test_chargerattached: test_chargerattached.c $(ROOT)/src/system/device/chargerattached.c $(ROOT)/src/system/device/chargerattached.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_chargerattached.c $(ROOT)/src/system/device/chargerattached.c $(LDFLAGS) $(LDLIBS)
 
 # The Screensaver folder's rules: which files are pictures, judged from their
 # JPEG headers, and the random pick between them. Plain C, no LVGL.
@@ -166,13 +271,30 @@ $(BUILD)/test_eq: $(EQ_SRC) $(ROOT)/src/system/audio/eq.h $(ROOT)/src/system/cor
 # The explicit V1 external-DAC host trial against a private fake sysfs tree.
 # Exercises the real role writes, bounded wait, rollback and crash recovery.
 .PHONY: usbhost
-usbhost: $(BUILD)/test_usbhostprobe $(BUILD)/test_usbhost_reset $(BUILD)/test_usb_ownership $(BUILD)/test_usbexport $(BUILD)/test_usb_storage $(BUILD)/test_usbaudio_arbitration
+usbhost: $(BUILD)/test_usbhostprobe $(BUILD)/test_usbhost_reset $(BUILD)/test_usb_ownership $(BUILD)/test_usbexport $(BUILD)/test_usb_storage $(BUILD)/test_usbaudio_arbitration $(BUILD)/test_usbaudio_volume $(BUILD)/test_usbhostmode $(BUILD)/test_card_release
 	$(BUILD)/test_usbhostprobe
 	$(BUILD)/test_usbhost_reset
 	$(BUILD)/test_usb_ownership
 	$(BUILD)/test_usbexport
 	$(BUILD)/test_usb_storage
 	$(BUILD)/test_usbaudio_arbitration
+	$(BUILD)/test_usbaudio_volume
+	$(BUILD)/test_usbhostmode
+	$(BUILD)/test_card_release
+
+CARD_RELEASE_SRC = test_card_release.c $(ROOT)/src/system/core/logging.c $(ROOT)/src/system/audio/waveform.c
+$(BUILD)/test_card_release: $(CARD_RELEASE_SRC) $(ROOT)/src/system/core/logging.h \
+                            $(ROOT)/src/system/audio/waveform.h $(ROOT)/src/system/decode/decode.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(CARD_RELEASE_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The external USB DAC setting: the hold around the role trial, its retry after
+# another owner of the controller, and what the row is told. The sysfs writes
+# are test_usbhostprobe's; this one replaces them and the config.
+$(BUILD)/test_usbhostmode: test_usbhostmode.c $(ROOT)/src/system/audio/usbhostmode.c \
+                           $(ROOT)/src/system/audio/usbhostmode.h $(ROOT)/src/system/audio/usbhostprobe.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_usbhostmode.c $(LDFLAGS) $(LDLIBS)
 
 $(BUILD)/test_usbhost_reset: test_usbhost_reset.c $(ROOT)/src/system/device/factoryreset.c \
                              $(ROOT)/src/system/audio/usbhostprobe.h
@@ -183,6 +305,15 @@ $(BUILD)/test_usbaudio_arbitration: test_usbaudio_arbitration.c $(ROOT)/src/syst
                                    stubs/lvgl/lvgl.h stubs/alsa/asoundlib.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usbaudio_arbitration.c $(LDFLAGS) $(LDLIBS)
+
+# Where the level physically happens on a USB DAC: the device's own control by
+# default, the samples the remainder, and the samples the whole of it when the
+# control cannot be believed or will not move. The mixer is a fake table; the
+# shape matching, the split arithmetic and the read-back are the real ones.
+$(BUILD)/test_usbaudio_volume: test_usbaudio_volume.c $(ROOT)/src/system/audio/usbaudio.c \
+                               stubs/lvgl/lvgl.h stubs/alsa/asoundlib.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usbaudio_volume.c $(LDFLAGS) $(LDLIBS)
 
 $(BUILD)/test_usb_storage: test_usb_storage.c $(ROOT)/src/system/device/usb.c \
                            $(ROOT)/src/system/device/usbexport.h stubs/lvgl/lvgl.h
@@ -330,15 +461,34 @@ $(BUILD)/test_ampguest: $(AG_SRC) $(ROOT)/src/system/streaming/ampguest.h
 		-DAMPGUEST_SHA256='"588a6cf87db24f5e8c8e45e70d117287e5e49051b6e7702c42a105b35efaf783"' \
 		-DAMPGUEST_ARCHIVE_BYTES=245ULL -DAMPGUEST_UNPACKED_BYTES=8192ULL \
 		-o $@ $(AG_SRC) $(LDFLAGS) $(LDLIBS)
+
+# Native transfer session against real TCP sockets and a temporary card. Use
+# an OS-assigned test port rather than the firmware's fixed port.
+WIFITRANSFER_SRC = test_wifitransfer_server.c $(ROOT)/src/system/net/wifitransfer.c \
+                   $(ROOT)/src/system/net/transferhttp.c
+.PHONY: wifitransfer
+wifitransfer: $(BUILD)/test_wifitransfer_server
+	python3 run_wifitransfer_tests.py $(BUILD)/test_wifitransfer_server
+
+$(BUILD)/test_wifitransfer_server: $(WIFITRANSFER_SRC) $(ROOT)/src/system/net/webpage.h \
+                                 $(ROOT)/src/system/net/wifitransfer.h $(ROOT)/src/system/net/transferhttp.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DWT_PORT=0 -o $@ $(WIFITRANSFER_SRC) $(LDFLAGS) $(LDLIBS)
+
 # Bluetooth's real A2DP-direction decision, startup wait policy and D-Bus
 # signal cache, with fake controller/process state. No radio or ALSA required.
-.PHONY: bluetooth
-bluetooth: $(BUILD)/test_bluetooth $(BUILD)/test_btstack $(BUILD)/test_btreceiver $(BUILD)/test_btmetadata $(BUILD)/test_btdiscovery
+.PHONY: bluetooth btvolume
+bluetooth: $(BUILD)/test_bluetooth $(BUILD)/test_btstack $(BUILD)/test_btreceiver $(BUILD)/test_btmetadata $(BUILD)/test_btdiscovery $(BUILD)/test_btpcmvolume $(BUILD)/test_btvolume
 	$(BUILD)/test_bluetooth
 	$(BUILD)/test_btstack
 	$(BUILD)/test_btreceiver
 	$(BUILD)/test_btmetadata
 	$(BUILD)/test_btdiscovery
+	$(BUILD)/test_btpcmvolume
+	$(BUILD)/test_btvolume
+
+btvolume: $(BUILD)/test_btvolume
+	$(BUILD)/test_btvolume
 
 $(BUILD)/test_bluetooth: test_bluetooth.c $(ROOT)/src/system/bluetooth/bluetooth.c \
                          $(ROOT)/src/system/bluetooth/bluetooth.h $(ROOT)/src/system/bluetooth/btafh.c \
@@ -362,6 +512,15 @@ $(BUILD)/test_btmetadata: test_btmetadata.c $(ROOT)/src/system/bluetooth/btstack
 $(BUILD)/test_btdiscovery: test_btdiscovery.c $(ROOT)/src/system/bluetooth/btstack.c $(ROOT)/src/system/bluetooth/dbuslite.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_btdiscovery.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_btpcmvolume: test_btpcmvolume.c $(ROOT)/src/system/bluetooth/btstack.c $(ROOT)/src/system/bluetooth/dbuslite.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_btpcmvolume.c $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_btvolume: test_btvolume.c $(ROOT)/src/system/bluetooth/btvolume.c \
+                        $(ROOT)/src/system/bluetooth/btvolume.h $(ROOT)/src/system/bluetooth/dbuslite.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_btvolume.c $(LDFLAGS) $(LDLIBS)
 
 # The AFH map, follow policy and actual HCI packet, using fake sockets.
 .PHONY: btafh
@@ -439,6 +598,18 @@ $(BUILD)/test_listenbrainz: $(LB_SRC) $(ROOT)/src/system/listenbrainz/listenbrai
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(LB_SRC) $(LDFLAGS) $(LDLIBS)
 
+LASTFM_SRC = test_lastfm.c $(ROOT)/src/system/streaming/streamkeys.c \
+             $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/md5.c $(ROOT)/src/system/core/sha1.c
+.PHONY: lastfm
+lastfm: $(BUILD)/test_lastfm
+	$(BUILD)/test_lastfm
+
+$(BUILD)/test_lastfm: $(LASTFM_SRC) $(ROOT)/build_gen/streamkeys_key.h \
+                      $(ROOT)/src/system/lastfm/lastfm.h $(ROOT)/src/system/lastfm/lastfm.c \
+                      $(ROOT)/src/system/streaming/streamkeys.h $(ROOT)/src/system/core/config.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DHOST_BUILD -o $@ $(LASTFM_SRC) $(LDFLAGS) $(LDLIBS)
+
 # The rows of Album Art Max: the now-playing arrangement that trades the media
 # controls for the artwork. The sleeve is asked for at the size this gives
 # before anything has been laid out, so the arithmetic is its own module -- and
@@ -504,6 +675,9 @@ TAGS_DECODE_SRC = $(ROOT)/src/system/decode/decode.c \
 TAGS_SRC = test_tags.c \
            $(ROOT)/src/system/tagmanager/tagwrite.c \
            $(ROOT)/src/system/library/metadata.c \
+           $(ROOT)/src/system/library/jisx0208.c \
+           $(ROOT)/src/system/library/tagtext.c \
+           $(ROOT)/src/system/library/id3chap.c \
            $(ROOT)/src/system/library/oggtags.c \
            $(ROOT)/src/system/library/vorbischap.c \
            $(ROOT)/src/system/library/tagdate.c \
@@ -579,6 +753,19 @@ $(BUILD)/test_radio_store: test_radio_store.c $(ROOT)/src/system/streaming/radio
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-format-truncation -o $@ test_radio_store.c $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
 
+# The HTTP stream header-read deadline: a server that accepts a connection but
+# never finishes its header block must fail http_stream_open() at the deadline
+# instead of holding the radio transport thread (and the UI thread joining it)
+# for ever. Plain C, loopback only -- no SDL, ALSA or external network.
+.PHONY: http-stream
+http-stream: $(BUILD)/test_http_stream
+	$(BUILD)/test_http_stream
+
+$(BUILD)/test_http_stream: test_http_stream.c $(ROOT)/src/system/net/http.c \
+                           $(ROOT)/src/system/net/tls.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_http_stream.c $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c $(ROOT)/src/system/core/config.c $(LDFLAGS) $(LDLIBS)
+
 # The playback LED's stock PCM sample-rate bands and their color/pattern map.
 .PHONY: led-rate
 led-rate: $(BUILD)/test_led_rate
@@ -588,6 +775,22 @@ $(BUILD)/test_led_rate: test_led_rate.c $(ROOT)/src/system/device/led.c \
                         $(ROOT)/src/system/device/led.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_led_rate.c $(LDFLAGS) $(LDLIBS)
+
+LED_TELEMETRY_SRC = test_led_telemetry.c $(ROOT)/src/system/audio/visualizer.c $(ROOT)/src/system/core/config.c
+.PHONY: led-telemetry
+led-telemetry: $(BUILD)/test_led_telemetry
+	$(BUILD)/test_led_telemetry
+	$(BUILD)/test_led_telemetry glow
+	$(BUILD)/test_led_telemetry rainbow
+	$(BUILD)/test_led_telemetry pattern
+	$(BUILD)/test_led_telemetry pwm
+	$(BUILD)/test_led_telemetry unavailable
+
+$(BUILD)/test_led_telemetry: $(LED_TELEMETRY_SRC) $(ROOT)/src/system/device/led.c \
+                             $(ROOT)/src/system/device/led.h $(ROOT)/src/system/device/led_i2c.h \
+                             $(ROOT)/src/system/audio/visualizer.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(LED_TELEMETRY_SRC) $(LDFLAGS) $(LDLIBS)
 
 # The Most played list against the real library database: the play upsert
 # device_state.c runs at track start, the handle the page opens, and the
@@ -606,6 +809,21 @@ $(BUILD)/test_mostplayed: $(MOSTPLAYED_SRC) $(BUILD)/sqlite3_impl.o \
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(MOSTPLAYED_SRC) $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
 
+# The boot-time playback record: ordinary and CUE-virtual paths, the saved album
+# queue across a real database reopen, and no automatic card worker with Detect
+# changes off. Real library, CUE parser and SQLite; unrelated codecs are stubbed.
+PLAYBACKSTATE_SRC = test_playbackstate.c $(ROOT)/src/system/library/library.c \
+                    $(ROOT)/src/system/library/cue.c $(ROOT)/src/system/core/config.c \
+                    $(ROOT)/src/system/core/utils.c
+.PHONY: playback-state
+playback-state: $(BUILD)/test_playbackstate
+	$(BUILD)/test_playbackstate
+
+$(BUILD)/test_playbackstate: $(PLAYBACKSTATE_SRC) $(BUILD)/sqlite3_impl.o \
+                             $(ROOT)/src/system/library/library.h $(ROOT)/src/system/library/cue.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(PLAYBACKSTATE_SRC) $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
 # Heard podcast episodes against the real podcast.db: the marks themselves, the
 # sorted set the binary search reads, what survives a restart, and a card whose
 # database is deleted under the player. The card is a temporary directory; the
@@ -619,6 +837,47 @@ $(BUILD)/test_podcastplayed: test_podcastplayed.c $(ROOT)/src/system/streaming/p
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_podcastplayed.c \
 		$(ROOT)/src/system/streaming/podcastplayed.c $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
+# The podcast catalogue on both of the directories it can use, which is to say
+# the requests each one builds and the structs each one fills. The real
+# podcast.c, JSON parser, settings, region list and SHA-1 are linked; the
+# network, the streaming keys and the two language functions are stubbed, so
+# nothing reaches Apple or Podcast Index and no key is needed to run it.
+.PHONY: podcastdir
+podcastdir: $(BUILD)/test_podcastdir
+	$(BUILD)/test_podcastdir
+
+# The show's own feed, read when a directory's episode list comes up short.
+# A parser with no tree and no validation, which is what the wild needs: see
+# podcastrss.h. Its three readings -- the date, the duration and the id
+# derived from a guid -- are tested on their own because each has more shapes
+# in the wild than one feed, and the id decides whether a downloaded episode is
+# found again.
+.PHONY: podcastrss
+podcastrss: $(BUILD)/test_podcastrss
+	$(BUILD)/test_podcastrss
+
+$(BUILD)/test_podcastrss: test_podcastrss.c $(ROOT)/src/system/streaming/podcastrss.c \
+                          $(ROOT)/src/system/streaming/podcastrss.h \
+                          $(ROOT)/src/system/streaming/podcast.h \
+                          $(ROOT)/src/system/ebook/epub_xml.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_podcastrss.c \
+		$(ROOT)/src/system/streaming/podcastrss.c $(ROOT)/src/system/ebook/epub_xml.c \
+		$(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_podcastdir: test_podcastdir.c $(ROOT)/src/system/streaming/podcast.c \
+                          $(ROOT)/src/system/streaming/podcast.h \
+                          $(ROOT)/src/system/streaming/podcastrss.c \
+                          $(ROOT)/src/system/ebook/epub_xml.c \
+                          $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c \
+                          $(ROOT)/src/system/core/region.c $(ROOT)/src/system/core/sha1.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_podcastdir.c \
+		$(ROOT)/src/system/streaming/podcast.c $(ROOT)/src/system/streaming/podcastrss.c \
+		$(ROOT)/src/system/ebook/epub_xml.c $(ROOT)/src/system/core/json.c \
+		$(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/region.c \
+		$(ROOT)/src/system/core/sha1.c $(LDFLAGS) $(LDLIBS)
 
 # The vendored SQLite amalgamation keeps its own warnings to itself: third-
 # party code, built separately (and quietly) so the suite around it keeps
@@ -659,11 +918,44 @@ sanitize-codecs:
 clean:
 	rm -rf $(BUILD)
 
+# The player's log is the stream logging.c assigns to `stdout`. On the device's
+# glibc (2.22) puts() and putchar() do not write to that variable but to libc's
+# own stdout object, so a printf the compiler folds into either of them never
+# reaches the card. The main Makefile switches that folding off; this checks
+# that the flags are still there, that they still do what they are there for --
+# also where the toolchain fortifies, and printf is __printf_chk by then -- and
+# that the format check the flag takes away is put back by glibc_compat.h, in C
+# and, where there is a C++ compiler, in C++.
+.PHONY: printf-flag
+printf-flag:
+	@mkdir -p $(BUILD)
+	@flags="$$(sed -n 's/^CFLAGS = //p' $(ROOT)/Makefile)"; \
+	for want in -fno-builtin-printf -fno-builtin-__printf_chk; do \
+		case " $$flags " in *" $$want "*) ;; \
+			*) echo "FAIL the main Makefile's CFLAGS lost $$want"; exit 1;; esac; done; \
+	opt="$$(printf '%s\n' $$flags | grep -E '^-(O|f)' | tr '\n' ' ')"; \
+	inc="-include $(ROOT)/src/system/core/glibc_compat.h"; \
+	printf '#include <stdio.h>\nvoid a(void){printf("text\\n");}\nvoid b(const char *s){printf("%%s\\n",s);}\nvoid c(void){printf("x");}\n' > $(BUILD)/printf_fold.c; \
+	printf '#include <stdio.h>\nvoid a(void){printf("%%s\\n", 42);}\n' > $(BUILD)/printf_bad.c; \
+	for fortify in "" "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2"; do \
+		for lang in c c++; do \
+			if [ $$lang = c++ ] && ! echo 'int x;' | $(CC) -x c++ -fsyntax-only - 2>/dev/null; then continue; fi; \
+			$(CC) $$opt $$fortify $$inc -x $$lang -c $(BUILD)/printf_fold.c -o $(BUILD)/printf_fold.o || exit 1; \
+			if nm $(BUILD)/printf_fold.o | grep -E ' U (puts|putchar)$$'; then \
+				echo "FAIL printf is still compiled into puts()/putchar() ($$lang, $$opt $$fortify)"; exit 1; fi; \
+			if $(CC) $$opt $$fortify $$inc -Werror=format -x $$lang -c $(BUILD)/printf_bad.c -o $(BUILD)/printf_bad.o 2>/dev/null; then \
+				echo "FAIL a wrong printf format compiles without a word ($$lang, $$opt $$fortify)"; exit 1; fi; \
+		done; \
+	done; \
+	echo "PASS constant printf calls stay printf and formats are still checked (flags: $$opt)"
+
 # Optional headless LVGL layout regression tests. Reuse the production config,
 # disabling SDL, FreeType and device drivers; no audio service is linked.
 UI_SRC = $(ROOT)/tests/ui/test_main_menu.c $(ROOT)/src/gui/shell/main_menu.c \
          $(ROOT)/src/gui/library/music.c $(ROOT)/src/gui/shell/popover.c \
          $(ROOT)/src/gui/shell/gridpage.c $(ROOT)/src/gui/pet/peticon.c \
+         $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+         $(ROOT)/src/gui/streaming/jellyfin_icon.c \
          $(ROOT)/src/gui/settings/appearance.c \
          $(ROOT)/src/gui/settings/bootpicpage.c \
          $(ROOT)/src/gui/shell/corners.c $(ROOT)/src/gui/shell/settingsrow.c \
@@ -675,6 +967,54 @@ UI_SRC = $(ROOT)/tests/ui/test_main_menu.c $(ROOT)/src/gui/shell/main_menu.c \
          $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
 UI_LVGL_SRC = $(shell find $(ROOT)/lvgl/src -name '*.c' 2>/dev/null)
 UI_LVGL_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+# The real power/charger display transitions with fake sysfs and time. Covers
+# saved 100% brightness, both wake paths, true-zero off and the PWM endpoint.
+.PHONY: power-display
+power-display: $(BUILD)/test_power_display
+	$(BUILD)/test_power_display
+
+$(BUILD)/test_power_display: test_power_display.c $(ROOT)/src/system/device/power.c \
+                             $(ROOT)/src/system/device/power.h $(ROOT)/src/system/device/backlight.h \
+                             $(ROOT)/src/gui/shell/chargescreen.c $(ROOT)/src/gui/shell/chargescreen.h $(UI_LVGL_OBJ)
+	@mkdir -p $(BUILD)
+	$(CC) $(UI_CPPFLAGS) $(CFLAGS) -o $@ test_power_display.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+
+# Wake-touch regression suite (issue #325): SYN_REPORT-framed touch_evdev,
+# EVIOCGKEY-backed panel_touch_flush, gbinput's BTN_TOUCH guard, and the
+# cst8xx_touch.ko point_num==0 binary patcher.
+.PHONY: touch-wake
+touch-wake: $(BUILD)/test_touch_wake
+	$(BUILD)/test_touch_wake
+	python3 test_cst8xx_wake_patch.py
+
+$(BUILD)/test_touch_wake: test_touch_wake.c $(ROOT)/src/system/device/touch_evdev.c \
+                          $(ROOT)/src/system/device/touch_evdev.h \
+                          $(ROOT)/src/system/gearboy/gbinput.c $(ROOT)/src/system/gearboy/gbinput.h $(UI_LVGL_OBJ)
+	@mkdir -p $(BUILD)
+	$(CC) $(UI_CPPFLAGS) $(CFLAGS) -o $@ test_touch_wake.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+
+# Curated order across API page boundaries, using a fake genre provider.
+.PHONY: qobuzgenre-order
+qobuzgenre-order: $(BUILD)/test_qobuzgenreorder
+	$(BUILD)/test_qobuzgenreorder
+
+$(BUILD)/test_qobuzgenreorder: test_qobuzgenreorder.c $(ROOT)/src/gui/streaming/qobuzgenreorder.c $(ROOT)/src/gui/streaming/qobuzgenreorder.h $(ROOT)/src/system/streaming/qobuz.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_qobuzgenreorder.c $(ROOT)/src/gui/streaming/qobuzgenreorder.c $(LDFLAGS) $(LDLIBS)
+
+# The paged Qobuz genre picker at actual V1 dimensions.
+QOBUZGENRE_UI_SRC = $(ROOT)/tests/ui/test_qobuzgenregrid.c \
+                    $(ROOT)/src/gui/streaming/qobuzgenregrid.c \
+                    $(ROOT)/src/gui/streaming/qobuzgenre_icons.c
+QOBUZGENRE_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(QOBUZGENRE_UI_SRC)) $(UI_LVGL_OBJ)
+.PHONY: qobuzgenre-ui
+qobuzgenre-ui: $(BUILD)/test_qobuzgenregrid
+	$(BUILD)/test_qobuzgenregrid
+
+$(BUILD)/test_qobuzgenregrid: $(QOBUZGENRE_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 # Stock edge presses must not scroll the page beneath the sheet.
 .PHONY: edge-lock
 edge-lock: $(BUILD)/test_edge_lock
@@ -685,6 +1025,20 @@ $(BUILD)/test_edge_lock: test_edge_lock.c $(ROOT)/src/gui/shell/edge_lock.h $(UI
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
 		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_edge_lock.c \
 		$(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+
+# Swipe-up-to-home gesture and its on/off toggle in switcher.c / gestures.c.
+.PHONY: home-swipe
+home-swipe: $(BUILD)/test_home_swipe
+	$(BUILD)/test_home_swipe
+
+$(BUILD)/test_home_swipe: test_home_swipe.c $(ROOT)/src/gui/shell/switcher.c \
+                          $(ROOT)/src/gui/shell/gestures.c $(ROOT)/src/gui/shell/gestures.h \
+                          $(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
+		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_home_swipe.c \
+		$(ROOT)/src/gui/shell/switcher.c $(ROOT)/src/gui/shell/gestures.c \
+		$(ROOT)/src/system/core/config.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
 
 # Control Centre layout migration: the production parser and saved lists,
 # without constructing the unrelated radio/streaming services.
@@ -699,6 +1053,20 @@ $(BUILD)/test_quickpanel_layout: test_quickpanel_layout.c $(ROOT)/src/gui/shell/
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
 		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_quickpanel_layout.c \
 		$(ROOT)/src/system/core/config.c $(ROOT)/src/system/addons/addons.c $(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
+
+# The Bluetooth receiver's session on real LVGL screens: it parks behind the
+# equaliser pages the control centre opens, comes back with them, and ends the
+# moment the way back to its page is gone from the back-stack.
+.PHONY: btreceiver-session
+btreceiver-session: $(BUILD)/test_btreceiversession
+	$(BUILD)/test_btreceiversession
+
+$(BUILD)/test_btreceiversession: test_btreceiversession.c $(ROOT)/src/gui/bluetooth/btreceiversession.c \
+                                 $(ROOT)/src/gui/bluetooth/btreceiversession.h $(UI_LVGL_OBJ)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT)/lvgl \
+		-DLV_CONF_PATH='"$(abspath ui/lv_conf.h)"' -o $@ test_btreceiversession.c \
+		$(UI_LVGL_OBJ) $(LDFLAGS) $(LDLIBS)
 
 UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_SRC)) \
          $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
@@ -719,6 +1087,20 @@ WIFIPAGE_SRC = $(ROOT)/tests/ui/test_wifi_pages.c $(ROOT)/src/gui/wireless/wifis
 WIFIPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(WIFIPAGE_SRC)) \
             $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 
+# Tidal's "Favourite playlists" on the same renderer: the row on the main page,
+# the list, what its menus offer and what they send. The Tidal client under it
+# is a recording stub (see test_tidal_pages.c); the page, the module that
+# writes to the account and the lists kept on the card are the real ones.
+TIDALPAGE_SRC = $(ROOT)/tests/ui/test_tidal_pages.c $(ROOT)/src/gui/streaming/tidalpage.c \
+            $(ROOT)/src/system/streaming/tidalsync.c $(ROOT)/src/system/streaming/listcache.c \
+            $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/keyboard.c \
+            $(ROOT)/src/gui/shell/popover.c $(ROOT)/src/gui/shell/spinner.c \
+            $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
+            $(ROOT)/src/gui/board_profile.c $(ROOT)/src/system/input/kblayout.c \
+            $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+TIDALPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(TIDALPAGE_SRC)) \
+            $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
 SAVER_SRC = $(ROOT)/tests/ui/test_screensaver.c $(ROOT)/src/gui/settings/screensaver.c $(ROOT)/src/system/audio/visualizer.c \
             $(ROOT)/src/gui/shell/scrolltext.c $(ROOT)/src/gui/shell/settingsrow.c \
             $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
@@ -736,11 +1118,15 @@ TOOLS_SRC = $(ROOT)/tests/ui/test_tools_pages.c \
             $(ROOT)/src/gui/notes/notes.c $(ROOT)/src/gui/notes/noteeditor.c \
             $(ROOT)/src/gui/tagmanager/tagmanager.c $(ROOT)/src/system/tagmanager/tagwrite.c \
             $(ROOT)/src/gui/metronome/metronome.c \
+            $(ROOT)/src/gui/tapedeck/tapedeck.c \
+            $(ROOT)/src/gui/tapedeck/tapesampler.c \
             $(ROOT)/src/gui/pet/petpage.c $(ROOT)/src/gui/pet/peticon.c $(ROOT)/src/gui/pet/pikachu.c \
             $(ROOT)/src/system/pet/pet.c \
             $(ROOT)/src/system/notes/notesstore.c $(ROOT)/src/system/text/textfile.c \
             $(ROOT)/src/gui/library/textview.c $(ROOT)/src/gui/library/pictureview.c \
             $(ROOT)/src/gui/shell/morepage.c $(ROOT)/src/gui/shell/gridpage.c \
+            $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+            $(ROOT)/src/gui/streaming/jellyfin_icon.c \
             $(ROOT)/src/system/addons/addons.c \
             $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/keyboard.c \
             $(ROOT)/src/gui/shell/popover.c $(ROOT)/src/system/input/kblayout.c \
@@ -787,8 +1173,9 @@ GAMES_SRC = $(ROOT)/tests/ui/test_games.c \
 GAMES_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(GAMES_SRC)) \
             $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 
-# PEQ profile selection on the real page and DSP engine, with the shell and
-# network AutoEq browser stubbed. No audio device or network is needed.
+# PEQ profile selection and the band editor's keypad (frequency in Hz or kHz,
+# gain, Q) on the real page and DSP engine, with the shell and network AutoEq
+# browser stubbed. No audio device or network is needed.
 PEQPAGE_SRC = $(ROOT)/tests/ui/test_peq_profiles.c $(ROOT)/src/gui/audio/peqpage.c \
               $(ROOT)/src/system/audio/eq.c $(ROOT)/src/system/addons/addons.c \
               $(ROOT)/src/gui/shell/settingsrow.c \
@@ -830,6 +1217,18 @@ vinylayout: $(BUILD)/test_vinylayout
 $(BUILD)/test_vinylayout: $(VINYLLAYOUT_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# Sticker neon-frame sleeve, corner badges and tilted tape strips on 240x320.
+STICKERLAYOUT_SRC = $(ROOT)/tests/ui/test_stickerlayout.c $(ROOT)/src/gui/nowplaying/stickerlayout.c
+STICKERLAYOUT_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(STICKERLAYOUT_SRC)) \
+                    $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+.PHONY: stickerlayout
+stickerlayout: $(BUILD)/test_stickerlayout
+	$(BUILD)/test_stickerlayout
+
+$(BUILD)/test_stickerlayout: $(STICKERLAYOUT_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 # Waveform artwork pills and favourite, including long scrolling labels.
 WAVEOVERLAY_SRC = $(ROOT)/tests/ui/test_waveform_overlay.c $(ROOT)/src/gui/shell/scrolltext.c
 WAVEOVERLAY_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(WAVEOVERLAY_SRC)) \
@@ -842,6 +1241,19 @@ waveform-overlay: $(BUILD)/test_waveform_overlay
 $(BUILD)/test_waveform_overlay: $(WAVEOVERLAY_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# The four hi-res artwork badge designs, including the embedded official logo.
+HIRESBADGE_UI_SRC = $(ROOT)/tests/ui/test_hiresbadge.c $(ROOT)/src/gui/nowplaying/hiresbadgeview.c \
+                    $(ROOT)/src/gui/shell/icons.c
+HIRESBADGE_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(HIRESBADGE_UI_SRC)) \
+                    $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+.PHONY: hiresbadge-ui
+hiresbadge-ui: $(BUILD)/test_hiresbadge_ui
+	$(BUILD)/test_hiresbadge_ui
+
+$(BUILD)/test_hiresbadge_ui: $(HIRESBADGE_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 # The now-playing page's play/pause button in its plain and legacy looks: the
 # real disc drawn on a stand-in for the sleeve under every palette and accent.
 # The player around it is not built; see src/gui/nowplaying/playbutton.h.
@@ -851,6 +1263,55 @@ PLAYBUTTON_SRC = $(ROOT)/tests/ui/test_playbutton.c $(ROOT)/src/gui/nowplaying/p
                  $(ROOT)/src/system/core/lang.c
 PLAYBUTTON_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(PLAYBUTTON_SRC)) \
                  $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+# Music settings: the expandable DSD card must share the icon/title columns
+# and midline of ordinary toggle/navigation rows; NOS has its own glyph.
+MUSICROWS_SRC = $(ROOT)/tests/ui/test_musicsettings_rows.c \
+                $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/theme.c \
+                $(ROOT)/src/gui/shell/icons.c $(ROOT)/src/gui/board_profile.c \
+                $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+MUSICROWS_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(MUSICROWS_SRC)) \
+                $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+.PHONY: musicsettings-rows
+musicsettings-rows: $(BUILD)/test_musicsettings_rows
+	$(BUILD)/test_musicsettings_rows ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_musicsettings_rows: $(MUSICROWS_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# The profiler page on the real V1 layout with synthetic PMIC/gauge samples.
+BATTERYPROFILE_UI_SRC = $(ROOT)/tests/ui/test_batteryprofile.c \
+                       $(ROOT)/src/gui/settings/batteryprofilepage.c $(ROOT)/src/system/device/batteryprofile.c \
+                       $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/theme.c \
+                       $(ROOT)/src/gui/shell/icons.c $(ROOT)/src/gui/board_profile.c \
+                       $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+BATTERYPROFILE_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(BATTERYPROFILE_UI_SRC))
+.PHONY: batteryprofile-ui
+batteryprofile-ui: $(BUILD)/test_batteryprofile_ui
+	$(BUILD)/test_batteryprofile_ui ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_batteryprofile_ui: $(BATTERYPROFILE_UI_OBJ) $(UI_LVGL_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=clock_gettime,--wrap=batteryprofile_read
+
+-include $(BATTERYPROFILE_UI_OBJ:.o=.d)
+
+# The volume pill with the level read as a voltage: the production overlay and
+# reading on the V1 layout, with the audio side reduced to what the test sets.
+# The label has to hold one width, and one line, over every reading.
+VOLUMEOVERLAY_SRC = $(ROOT)/tests/ui/test_volume_overlay.c \
+                    $(ROOT)/src/gui/shell/volume_overlay.c $(ROOT)/src/gui/shell/volumereadout.c \
+                    $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
+                    $(ROOT)/src/gui/board_profile.c $(ROOT)/src/system/core/config.c
+VOLUMEOVERLAY_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(VOLUMEOVERLAY_SRC)) \
+                    $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+.PHONY: volume-overlay
+volume-overlay: $(BUILD)/test_volume_overlay
+	$(BUILD)/test_volume_overlay
+
+$(BUILD)/test_volume_overlay: $(VOLUMEOVERLAY_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 STOCKKEYS_UI_SRC = $(ROOT)/tests/ui/test_stockkeys_ui.c \
                    $(ROOT)/src/gui/streaming/stockkeys_ui.c \
@@ -869,7 +1330,7 @@ STOCKKEYS_UI_SRC = $(ROOT)/tests/ui/test_stockkeys_ui.c \
 STOCKKEYS_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(STOCKKEYS_UI_SRC)) \
                    $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 
-.PHONY: ui peq-ui corners playbutton stockkeys-ui
+.PHONY: ui peq-ui corners playbutton stockkeys-ui tidal-ui
 corners: $(BUILD)/test_corners
 	$(BUILD)/test_corners
 
@@ -882,6 +1343,14 @@ peq-ui: $(BUILD)/test_peq_profiles
 stockkeys-ui: $(BUILD)/test_stockkeys_ui
 	$(BUILD)/test_stockkeys_ui ../../sonix-packer/assets/V1/usr/resource/sonix/language
 
+# Three runs: the main page's arrangement is read once per process, so the one
+# saved by a build without the row and the one this build saves each get their
+# own.
+tidal-ui: $(BUILD)/test_tidal_pages
+	$(BUILD)/test_tidal_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_tidal_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language saved
+	$(BUILD)/test_tidal_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language arranged
+
 $(BUILD)/test_peq_profiles: $(PEQPAGE_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -889,7 +1358,9 @@ $(BUILD)/test_stockkeys_ui: $(ROOT)/build_gen/streamkeys_key.h $(STOCKKEYS_UI_OB
 	$(CC) -o $@ $(STOCKKEYS_UI_OBJ) $(LDFLAGS) $(LDLIBS)
 
 .PHONY: ui
-ui: $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages $(BUILD)/test_wifi_pages $(BUILD)/test_chargescreen $(BUILD)/test_lyricsearch $(BUILD)/test_games $(BUILD)/test_peq_profiles $(BUILD)/test_quickpanel_layout $(BUILD)/test_corners $(BUILD)/test_playbutton $(BUILD)/test_playerdeck $(BUILD)/test_vinylayout $(BUILD)/test_waveform_overlay $(BUILD)/test_stockkeys_ui
+ui: wifitransfer-ui batteryprofile-ui
+ui: $(BUILD)/test_qobuzgenregrid $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages $(BUILD)/test_wifi_pages $(BUILD)/test_chargescreen $(BUILD)/test_power_display $(BUILD)/test_touch_wake $(BUILD)/test_lyricsearch $(BUILD)/test_games $(BUILD)/test_peq_profiles $(BUILD)/test_quickpanel_layout $(BUILD)/test_btreceiversession $(BUILD)/test_home_swipe $(BUILD)/test_corners $(BUILD)/test_playbutton $(BUILD)/test_musicsettings_rows $(BUILD)/test_volume_overlay $(BUILD)/test_playerdeck $(BUILD)/test_vinylayout $(BUILD)/test_stickerlayout $(BUILD)/test_waveform_overlay $(BUILD)/test_hiresbadge_ui $(BUILD)/test_statusbar_ui $(BUILD)/test_stockkeys_ui $(BUILD)/test_tidal_pages $(BUILD)/test_soundcloud_pages $(BUILD)/test_qobuz_pages $(BUILD)/test_jellyfin_pages $(BUILD)/test_fwupdate
+	$(BUILD)/test_qobuzgenregrid
 	$(BUILD)/test_main_menu ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_main_menu ../../sonix-packer/assets/V1/usr/resource/sonix/language saved
 	$(BUILD)/test_screensaver ../../sonix-packer/assets/V1/usr/resource/sonix/language
@@ -897,16 +1368,32 @@ ui: $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages 
 	$(BUILD)/test_tools_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_wifi_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_chargescreen ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_power_display
+	$(BUILD)/test_touch_wake
 	$(BUILD)/test_lyricsearch ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_games ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_peq_profiles ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_quickpanel_layout
+	$(BUILD)/test_btreceiversession
+	$(BUILD)/test_home_swipe
 	$(BUILD)/test_corners
 	$(BUILD)/test_playbutton ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_musicsettings_rows ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_volume_overlay
 	$(BUILD)/test_playerdeck
 	$(BUILD)/test_vinylayout
+	$(BUILD)/test_stickerlayout
 	$(BUILD)/test_waveform_overlay
+	$(BUILD)/test_hiresbadge_ui
+	$(BUILD)/test_statusbar_ui
 	$(BUILD)/test_stockkeys_ui ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_tidal_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_tidal_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language saved
+	$(BUILD)/test_tidal_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language arranged
+	$(BUILD)/test_soundcloud_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_qobuz_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_jellyfin_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_fwupdate
 
 $(BUILD)/test_main_menu: $(UI_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -922,6 +1409,28 @@ $(BUILD)/test_tools_pages: $(TOOLS_OBJ)
 
 $(BUILD)/test_wifi_pages: $(WIFIPAGE_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+WIFITRANSFER_UI_SRC = $(ROOT)/tests/ui/test_wifitransfer.c $(ROOT)/src/gui/shell/settingsrow.c \
+                      $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
+                      $(ROOT)/src/gui/board_profile.c $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+WIFITRANSFER_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(WIFITRANSFER_UI_SRC)) $(UI_LVGL_OBJ)
+.PHONY: wifitransfer-ui
+wifitransfer-ui: $(BUILD)/test_wifitransfer_ui
+	$(BUILD)/test_wifitransfer_ui ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_wifitransfer_ui: $(WIFITRANSFER_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+-include $(WIFITRANSFER_UI_OBJ:.o=.d)
+
+$(BUILD)/test_tidal_pages: $(TIDALPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# tidalpage.c copies a few strings into buffers GCC cannot prove are large
+# enough -- a search term, a file name off the card, an error message -- and
+# snprintf() cuts them short where they are not. That stays a warning for this
+# one object, as it does for the tag and cover tests above.
+$(BUILD)/ui/src/gui/streaming/tidalpage.o: UI_CFLAGS += -Wno-error=format-truncation
 
 $(BUILD)/test_lyricsearch: $(LYRICSEARCH_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -944,7 +1453,7 @@ $(BUILD)/ui/lvgl/%.o: $(ROOT)/lvgl/%.c ui/lv_conf.h $(ROOT)/lv_conf.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UI_CPPFLAGS) $(filter-out -Werror,$(UI_CFLAGS)) -c $< -o $@
 
--include $(sort $(PEQPAGE_OBJ:.o=.d) $(UI_OBJ:.o=.d) $(SAVER_OBJ:.o=.d) $(WIFIPAGE_OBJ:.o=.d) $(LYRICSEARCH_OBJ:.o=.d) $(GAMES_OBJ:.o=.d) $(CORNERS_OBJ:.o=.d) $(PLAYBUTTON_OBJ:.o=.d) $(PLAYERDECK_OBJ:.o=.d) $(VINYLLAYOUT_OBJ:.o=.d) $(WAVEOVERLAY_OBJ:.o=.d) $(STOCKKEYS_UI_OBJ:.o=.d))
+-include $(sort $(QOBUZGENRE_UI_OBJ:.o=.d) $(PEQPAGE_OBJ:.o=.d) $(UI_OBJ:.o=.d) $(SAVER_OBJ:.o=.d) $(CHARGE_OBJ:.o=.d) $(WIFIPAGE_OBJ:.o=.d) $(LYRICSEARCH_OBJ:.o=.d) $(GAMES_OBJ:.o=.d) $(CORNERS_OBJ:.o=.d) $(PLAYBUTTON_OBJ:.o=.d) $(MUSICROWS_OBJ:.o=.d) $(VOLUMEOVERLAY_OBJ:.o=.d) $(PLAYERDECK_OBJ:.o=.d) $(VINYLLAYOUT_OBJ:.o=.d) $(STICKERLAYOUT_OBJ:.o=.d) $(WAVEOVERLAY_OBJ:.o=.d) $(HIRESBADGE_UI_OBJ:.o=.d) $(STOCKKEYS_UI_OBJ:.o=.d) $(TIDALPAGE_OBJ:.o=.d))
 
 # Smart Mix track-count limits and traversal, with a memory-only graph fixture.
 GENIUS_SRC = test_genius.c $(ROOT)/src/system/library/genius.c
@@ -955,6 +1464,52 @@ genius: $(BUILD)/test_genius
 $(BUILD)/test_genius: $(GENIUS_SRC) $(ROOT)/src/system/library/genius.h $(ROOT)/src/system/library/geniusdb.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(GENIUS_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The whole Smart Mix path against synthetic 25k and 50k libraries: the real
+# builder writes a staging genius.db, the real reader decodes it, and the real
+# walker builds a mix from it. The index is the only stub.
+GENIUSLARGE_SRC = test_geniuslarge.c \
+                  $(ROOT)/src/system/library/geniusbuild.c \
+                  $(ROOT)/src/system/library/geniusdb.c \
+                  $(ROOT)/src/system/library/genius.c \
+                  $(ROOT)/src/system/core/sha256.c
+.PHONY: geniuslarge
+geniuslarge: $(BUILD)/test_geniuslarge
+	$(BUILD)/test_geniuslarge
+
+$(BUILD)/test_geniuslarge: $(GENIUSLARGE_SRC) $(BUILD)/sqlite3_impl.o \
+                           $(ROOT)/src/system/library/geniusbuild.h \
+                           $(ROOT)/src/system/library/geniusdb.h \
+                           $(ROOT)/src/system/library/genius.h \
+                           $(ROOT)/src/system/library/library.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(GENIUSLARGE_SRC) $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
+# Wi-Fi update descriptions: remove GitHub's HTML banner before the notes cap,
+# retain Markdown, decode JSON/entities, and keep truncated UTF-8 valid.
+RELEASE_NOTES_SRC = test_release_notes.c $(ROOT)/src/system/device/releasenotes.c \
+                    $(ROOT)/src/system/core/json.c
+.PHONY: release-notes
+release-notes: $(BUILD)/test_release_notes
+	$(BUILD)/test_release_notes
+
+$(BUILD)/test_release_notes: $(RELEASE_NOTES_SRC) $(ROOT)/src/system/device/releasenotes.h \
+                             $(ROOT)/src/system/device/ota.h $(ROOT)/src/system/core/json.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(RELEASE_NOTES_SRC) $(LDFLAGS) $(LDLIBS)
+
+# The same card on the V1 panel, with the production renderer and fake OTA.
+FWUPDATE_UI_SRC = $(ROOT)/tests/ui/test_fwupdate.c $(ROOT)/src/gui/settings/fwupdate.c \
+                  $(ROOT)/src/system/device/releasenotes.c $(ROOT)/src/system/core/json.c
+FWUPDATE_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(FWUPDATE_UI_SRC)) \
+                  $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+.PHONY: fwupdate-ui
+fwupdate-ui: $(BUILD)/test_fwupdate
+	$(BUILD)/test_fwupdate
+
+$(BUILD)/test_fwupdate: $(FWUPDATE_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(FWUPDATE_UI_OBJ:.o=.d)
 
 # The stock TempoTec release version and its separate Sonix metadata field.
 .PHONY: basebuild
@@ -986,13 +1541,21 @@ $(BUILD)/test_artsearch: test_artsearch.c $(ROOT)/src/system/tagmanager/artsearc
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# The Tidal client against canned replies: the device-code sign-in, and the
+# playlists an account keeps as favourites (somebody else's, which the list of
+# the account's own never held).
 .PHONY: tidal
-tidal: $(BUILD)/test_tidal_login
+tidal: $(BUILD)/test_tidal_login $(BUILD)/test_tidal_favplaylists
 	$(BUILD)/test_tidal_login
+	$(BUILD)/test_tidal_favplaylists
 
 $(BUILD)/test_tidal_login: test_tidal_login.c $(ROOT)/src/system/streaming/tidal.c $(ROOT)/src/system/core/base64.c $(ROOT)/src/system/core/json.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(BUILD)/test_tidal_favplaylists: test_tidal_favplaylists.c $(ROOT)/src/system/streaming/tidal.c $(ROOT)/src/system/streaming/tidal.h $(ROOT)/src/system/core/base64.c $(ROOT)/src/system/core/json.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(filter %.c,$^) $(LDFLAGS) $(LDLIBS)
 
 
 .PHONY: browserstate
@@ -1010,3 +1573,294 @@ hiresbadge: $(BUILD)/test_hiresbadge
 $(BUILD)/test_hiresbadge: test_hiresbadge.c $(ROOT)/src/gui/nowplaying/hiresbadge.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_hiresbadge.c
+
+# The volume read as a voltage: the half-dB table, the three-figure text, and
+# the reading at every index of both gain tables. Plain C, no LVGL. The tables
+# and the DSD offsets are the real ones -- alsa-controls.c is compiled into the
+# test against the declarations-only ALSA header. The one routine of it that is
+# run against a mixer, the write of the two channel controls, gets the test's
+# own recording one; the linker drops the rest.
+.PHONY: volumereadout
+volumereadout: $(BUILD)/test_volumereadout
+	$(BUILD)/test_volumereadout
+
+$(BUILD)/test_volumereadout: test_volumereadout.c $(ROOT)/src/gui/shell/volumereadout.c \
+                             $(ROOT)/src/gui/shell/volumereadout.h \
+                             $(ROOT)/src/system/audio/alsa-controls.c $(ROOT)/src/system/audio/alsa-controls.h \
+                             stubs/alsa/asoundlib.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_volumereadout.c $(ROOT)/src/gui/shell/volumereadout.c $(LDFLAGS) $(LDLIBS)
+
+# Actual status-bar styles rendered with LVGL, including a large blurred image.
+STATUSBAR_UI_OBJ = $(BUILD)/ui/tests/ui/test_statusbarstyle.o \
+                   $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+.PHONY: statusbar-ui
+statusbar-ui: $(BUILD)/test_statusbar_ui
+	$(BUILD)/test_statusbar_ui
+$(BUILD)/test_statusbar_ui: $(STATUSBAR_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(BUILD)/ui/tests/ui/test_statusbarstyle.d
+
+# SoundCloud API v2, credentials, client_id rotation, progressive & HLS cache,
+# AES-128-CBC, Ogg Opus and Go+ fMP4 -> ADTS AAC unwrapping.
+SOUNDCLOUD_CORE = $(ROOT)/src/system/streaming/soundcloud.c \
+                  $(ROOT)/src/system/streaming/soundcloudcache.c \
+                  $(ROOT)/src/system/streaming/streamkeys.c \
+                  $(ROOT)/src/system/streaming/streamturn.c \
+                  $(ROOT)/src/system/net/hls.c \
+                  $(ROOT)/src/system/net/http.c \
+                  $(ROOT)/src/system/net/tls.c \
+                  $(ROOT)/src/system/image/png_scaled.c \
+                  $(ROOT)/src/system/core/json.c \
+                  $(ROOT)/src/system/core/config.c \
+                  $(ROOT)/src/system/core/sha256.c \
+                  $(ROOT)/src/system/core/utils.c \
+                  $(ROOT)/src/system/library/metadata.c \
+                  $(ROOT)/src/system/library/jisx0208.c \
+                  $(ROOT)/src/system/library/tagtext.c \
+                  $(ROOT)/src/system/library/oggtags.c \
+                  $(ROOT)/src/system/library/vorbischap.c \
+                  $(ROOT)/src/system/library/tagdate.c \
+                  $(ROOT)/src/system/library/cue.c
+
+SOUNDCLOUD_DECODE = $(ROOT)/src/system/decode/decode.c \
+                    $(ROOT)/src/system/decode/sndfile.c \
+                    $(ROOT)/src/system/decode/stb_vorbis.c \
+                    $(ROOT)/src/system/decode/mp4.c \
+                    $(ROOT)/src/system/decode/apedec.c \
+                    $(ROOT)/src/system/decode/ape/apecore.c \
+                    $(ROOT)/src/system/decode/alacdec.c \
+                    $(ROOT)/src/system/decode/alac/alac.c \
+                    $(ROOT)/src/system/decode/aacdec.c \
+                    $(ROOT)/src/system/decode/dsd.c \
+                    $(ROOT)/src/system/decode/growfile.c \
+                    $(ROOT)/src/system/streaming/streambridge.c
+
+.PHONY: soundcloud soundcloud-ui
+soundcloud: $(BUILD)/test_soundcloud
+	$(BUILD)/test_soundcloud
+
+$(BUILD)/test_soundcloud: test_soundcloud.c $(ROOT)/build_gen/streamkeys_key.h $(SOUNDCLOUD_CORE) $(SOUNDCLOUD_DECODE)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DHOST_BUILD -Wno-error=format-truncation -o $@ test_soundcloud.c $(SOUNDCLOUD_CORE) \
+		-Wno-unused-parameter -Wno-sign-compare -Wno-unused-function -Wno-implicit-fallthrough -Wno-misleading-indentation $(SOUNDCLOUD_DECODE) \
+		$(LDFLAGS) $(LDLIBS)
+
+SOUNDCLOUDPAGE_SRC = $(ROOT)/tests/ui/test_soundcloud_pages.c \
+                     $(ROOT)/src/gui/streaming/soundcloudpage.c \
+                     $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+                     $(ROOT)/src/gui/streaming/jellyfin_icon.c \
+                     $(ROOT)/src/gui/shell/settingsrow.c \
+                     $(ROOT)/src/gui/shell/gridpage.c \
+                     $(ROOT)/src/gui/shell/keyboard.c \
+                     $(ROOT)/src/gui/shell/popover.c \
+                     $(ROOT)/src/gui/shell/spinner.c \
+                     $(ROOT)/src/gui/shell/theme.c \
+                     $(ROOT)/src/gui/shell/icons.c \
+                     $(ROOT)/src/gui/board_profile.c \
+                     $(ROOT)/src/system/input/kblayout.c \
+                     $(ROOT)/src/system/core/config.c \
+                     $(ROOT)/src/system/core/lang.c \
+                     $(ROOT)/src/system/core/utils.c
+SOUNDCLOUDPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(SOUNDCLOUDPAGE_SRC)) \
+                     $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+soundcloud-ui: $(BUILD)/test_soundcloud_pages
+	$(BUILD)/test_soundcloud_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_soundcloud_pages: $(SOUNDCLOUDPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(SOUNDCLOUDPAGE_OBJ:.o=.d)
+
+# The Subsonic home page, which is the same tiled grid as SoundCloud's: four
+# cards, two by two, in every language and every theme.
+SUBSONICPAGE_SRC = $(ROOT)/tests/ui/test_subsonic_pages.c \
+                     $(ROOT)/src/gui/streaming/subsonicpage.c \
+                     $(ROOT)/src/gui/streaming/subsonicdlpage.c \
+                     $(ROOT)/src/system/streaming/subsonicdl.c \
+                     $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+                     $(ROOT)/src/gui/streaming/jellyfin_icon.c \
+                     $(ROOT)/src/gui/shell/settingsrow.c \
+                     $(ROOT)/src/gui/shell/gridpage.c \
+                     $(ROOT)/src/gui/shell/keyboard.c \
+                     $(ROOT)/src/gui/shell/popover.c \
+                     $(ROOT)/src/gui/shell/spinner.c \
+                     $(ROOT)/src/gui/shell/theme.c \
+                     $(ROOT)/src/gui/shell/icons.c \
+                     $(ROOT)/src/gui/board_profile.c \
+                     $(ROOT)/src/system/input/kblayout.c \
+                     $(ROOT)/src/system/core/config.c \
+                     $(ROOT)/src/system/core/lang.c \
+                     $(ROOT)/src/system/core/utils.c
+SUBSONICPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(SUBSONICPAGE_SRC)) \
+                     $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+subsonic-ui: $(BUILD)/test_subsonic_pages
+	$(BUILD)/test_subsonic_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_subsonic_pages: $(SUBSONICPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(SUBSONICPAGE_OBJ:.o=.d)
+
+# The Radio home page, the same tiled grid again: Language, Country, Genre and
+# Flylo's favs, in every language and every theme.
+RADIOPAGE_SRC = $(ROOT)/tests/ui/test_radio_pages.c \
+                     $(ROOT)/src/gui/streaming/radiopage.c \
+                     $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+                     $(ROOT)/src/gui/streaming/jellyfin_icon.c \
+                     $(ROOT)/src/gui/shell/settingsrow.c \
+                     $(ROOT)/src/gui/shell/gridpage.c \
+                     $(ROOT)/src/gui/shell/azindex.c \
+                     $(ROOT)/src/gui/shell/keyboard.c \
+                     $(ROOT)/src/gui/shell/popover.c \
+                     $(ROOT)/src/gui/shell/spinner.c \
+                     $(ROOT)/src/gui/shell/theme.c \
+                     $(ROOT)/src/gui/shell/icons.c \
+                     $(ROOT)/src/gui/board_profile.c \
+                     $(ROOT)/src/system/input/kblayout.c \
+                     $(ROOT)/src/system/core/config.c \
+                     $(ROOT)/src/system/core/lang.c \
+                     $(ROOT)/src/system/core/utils.c
+RADIOPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(RADIOPAGE_SRC)) \
+                     $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+radio-ui: $(BUILD)/test_radio_pages
+	$(BUILD)/test_radio_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_radio_pages: $(RADIOPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(RADIOPAGE_OBJ:.o=.d)
+
+# The Qobuz home page: the same tiled grid again, with the account's four
+# destinations on it. The Qobuz client under the page is a stub, as the radio's
+# is in the suite above; the page and the shell are the real ones.
+QOBUZPAGE_SRC = $(ROOT)/tests/ui/test_qobuz_pages.c \
+                     $(ROOT)/src/gui/streaming/qobuzpage.c \
+                     $(ROOT)/src/gui/streaming/qobuzgenregrid.c \
+                     $(ROOT)/src/gui/streaming/qobuzgenre_icons.c \
+                     $(ROOT)/src/gui/streaming/qobuzgenreorder.c \
+                     $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+                     $(ROOT)/src/gui/streaming/jellyfin_icon.c \
+                     $(ROOT)/src/gui/shell/settingsrow.c \
+                     $(ROOT)/src/gui/shell/gridpage.c \
+                     $(ROOT)/src/gui/shell/keyboard.c \
+                     $(ROOT)/src/gui/shell/popover.c \
+                     $(ROOT)/src/gui/shell/spinner.c \
+                     $(ROOT)/src/gui/shell/theme.c \
+                     $(ROOT)/src/gui/shell/icons.c \
+                     $(ROOT)/src/gui/board_profile.c \
+                     $(ROOT)/src/system/input/kblayout.c \
+                     $(ROOT)/src/system/core/config.c \
+                     $(ROOT)/src/system/core/lang.c \
+                     $(ROOT)/src/system/core/utils.c
+QOBUZPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(QOBUZPAGE_SRC)) \
+                     $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+qobuz-ui: $(BUILD)/test_qobuz_pages
+	$(BUILD)/test_qobuz_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_qobuz_pages: $(QOBUZPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(QOBUZPAGE_OBJ:.o=.d)
+
+JELLYFIN_CORE = $(ROOT)/src/system/streaming/jellyfin.c \
+                $(ROOT)/src/system/streaming/jellyfincache.c \
+                $(ROOT)/src/system/streaming/streamturn.c \
+                $(ROOT)/src/system/net/http.c \
+                $(ROOT)/src/system/net/tls.c \
+                $(ROOT)/src/system/image/png_scaled.c \
+                $(ROOT)/src/system/core/json.c \
+                $(ROOT)/src/system/core/config.c \
+                $(ROOT)/src/system/core/utils.c \
+                $(ROOT)/src/system/library/metadata.c \
+                $(ROOT)/src/system/library/jisx0208.c \
+                $(ROOT)/src/system/library/tagtext.c \
+                $(ROOT)/src/system/library/oggtags.c \
+                $(ROOT)/src/system/library/vorbischap.c \
+                $(ROOT)/src/system/library/tagdate.c \
+                $(ROOT)/src/system/library/cue.c
+
+.PHONY: jellyfin jellyfin-ui
+jellyfin: $(BUILD)/test_jellyfin
+	$(BUILD)/test_jellyfin
+
+$(BUILD)/test_jellyfin: test_jellyfin.c $(JELLYFIN_CORE) $(SOUNDCLOUD_DECODE)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DHOST_BUILD -Wno-error=format-truncation -o $@ test_jellyfin.c $(JELLYFIN_CORE) \
+		-Wno-unused-parameter -Wno-sign-compare -Wno-unused-function -Wno-implicit-fallthrough -Wno-misleading-indentation $(SOUNDCLOUD_DECODE) \
+		$(LDFLAGS) $(LDLIBS)
+
+JELLYFINPAGE_SRC = $(ROOT)/tests/ui/test_jellyfin_pages.c \
+                   $(ROOT)/src/gui/streaming/jellyfinpage.c \
+                   $(ROOT)/src/gui/streaming/jellyfin_icon.c \
+                   $(ROOT)/src/gui/streaming/soundcloud_icon.c \
+                   $(ROOT)/src/gui/shell/settingsrow.c \
+                   $(ROOT)/src/gui/shell/gridpage.c \
+                   $(ROOT)/src/gui/shell/keyboard.c \
+                   $(ROOT)/src/gui/shell/popover.c \
+                   $(ROOT)/src/gui/shell/spinner.c \
+                   $(ROOT)/src/gui/shell/theme.c \
+                   $(ROOT)/src/gui/shell/icons.c \
+                   $(ROOT)/src/gui/board_profile.c \
+                   $(ROOT)/src/system/input/kblayout.c \
+                   $(ROOT)/src/system/core/config.c \
+                   $(ROOT)/src/system/core/lang.c \
+                   $(ROOT)/src/system/core/utils.c
+JELLYFINPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(JELLYFINPAGE_SRC)) \
+                   $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+jellyfin-ui: $(BUILD)/test_jellyfin_pages
+	$(BUILD)/test_jellyfin_pages ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_jellyfin_pages: $(JELLYFINPAGE_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+-include $(JELLYFINPAGE_OBJ:.o=.d)
+
+# WebDAV/FTP client against loopback protocol fixtures, with the real libcurl
+# transport and a temporary card. No libcurl headers or external server.
+.PHONY: networkmusic
+networkmusic: $(BUILD)/test_networkmusic
+	python3 run_networkmusic_tests.py $(BUILD)/test_networkmusic
+
+NETWORKMUSIC_SRC = test_networkmusic.c $(ROOT)/src/system/streaming/networkmusic.c \
+                   $(ROOT)/src/system/net/networkshare.c $(ROOT)/src/system/ebook/epub_xml.c \
+                   $(ROOT)/src/system/playback/playlist.c $(ROOT)/src/system/core/utils.c
+
+$(BUILD)/test_networkmusic: $(NETWORKMUSIC_SRC) $(ROOT)/src/system/streaming/networkmusic.h $(ROOT)/src/system/net/networkshare.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(NETWORKMUSIC_SRC) $(LDFLAGS) $(LDLIBS)
+
+NETWORKMUSIC_UI_COMMON = $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/keyboard.c \
+                       $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c $(ROOT)/src/gui/board_profile.c \
+                       $(ROOT)/src/system/input/kblayout.c $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+NETWORKMUSIC_UI_SRC = $(ROOT)/tests/ui/test_networkmusic.c $(ROOT)/src/system/net/networkshare.c $(NETWORKMUSIC_UI_COMMON)
+NETWORKMUSIC_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(NETWORKMUSIC_UI_SRC)) $(UI_LVGL_OBJ)
+.PHONY: networkmusic-ui
+ui: networkmusic-ui
+networkmusic-ui: $(BUILD)/test_networkmusic_ui
+	$(BUILD)/test_networkmusic_ui ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_networkmusic_ui: $(NETWORKMUSIC_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# Use the WASM paths in just these UI objects, on the same headless LVGL as
+# the native test. Native network backends are deliberately not linked.
+LAN_PREVIEW_SRC = tests/ui/test_streaming_preview.c src/gui/streaming/streaming.c \
+                  src/gui/streaming/networkmusicpage.c src/gui/wireless/listentogether.c
+LAN_PREVIEW_SHARED = $(NETWORKMUSIC_UI_COMMON) $(ROOT)/src/gui/shell/gridpage.c $(ROOT)/src/gui/pet/peticon.c \
+                     $(ROOT)/src/gui/streaming/soundcloud_icon.c $(ROOT)/src/gui/streaming/jellyfin_icon.c
+LAN_PREVIEW_OBJ = $(addprefix $(BUILD)/ui-preview/,$(LAN_PREVIEW_SRC:.c=.o)) \
+                  $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(LAN_PREVIEW_SHARED)) $(UI_LVGL_OBJ)
+.PHONY: streaming-preview-ui
+ui: streaming-preview-ui
+streaming-preview-ui: $(BUILD)/test_streaming_preview
+	$(BUILD)/test_streaming_preview ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/ui-preview/%.o: $(ROOT)/%.c ui/lv_conf.h $(ROOT)/lv_conf.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UI_CPPFLAGS) $(UI_CFLAGS) -D__EMSCRIPTEN__ -DHOST_WEB_EMU=1 -DHOST_BUILD=1 -c $< -o $@
+
+$(BUILD)/test_streaming_preview: $(LAN_PREVIEW_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+-include $(NETWORKMUSIC_UI_OBJ:.o=.d) $(LAN_PREVIEW_OBJ:.o=.d)

@@ -10,17 +10,19 @@
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/easteregg.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/settings/batteryprofilepage.h"
 #include "src/gui/settings/fwupdate.h"
 #include "src/gui/settings/settings.h"
 #include "src/gui/shell/settingsrow.h"
+#include "src/gui/shell/icons.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/core/config.h"
 #include "src/system/device/factoryreset.h"
 #include "src/system/audio/headset.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
 #include "src/system/core/lang.h"
-#include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
 #include "src/system/device/system.h"
 
@@ -77,8 +79,10 @@ static void firmware_clicked_cb(lv_event_t *e) {
 
 static void factory_second_confirmed(void *user) {
 	(void)user;
-	// The stock reset removes the recovery journal with the rest of /data.
-	if (!usbhostprobe_cancel()) {
+	// The stock reset removes the recovery journal with the rest of /data, and
+	// the settings file with the USB host setting in it: both are cleared here
+	// so that the port is not left forced with nothing left to describe why.
+	if (!usbhostmode_release(true)) {
 		gui_notify_popup_long("usbhost_restore_failed");
 		return;
 	}
@@ -285,6 +289,60 @@ static void credit_value_fit(lv_obj_t *value, int content_width) {
 	}
 }
 
+static lv_obj_t *fork_qr;
+
+static void refresh_fork_qr(void) {
+	if (!fork_qr) {
+		return;
+	}
+
+	const theme_palette_t *palette = theme();
+	// Let the paper carry more of the accent and surface colors. Keep the
+	// mixes anchored to black and off-white so even extreme custom palettes
+	// produce dark modules on a light background.
+	lv_color_t ink = lv_color_mix(palette->accent, lv_color_black(), LV_OPA_20);
+	lv_color_t tint = lv_color_mix(palette->accent, palette->surface, LV_OPA_60);
+	lv_color_t paper = lv_color_mix(tint, lv_color_hex(0xf4f4f4), LV_OPA_30);
+	lv_qrcode_set_dark_color(fork_qr, ink);
+	lv_qrcode_set_light_color(fork_qr, paper);
+	lv_obj_set_style_bg_color(lv_obj_get_parent(fork_qr), paper, 0);
+}
+
+static void add_fork_qr(lv_obj_t *row) {
+	static const char url[] = "https://github.com/mr-f0xx/sonix-player-tempotec-v1";
+	// Keep the 33-module QR at whole pixels per module and leave a quiet
+	// zone four modules wide on each side.
+	enum { MODULE_PX = 3, QR_SIZE = 33 * MODULE_PX, QUIET = 4 * MODULE_PX, FRAME_SIZE = QR_SIZE + 2 * QUIET };
+	lv_obj_t *frame = lv_obj_create(row);
+	lv_obj_remove_style_all(frame);
+	lv_obj_set_size(frame, FRAME_SIZE, FRAME_SIZE);
+	lv_obj_set_scrollable(frame, false);
+	lv_obj_set_clickable(frame, false);
+	lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
+
+	lv_obj_t *qr = lv_qrcode_create(frame);
+	lv_qrcode_set_size(qr, QR_SIZE);
+	lv_obj_set_clickable(qr, false);
+	lv_obj_center(qr);
+	if (lv_qrcode_update(qr, url, sizeof(url) - 1) != LV_RESULT_OK) {
+		lv_obj_delete(frame);
+		return; // Keep the ordinary credit row if encoding fails.
+	}
+	fork_qr = qr;
+	refresh_fork_qr();
+
+	// Keep the credit and the scan target together in the scrollable list.
+	lv_obj_set_height(row, LV_SIZE_CONTENT);
+	lv_obj_set_style_pad_row(row, 4, 0);
+	lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+
+	lv_obj_t *caption = lv_label_create(row);
+	lv_label_set_text(caption, "GitHub");
+	lv_obj_add_style(caption, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(caption, &font_ui_14, 0);
+}
+
 static lv_obj_t *system_value_row(lv_obj_t *parent, const char *name, lv_obj_t **value_out,
 								  lv_event_cb_t callback, void *user_data, bool clickable) {
 	if (bp_is_tempotec_v1()) {
@@ -314,15 +372,16 @@ static void refresh_dotted_labels(lv_obj_t *obj) {
 
 static void sysinfo_loaded_cb(lv_event_t *e) {
 	(void)e;
-	// Card usage changes while the player runs, so it is re-read on every
-	// opening, and the tap counters start over.
+	// Card usage is re-read on every opening, and the tap counters start over.
 	sd_refresh();
 	build_taps = 0;
 	easteregg_reset();
 }
 
-// The usage bar is redrawn with the new palette.
-static void refresh_theme(void) { sd_refresh(); }
+static void refresh_theme(void) {
+	sd_refresh();
+	refresh_fork_qr();
+}
 
 static void build_sysinfo_page(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(sysinfo_screen, cfg, "system_about");
@@ -440,11 +499,12 @@ static void build_sysinfo_page(gui_config_t *cfg) {
 	}
 
 	lv_obj_t *forked_by_value = NULL;
-	info_row(container, "system_forked_by", &forked_by_value);
+	lv_obj_t *forked_by_row = info_row(container, "system_forked_by", &forked_by_value);
 	lv_label_set_text(forked_by_value, "Imre Ferenczi (mr-f0xx)");
 	if (compact) {
 		credit_value_fit(forked_by_value, value_width);
 	}
+	add_fork_qr(forked_by_row);
 
 	if (compact) {
 		lv_obj_update_layout(container);
@@ -463,10 +523,16 @@ void systempage_init(gui_config_t *cfg) {
 
 	lv_obj_t *container = settingsrow_page(systempage_screen, cfg, "system");
 
-	settingsrow_add(container, "system_about", NULL, switch_screen_cb, sysinfo_screen);
+	lv_obj_t *row = settingsrow_add(container, "system_about", NULL, switch_screen_cb, sysinfo_screen);
+	settingsrow_add_accent_icon(row, &icon_system_info);
+	lv_obj_t *profile = batteryprofilepage_init(cfg);
+	row = settingsrow_add(container, "battery_profile_title", NULL, switch_screen_cb, profile);
+	settingsrow_add_accent_icon(row, &icon_battery);
 	// Actions, not pages: settingsrow_action leaves off the chevron.
-	settingsrow_action(container, "system_update_firmware", firmware_clicked_cb, NULL);
-	settingsrow_action(container, "system_factory_reset", factory_clicked_cb, NULL);
+	row = settingsrow_action(container, "system_update_firmware", firmware_clicked_cb, NULL);
+	settingsrow_add_accent_icon(row, &icon_download);
+	row = settingsrow_action(container, "system_factory_reset", factory_clicked_cb, NULL);
+	settingsrow_add_accent_icon(row, &icon_reset);
 
 	switcher_attach_back_gesture(systempage_screen);
 }

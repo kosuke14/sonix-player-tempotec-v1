@@ -1,10 +1,13 @@
 #include "subsonicpage.h"
 
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/streaming/subsonicdlpage.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/confirm.h"
+#include "src/gui/shell/gridpage.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/keyboard.h"
+#include "src/gui/shell/popover.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
@@ -17,6 +20,7 @@
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/streamturn.h"
 #include "src/system/streaming/subsonic.h"
+#include "src/system/streaming/subsonicdl.h"
 #include "src/system/streaming/subsonicstream.h"
 
 #include <pthread.h>
@@ -26,7 +30,7 @@
 #include <string.h>
 
 lv_obj_t *subsonic_screen;
-static lv_obj_t *settings_screen, *edit_screen, *list_screen;
+static lv_obj_t *settings_screen, *edit_screen, *list_screen, *home_grid;
 static lv_obj_t *list_container, *list_title, *server_value, *user_value, *remember_switch, *relaxed_switch;
 static lv_obj_t *edit_field, *edit_title, *format_pills[3], *bitrate_pills[2];
 static keyboard_t *keyboard;
@@ -34,6 +38,14 @@ static gui_config_t *config;
 static subsonic_credentials_t draft;
 static bool draft_remember, busy;
 static int editing;
+
+// Server settings, Test connection, Folders and Artists: a 2x2 grid that fills
+// the panel under the heading, the same cards the SoundCloud home page uses.
+#define SUBSONIC_HOME_TILES 4
+// The size each card's picture is drawn at, matching what tools/svg_to_lvgl.py
+// emits for it: HOME_TILE_SIZE and HOME_TILE_GLYPH_SIZE there.
+#define SUBSONIC_TILE_ART_PX 48
+#define SUBSONIC_TILE_GLYPH_PX 40
 
 // A single mailbox in each direction. Results own their memory until the GUI
 // takes it: a late worker can never overwrite the list the GUI is reading.
@@ -415,12 +427,12 @@ static bool list_back(void) {
 	return false;
 }
 
-static void browse_cb(lv_event_t *e) {
+static void browse(subsonic_browse_t which) {
 	if (busy || switcher_back_drag_active()) {
 		return;
 	}
-	job_t job = {.kind = JOB_BROWSE, .browse = (subsonic_browse_t)(intptr_t)lv_event_get_user_data(e)};
-	snprintf(job.title, sizeof(job.title), "%s", tr(job.browse == SUBSONIC_BROWSE_FOLDERS ? "subsonic_folders" : "artists"));
+	job_t job = {.kind = JOB_BROWSE, .browse = which};
+	snprintf(job.title, sizeof(job.title), "%s", tr(which == SUBSONIC_BROWSE_FOLDERS ? "subsonic_folders" : "artists"));
 	run_list(job, false);
 }
 
@@ -433,6 +445,55 @@ static void page_cb(lv_event_t *e) {
 	if (job.offset >= 0) {
 		run_list(job, false);
 	}
+}
+
+// A long press on a track, or on any row of a page that holds tracks, offers
+// the two things a tap cannot: save this one, or save the rest of the page.
+// Nothing else on this list is long-pressable, so a press on a folder or an
+// artist does nothing at all.
+static int menu_index;
+
+static void menu_open_downloads(void *user) {
+	(void)user;
+	subsonicdlpage_open();
+}
+
+static void menu_download_track(void *user) {
+	(void)user;
+	subsonicdlpage_download(shown, shown_count, menu_index, false);
+}
+
+static void menu_download_page(void *user) {
+	(void)user;
+	subsonicdlpage_download(shown, shown_count, menu_index, true);
+}
+
+static void row_long_pressed_cb(lv_event_t *e) {
+	if (busy || switcher_back_drag_active() || player_sheet_drag_active()) {
+		return;
+	}
+	int index = (int)(intptr_t)lv_event_get_user_data(e);
+	if (index < 0 || index >= shown_count || shown[index].kind != SUBSONIC_TRACK) {
+		return;
+	}
+	menu_index = index;
+	// The lift that ends this press would otherwise arrive as a click and start
+	// playback under the menu.
+	lv_indev_t *indev = lv_indev_active();
+	if (indev) {
+		lv_indev_wait_release(indev);
+	}
+	static const char *const labels[] = {"subsonic_download_track", "subsonic_download_page", "subsonic_downloads"};
+	popover_item_t items[] = {
+		{.label = labels[0], .action = menu_download_track},
+		{.label = labels[1], .action = menu_download_page},
+		{.label = labels[2], .action = menu_open_downloads},
+	};
+	int count = 2;
+	if (!subsonicdl_busy()) {
+		count = 3; // a second job is not offered while one is running
+	}
+	popover_show(lv_event_get_current_target(e), items, count);
 }
 
 static void row_cb(lv_event_t *e) {
@@ -499,6 +560,14 @@ static void rebuild_list(void) {
 		const lv_image_dsc_t *icon = item->kind == SUBSONIC_TRACK ? &icon_music_note :
 			item->kind == SUBSONIC_ARTIST ? &icon_artist : &icon_folder;
 		settingsrow_add_icon(row, icon, THEME_SEMANTIC_CYAN);
+		if (item->kind == SUBSONIC_TRACK) {
+			// A track already saved to the card says so, and the long press is
+			// where the other two choices (this one, the whole page) live.
+			if (subsonicdlpage_present(item)) {
+				settingsrow_add_accent_icon(row, &icon_check);
+			}
+			lv_obj_add_event_cb(row, row_long_pressed_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
+		}
 	}
 	if (shown_more) {
 		settingsrow_action(list_container, "subsonic_next_page", page_cb, (void *)(intptr_t)1);
@@ -507,6 +576,10 @@ static void rebuild_list(void) {
 
 static void poll_cb(lv_timer_t *timer) {
 	(void)timer;
+	// A save started here keeps running when the user walks away from the
+	// list; this tick, which runs whatever is on screen, is what says so when
+	// it ends. Cheap: two counters, no I/O between jobs.
+	subsonicdlpage_watch();
 	pthread_mutex_lock(&job_lock);
 	result_t *result = mail;
 	mail = NULL;
@@ -606,6 +679,9 @@ static void build_settings(void) {
 	settingsrow_pills(container, "subsonic_bitrate", &pills);
 	bitrate_pills[0] = settingsrow_pill_text(pills, "256", 256, bitrate_cb);
 	bitrate_pills[1] = settingsrow_pill_text(pills, "320", 320, bitrate_cb);
+	// Where the downloads go and what format they are saved in: the same
+	// quality the stream uses, so this note sits under the pills.
+	add_note(container, "subsonic_downloads_note");
 	row = settingsrow_action(container, "subsonic_forget_server", forget_cb, NULL);
 	settingsrow_add_icon(row, &icon_log_out, THEME_SEMANTIC_RED);
 	add_note(container, "subsonic_settings_note");
@@ -628,22 +704,106 @@ static void build_settings(void) {
 	settings_refresh();
 }
 
+// Tiles call a plain action: the grid already drops a tap that was really a
+// swipe, and nothing here needs the event.
+static void home_settings_action(void) { open_settings_cb(NULL); }
+static void home_test_action(void) { ping_cb(NULL); }
+static void home_folders_action(void) { browse(SUBSONIC_BROWSE_FOLDERS); }
+static void home_artists_action(void) { browse(SUBSONIC_BROWSE_ARTISTS); }
+static void menu_downloads_btn_cb(lv_event_t *e) {
+	(void)e;
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	subsonicdlpage_open();
+}
+
+// The cards are twice a menu row's height and they are the whole page, so the
+// picture is drawn large and centred with the caption underneath in every
+// theme -- including the flat ones, whose menu rows would otherwise put the
+// glyph beside the text. Dark and Light show the illustrations at the size the
+// generator emits them; the flat themes show the glyph in their own accent.
+static void home_style_tiles(void) {
+	if (!home_grid) {
+		return;
+	}
+	static const lv_image_dsc_t *const art[SUBSONIC_HOME_TILES] = {
+		&icon_menu_sub_server,
+		&icon_menu_sub_test,
+		&icon_menu_sub_folders,
+		&icon_menu_sub_artists,
+	};
+	static const lv_image_dsc_t *const glyphs[SUBSONIC_HOME_TILES] = {
+		&icon_sub_server_glyph,
+		&icon_sub_test_glyph,
+		&icon_sub_folders_glyph,
+		&icon_sub_artists_glyph,
+	};
+	static const theme_semantic_t tones[SUBSONIC_HOME_TILES] = {
+		THEME_SEMANTIC_BLUE,
+		THEME_SEMANTIC_GREEN,
+		THEME_SEMANTIC_CYAN,
+		THEME_SEMANTIC_PURPLE,
+	};
+	bool glyph = theme_uses_function_glyphs();
+	for (int i = 0; i < SUBSONIC_HOME_TILES; i++) {
+		// Both pictures are rendered at exactly the size they are drawn at, so
+		// a card shows its own pixels and never a resampled copy of them.
+		gridpage_set_tile_icon_style(home_grid, i, glyph ? glyphs[i] : art[i],
+									 glyph ? SUBSONIC_TILE_GLYPH_PX : SUBSONIC_TILE_ART_PX, glyph,
+									 theme_semantic_color(tones[i]), false);
+		// Picture above, caption underneath, in every theme. Re-applying the
+		// layout also measures the caption against the picture's new width.
+		gridpage_set_tile_orientation(home_grid, i, false);
+	}
+}
+
 void subsonicpage_init(gui_config_t *cfg) {
 	config = cfg;
 	subsonic_init();
 	device_state_add_prepare_cb(subsonicstream_prepare);
 	streamturn_register_abandon(subsonicstream_cancel);
 	subsonic_screen = screen();
-	lv_obj_t *home = settingsrow_page(subsonic_screen, cfg, "subsonic");
-	lv_obj_t *row = settingsrow_add(home, "subsonic_server_settings", NULL, open_settings_cb, NULL);
-	settingsrow_add_icon(row, &icon_music_settings, THEME_SEMANTIC_BLUE);
-	row = settingsrow_action(home, "subsonic_test_connection", ping_cb, NULL);
-	settingsrow_add_icon(row, &icon_wifi_high, THEME_SEMANTIC_GREEN);
-	row = settingsrow_add(home, "subsonic_folders", NULL, browse_cb, (void *)(intptr_t)SUBSONIC_BROWSE_FOLDERS);
-	settingsrow_add_icon(row, &icon_folder, THEME_SEMANTIC_CYAN);
-	row = settingsrow_add(home, "artists", NULL, browse_cb, (void *)(intptr_t)SUBSONIC_BROWSE_ARTISTS);
-	settingsrow_add_icon(row, &icon_artist, THEME_SEMANTIC_PURPLE);
-	player_sheet_attach_drag(home, true);
+	settingsrow_title(subsonic_screen, cfg, "subsonic");
+	// Four destinations, so two square tiles fill the panel under the heading
+	// exactly: the grid is sized from the space that is left, and there is
+	// never a fifth row to scroll to.
+	const grid_entry_t home_entries[] = {
+		{"subsonic_server_settings", &icon_menu_sub_server, NULL, home_settings_action},
+		{"subsonic_test_connection", &icon_menu_sub_test, NULL, home_test_action},
+		{"subsonic_folders", &icon_menu_sub_folders, NULL, home_folders_action},
+		{"artists", &icon_menu_sub_artists, NULL, home_artists_action},
+	};
+	home_grid = gridpage_build(subsonic_screen, cfg, home_entries, SUBSONIC_HOME_TILES, 2, 2, true);
+	// The captions are longer than one line in most languages ("Paramètres du
+	// serveur", "Test de la connexion"), so let them use two lines instead of
+	// an ellipsis.
+	for (int i = 0; i < SUBSONIC_HOME_TILES; i++) {
+		gridpage_set_tile_label_lines(home_grid, i, 2);
+	}
+	home_style_tiles();
+	theme_register_refresh(home_style_tiles);
+	player_sheet_attach_drag(subsonic_screen, true);
+	// The downloads page is one tap from the tiles, in the corner the Music and
+	// Qobuz pages keep their own corner controls: a fourth tile would make the
+	// 2x2 grid three rows tall, and this page has exactly four destinations.
+	lv_obj_t *downloads_btn = lv_btn_create(subsonic_screen);
+	settingsrow_place_corner_button(downloads_btn, cfg, 0);
+	lv_obj_set_style_bg_opa(downloads_btn, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(downloads_btn, 0, 0);
+	lv_obj_set_style_shadow_width(downloads_btn, 0, 0);
+	lv_obj_set_style_pad_all(downloads_btn, 0, 0);
+	lv_obj_t *downloads_icon = lv_image_create(downloads_btn);
+	lv_image_set_src(downloads_icon, &icon_download);
+	lv_obj_add_style(downloads_icon, &theme_style_icon, 0);
+	settingsrow_scale_corner_icon(downloads_icon, cfg);
+	lv_obj_center(downloads_icon);
+	lv_obj_add_event_cb(downloads_btn, menu_downloads_btn_cb, LV_EVENT_CLICKED, NULL);
+	// The heading reserves the corner, exactly as a page with one corner button
+	// does, or a long translation of "Subsonic" would run under the arrow.
+	settingsrow_title_corner_slots(settingsrow_page_title(subsonic_screen), cfg, 1);
+
+	subsonicdlpage_init(cfg);
 
 	list_screen = screen();
 	list_container = settingsrow_page(list_screen, cfg, "subsonic");

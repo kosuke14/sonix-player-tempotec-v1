@@ -59,6 +59,9 @@
 //
 // Without any of them, or without a section, the matching service disables
 // itself and its menu entry says so instead of failing halfway through a login.
+// Podcasts is the exception: it has a second directory that needs no key, so
+// a missing [podcast] section changes where it looks rather than turning it
+// off. See podcast.h.
 //
 // The path can be changed with [streaming] keys_file in device_config.ini, to
 // keep the keys on the card instead of the read-only rootfs -- the easy path
@@ -117,16 +120,27 @@ const char *streamkeys_qobuz_app_id(void);
 const char *streamkeys_qobuz_app_secret(void);
 const char *streamkeys_tidal_client_id(void);
 const char *streamkeys_tidal_client_secret(void);
-// Podcast Index. This pair identifies this player rather than a HiBy
-// application: it is requested free on podcastindex.org, and each request is
-// signed with the SHA-1 of key + secret + time. Same rule as the other two:
-// out of the source, in a file whoever assembles the firmware fills in.
+// Podcast Index, and the one pair of these that is optional. It identifies
+// this player rather than a HiBy application, is requested on podcastindex.org
+// -- whose terms do not allow a free email address, so it has to be an address
+// on a domain of your own -- and each request is signed with the SHA-1 of
+// key + secret + time.
+//
+// Without it Podcasts still works: podcast.c asks Apple's directory instead,
+// which needs no key, and this pair is what selects Podcast Index for whoever
+// has one. The other three services have no second directory to fall back to.
 const char *streamkeys_podcast_key(void);
 const char *streamkeys_podcast_secret(void);
 // Last.fm. An API account of this player, requested on last.fm/api: it signs
 // every call with the MD5 of the sorted parameters plus the secret.
 const char *streamkeys_lastfm_key(void);
 const char *streamkeys_lastfm_secret(void);
+// SoundCloud, all optional: client_id is auto-discovered from SoundCloud's web
+// assets when omitted; username or oauth_token preconfigures the user's free or
+// paid (Go / Go+) account from the card without typing on the screen.
+const char *streamkeys_soundcloud_client_id(void);
+const char *streamkeys_soundcloud_oauth_token(void);
+const char *streamkeys_soundcloud_username(void);
 
 // Where they were read from, for the log and the information page. NULL when
 // none were found.

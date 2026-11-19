@@ -113,6 +113,19 @@ static lv_obj_t *dre_switch;
 // that does not go through them is unaffected.
 static lv_obj_t *gapless_switch;
 
+// The A-B loop row in the now-playing menu. The loop itself has no global
+// on/off -- it is armed by marking its two points -- so this switch only
+// decides whether the menu row that reaches it is there at all: off hides it
+// for a listener who never marks points.
+static lv_obj_t *ab_loop_switch;
+
+static void ab_loop_toggle_cb(lv_event_t *e) {
+	(void)e;
+	bool on = lv_obj_has_state(ab_loop_switch, LV_STATE_CHECKED);
+	config_set_bool("player", "ab_loop", on);
+	config_save();
+}
+
 bool musicsettings_gapless_enabled(void) { return audio_get_gapless(); }
 
 void musicsettings_set_gapless_enabled(bool enabled) {
@@ -158,12 +171,19 @@ static void nos_toggle_cb(lv_event_t *e) {
 static lv_obj_t *gain_switch;
 static lv_obj_t *album_chain_switch;
 
+// The status bar may be showing the volume as a voltage (volumereadout.h), and
+// that figure moves with the gain and with the DSD compensation while the
+// index stays where it is. The bar would find out for itself within a quarter
+// of a second; told here, it changes with the switch.
+static void volume_reading_moved(void) { topbar_refresh_volume(get_volume_percent()); }
+
 static void gain_toggle_cb(lv_event_t *e) {
 	(void)e;
 	bool on = lv_obj_has_state(gain_switch, LV_STATE_CHECKED);
 	config_set_int("audio", "high_gain", on ? 1 : 0);
 	config_save();
 	set_high_gain(on ? 1 : 0);
+	volume_reading_moved();
 }
 
 // ---------------------------------------------------------------------------
@@ -830,6 +850,7 @@ static void dsd_gain_store(int index) {
 	}
 	config_save();
 	dsd_gain_refresh();
+	volume_reading_moved();
 }
 
 static void dsd_gain_toggle_cb(lv_event_t *e) {
@@ -1241,6 +1262,11 @@ bool musicsettings_fade_enabled(void) { return config_get_bool("audio", "fade", 
 
 bool musicsettings_endless_shuffle(void) { return config_get_bool("player", "endless_shuffle", false); }
 
+// The A-B loop row in the now-playing menu. The loop is armed by marking its
+// points, so this is not a global switch for the loop itself -- it decides
+// whether the menu reaches it. On by default.
+bool musicsettings_ab_loop_enabled(void) { return config_get_bool("player", "ab_loop", true); }
+
 // The setters below are also called by the control centre, which can sit open
 // on top of this page, so the chevrons have to be repainted from here.
 static void refresh_active_chevrons(void);
@@ -1261,6 +1287,7 @@ void musicsettings_set_high_gain(bool enabled) {
 	config_set_int("audio", "high_gain", enabled ? 1 : 0);
 	config_save();
 	set_high_gain(enabled ? 1 : 0);
+	volume_reading_moved();
 	if (gain_switch) {
 		if (enabled) {
 			lv_obj_add_state(gain_switch, LV_STATE_CHECKED);
@@ -1737,14 +1764,20 @@ static void art_shape_pick_cb(lv_event_t *e) {
 }
 
 static lv_obj_t *hires_pills[3];
+static lv_obj_t *hires_style_pills[HIRESBADGE_STYLE_COUNT];
 static lv_obj_t *hires_card;
 
 static void hires_refresh(void) {
 	player_layout_t layout = player_layout_get();
-	if (hires_card) lv_obj_set_hidden(hires_card, layout == PLAYER_LAYOUT_ALBUM_ART_MAX);
+	if (hires_card)
+		lv_obj_set_hidden(hires_card, layout == PLAYER_LAYOUT_ALBUM_ART_MAX || layout == PLAYER_LAYOUT_STICKER);
 	player_hires_position_t pos = player_hires_position_get(layout);
 	for (int i = 0; i < 3; i++) {
 		if (hires_pills[i]) settingsrow_pill_active(hires_pills[i], pos == (player_hires_position_t)i);
+	}
+	hiresbadge_style_t style = player_hires_style_get();
+	for (int i = 0; i < HIRESBADGE_STYLE_COUNT; i++) {
+		if (hires_style_pills[i]) settingsrow_pill_active(hires_style_pills[i], style == (hiresbadge_style_t)i);
 	}
 }
 
@@ -1754,12 +1787,19 @@ static void hires_pick_cb(lv_event_t *e) {
 	hires_refresh();
 }
 
+static void hires_style_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) return;
+	player_hires_style_set((hiresbadge_style_t)(intptr_t)lv_event_get_user_data(e));
+	hires_refresh();
+}
+
 static lv_obj_t *layout_standard_pill;
 static lv_obj_t *layout_alternative_pill;
 static lv_obj_t *layout_studio_pill;
 static lv_obj_t *layout_immersive_pill;
 static lv_obj_t *layout_poster_pill;
 static lv_obj_t *layout_vinyl_pill;
+static lv_obj_t *layout_sticker_pill;
 static lv_obj_t *layout_aam_pill; // only built on the V1, the panel it is measured for
 // Album Art Max's own row: the band along the foot of the sleeve or up its left
 // edge. Shown only while that arrangement is the chosen one, and only where it
@@ -1790,6 +1830,7 @@ static void layout_refresh(void) {
 	settingsrow_pill_active(layout_immersive_pill, chosen == PLAYER_LAYOUT_IMMERSIVE);
 	settingsrow_pill_active(layout_poster_pill, chosen == PLAYER_LAYOUT_POSTER);
 	if (layout_vinyl_pill) settingsrow_pill_active(layout_vinyl_pill, chosen == PLAYER_LAYOUT_VINYL);
+	if (layout_sticker_pill) settingsrow_pill_active(layout_sticker_pill, chosen == PLAYER_LAYOUT_STICKER);
 	if (layout_aam_pill) {
 		settingsrow_pill_active(layout_aam_pill, chosen == PLAYER_LAYOUT_ALBUM_ART_MAX);
 	}
@@ -1803,6 +1844,14 @@ static void layout_pick_cb(lv_event_t *e) {
 	}
 	player_layout_set((player_layout_t)(intptr_t)lv_event_get_user_data(e));
 	layout_refresh();
+}
+
+static void player_status_color_cb(lv_event_t *e) {
+	player_status_color_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+static void player_status_bar_cb(lv_event_t *e) {
+	player_status_bar_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
 // The sleeve's colour on the play button and the progress bar, in whichever
@@ -2500,9 +2549,9 @@ static void build_library_page(gui_config_t *cfg) {
 		lv_obj_add_state(quality_badges_switch, LV_STATE_CHECKED);
 	}
 
-	// Deleting tracks from the card: the trash button in a selection. Off by
-	// default, because it is the one thing a selection can do that cannot be
-	// undone.
+	// Deleting tracks from the card: from a library selection or the now-playing
+	// menu. Off by default, because it is the one thing the player can do that
+	// cannot be undone.
 	settingsrow_toggle(container, "musicsettings_allow_delete", &allow_delete_switch, allow_delete_cb);
 	option_note(container, "musicsettings_allow_delete_note");
 	if (musicsettings_allow_delete()) {
@@ -2569,6 +2618,8 @@ static void build_display_page(gui_config_t *cfg) {
 	if (bp_is_tempotec_v1()) {
 		layout_vinyl_pill = settingsrow_pill(layout_pills, "musicsettings_layout_vinyl",
 											 PLAYER_LAYOUT_VINYL, layout_pick_cb);
+		layout_sticker_pill = settingsrow_pill(layout_pills, "musicsettings_layout_sticker",
+											   PLAYER_LAYOUT_STICKER, layout_pick_cb);
 		layout_aam_pill = settingsrow_pill(layout_pills, "musicsettings_layout_aam",
 										   PLAYER_LAYOUT_ALBUM_ART_MAX, layout_pick_cb);
 	}
@@ -2576,13 +2627,31 @@ static void build_display_page(gui_config_t *cfg) {
 	layout_refresh();
 	theme_register_refresh(layout_refresh);
 
+	if (bp_is_tempotec_v1()) {
+		lv_obj_t *status_switch;
+		settingsrow_toggle(container, "musicsettings_player_status_bar", &status_switch, player_status_bar_cb);
+		lv_obj_set_state(status_switch, LV_STATE_CHECKED, player_status_bar_get());
+		lv_obj_t *color_switch;
+		settingsrow_toggle(container, "musicsettings_player_status_color", &color_switch, player_status_color_cb);
+		lv_obj_set_state(color_switch, LV_STATE_CHECKED, player_status_color_get());
+	}
+
 	// The position belongs to the selected arrangement, not all of them.
 	lv_obj_t *hires_row = NULL;
 	hires_card = settingsrow_pills(container, "musicsettings_hires_badge", &hires_row);
 	hires_pills[PLAYER_HIRES_OFF] = settingsrow_pill(hires_row, "musicsettings_hires_off", PLAYER_HIRES_OFF, hires_pick_cb);
 	hires_pills[PLAYER_HIRES_RIGHT] = settingsrow_pill(hires_row, "musicsettings_hires_right", PLAYER_HIRES_RIGHT, hires_pick_cb);
 	hires_pills[PLAYER_HIRES_LEFT] = settingsrow_pill(hires_row, "musicsettings_hires_left", PLAYER_HIRES_LEFT, hires_pick_cb);
-	option_note(container, "musicsettings_hires_note");
+	option_note(hires_card, "musicsettings_hires_note");
+	// The design is global, unlike the corner/visibility pills above. Keep it
+	// in the same card so Album Art Max hides the whole badge section together.
+	lv_obj_t *hires_style_row = NULL;
+	lv_obj_t *hires_style_group = settingsrow_pills_group(hires_card, "musicsettings_hires_style", &hires_style_row);
+	hires_style_pills[HIRESBADGE_TWO_LINE] = settingsrow_pill(hires_style_row, "musicsettings_hires_two_line", HIRESBADGE_TWO_LINE, hires_style_pick_cb);
+	hires_style_pills[HIRESBADGE_ONE_LINE] = settingsrow_pill(hires_style_row, "musicsettings_hires_one_line", HIRESBADGE_ONE_LINE, hires_style_pick_cb);
+	hires_style_pills[HIRESBADGE_INITIALS] = settingsrow_pill_text(hires_style_row, "HR", HIRESBADGE_INITIALS, hires_style_pick_cb);
+	hires_style_pills[HIRESBADGE_LOGO] = settingsrow_pill(hires_style_row, "musicsettings_hires_logo", HIRESBADGE_LOGO, hires_style_pick_cb);
+	option_note(hires_style_group, "musicsettings_hires_style_note");
 	hires_refresh();
 	theme_register_refresh(hires_refresh);
 
@@ -2721,6 +2790,15 @@ static void build_playback_page(gui_config_t *cfg) {
 		lv_obj_add_state(gapless_switch, LV_STATE_CHECKED);
 	}
 
+	// The A-B loop row in the now-playing menu, on by default. The loop is
+	// armed by marking its two points rather than by a global mode, so this
+	// switch is about the menu: off, the row that reaches it is not built.
+	settingsrow_toggle(container, "musicsettings_ab_loop", &ab_loop_switch, ab_loop_toggle_cb);
+	option_note(container, "musicsettings_ab_loop_note");
+	if (musicsettings_ab_loop_enabled()) {
+		lv_obj_add_state(ab_loop_switch, LV_STATE_CHECKED);
+	}
+
 	// ReplayGain: off, corrected per track, corrected per album or corrected per track when shuffled.
 	rg_card = settingsrow_toggle_pills(container, "musicsettings_replay_gain", rg_toggle_cb, &rg_switch, &rg_pills);
 	rg_track_pill = settingsrow_pill(rg_pills, "track", REPLAYGAIN_TRACK, rg_pick_cb);
@@ -2798,6 +2876,15 @@ static void musicsettings_loaded_cb(lv_event_t *e) {
 	rg_refresh();
 }
 
+// Every destination in the Music settings menu gets a persistent, theme-accent
+// glyph, so the section markers remain visible in Dark and Light too.
+static lv_obj_t *musicsettings_section_row(lv_obj_t *container, const char *name, lv_obj_t *screen,
+											   const lv_image_dsc_t *icon) {
+	lv_obj_t *row = settingsrow_add(container, name, NULL, switch_screen_cb, screen);
+	settingsrow_add_accent_icon(row, icon);
+	return row;
+}
+
 void musicsettings_init(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(musicsettings_screen, cfg, "music");
 
@@ -2807,28 +2894,28 @@ void musicsettings_init(gui_config_t *cfg) {
 	// DAC's own switches at the end.
 	artistexceptions_init(cfg, organize_touched);
 	build_scan_page(cfg);
-	settingsrow_add(container, "musicsettings_scan_options", NULL, switch_screen_cb, scan_screen);
+	musicsettings_section_row(container, "musicsettings_scan_options", scan_screen, &icon_library_checking);
 
 	build_playback_page(cfg);
-	settingsrow_add(container, "musicsettings_playback_options", NULL, switch_screen_cb, playback_screen);
+	musicsettings_section_row(container, "musicsettings_playback_options", playback_screen, &icon_play_status);
 
 	build_display_page(cfg);
-	settingsrow_add(container, "musicsettings_display_options", NULL, switch_screen_cb, display_screen);
-	settingsrow_add(container, "musicsettings_library", NULL, switch_screen_cb, library_screen);
+	musicsettings_section_row(container, "musicsettings_display_options", display_screen, &icon_monitor);
+	musicsettings_section_row(container, "musicsettings_library", library_screen, &icon_list_music);
 
 	if (addons_enabled("lastfm")) {
 		lastfmsettings_init(cfg);
-		settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
+		musicsettings_section_row(container, "lastfm", lastfmsettings_screen(), &icon_music2);
 	}
 
 	if (addons_enabled("listenbrainz")) {
 		listenbrainzsettings_init(cfg);
-		settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
+		musicsettings_section_row(container, "listenbrainz", listenbrainzsettings_screen(), &icon_sort_played);
 	}
 
 	if (addons_enabled("eq")) {
 		build_eq_page(cfg);
-		eq_row = settingsrow_add(container, "equaliser", NULL, switch_screen_cb, eq_screen);
+		eq_row = musicsettings_section_row(container, "equaliser", eq_screen, &icon_equalizer);
 	}
 
 	// PEQ right below: the same thing said more precisely, so whoever comes
@@ -2836,17 +2923,18 @@ void musicsettings_init(gui_config_t *cfg) {
 	// one next to it.
 	if (addons_enabled("peq")) {
 		peqpage_init(cfg);
-		peq_row = settingsrow_add(container, "peq", NULL, switch_screen_cb, peqpage_screen());
+		peq_row = musicsettings_section_row(container, "peq", peqpage_screen(), &icon_peq_quick);
 	}
 
 	if (addons_enabled("mseb")) {
 		build_mseb_page(cfg);
-		mseb_row = settingsrow_add(container, "mseb", NULL, switch_screen_cb, mseb_screen);
+		mseb_row = musicsettings_section_row(container, "mseb", mseb_screen, &icon_mseb);
 	}
 
 	if (addons_enabled("soundfield")) {
 		build_soundfield_page(cfg);
-		soundfield_row = settingsrow_add(container, "musicsettings_soundfield", NULL, switch_screen_cb, soundfield_screen);
+		soundfield_row = musicsettings_section_row(container, "musicsettings_soundfield", soundfield_screen,
+												   &icon_soundfield_quick);
 	}
 
 	// Crossfeed sits next to soundfield because they are relatives: one widens
@@ -2854,21 +2942,25 @@ void musicsettings_init(gui_config_t *cfg) {
 	// for one wants to see the other.
 	if (addons_enabled("crossfeed")) {
 		build_crossfeed_page(cfg);
-		crossfeed_row = settingsrow_add(container, "musicsettings_crossfeed", NULL, switch_screen_cb, crossfeed_screen);
+		crossfeed_row = musicsettings_section_row(container, "musicsettings_crossfeed", crossfeed_screen,
+												  &icon_crossfeed_quick);
 	}
 
 	if (addons_enabled("channel_balance")) {
 		build_balance_page(cfg);
-		balance_row = settingsrow_add(container, "musicsettings_channel_balance", NULL, switch_screen_cb, balance_screen);
+		balance_row = musicsettings_section_row(container, "musicsettings_channel_balance", balance_screen,
+												 &icon_lineout);
 	}
 
 	if (addons_enabled("volume_limit")) {
 		build_volume_limit_page(cfg);
-		vlimit_row = settingsrow_add(container, "musicsettings_volume_limit", NULL, switch_screen_cb, vlimit_screen);
+		vlimit_row = musicsettings_section_row(container, "musicsettings_volume_limit", vlimit_screen,
+											   &icon_volume_low);
 	}
 
 	// The gain step: off = low gain (the stock default), on = +6 dB.
-	settingsrow_toggle(container, "musicsettings_high_gain", &gain_switch, gain_toggle_cb);
+	lv_obj_t *gain_row = settingsrow_toggle(container, "musicsettings_high_gain", &gain_switch, gain_toggle_cb);
+	settingsrow_add_accent_icon(gain_row, &icon_high_gain);
 	if (config_get_int("audio", "high_gain", 0)) {
 		lv_obj_add_state(gain_switch, LV_STATE_CHECKED);
 	}
@@ -2881,8 +2973,9 @@ void musicsettings_init(gui_config_t *cfg) {
 	// what the audio side holds, so a load after it would leave the switch off
 	// with the compensation on.
 	alsa_set_dsd_gain_index((int)config_get_int("audio", "dsd_gain", 0));
-	settingsrow_toggle_pills(container, "musicsettings_dsd_gain", dsd_gain_toggle_cb, &dsd_gain_switch,
-							 &dsd_gain_pills);
+	lv_obj_t *dsd_gain_card = settingsrow_toggle_pills(container, "musicsettings_dsd_gain", dsd_gain_toggle_cb,
+													 &dsd_gain_switch, &dsd_gain_pills);
+	settingsrow_toggle_pills_add_accent_icon(dsd_gain_card, &icon_quality_dsd);
 	for (int i = 0; i < DSD_GAIN_MAX_DB; i++) {
 		char text[16];
 		snprintf(text, sizeof(text), "+%d dB", i + 1);
@@ -2891,18 +2984,20 @@ void musicsettings_init(gui_config_t *cfg) {
 	dsd_gain_refresh();
 
 	build_filter_page(cfg);
-	settingsrow_add(container, "musicsettings_filters", NULL, switch_screen_cb, dacfilter_screen);
+	musicsettings_section_row(container, "musicsettings_filters", dacfilter_screen, &icon_audio_waveform);
 
 	// Non-oversampling off and dynamic-range enhancement on by default, like the
 	// stock player. The R1's CS43131 driver has neither: no rows there, and
 	// alsa-controls.c keeps both off.
 	if (!alsa_board_is_cs43131()) {
-		settingsrow_toggle(container, "musicsettings_nos", &nos_switch, nos_toggle_cb);
+		lv_obj_t *nos_row = settingsrow_toggle(container, "musicsettings_nos", &nos_switch, nos_toggle_cb);
+		settingsrow_add_accent_icon(nos_row, &icon_nos);
 		if (config_get_int("audio", "dac_nos", 0)) {
 			lv_obj_add_state(nos_switch, LV_STATE_CHECKED);
 		}
 
-		settingsrow_toggle(container, "musicsettings_dac_dre", &dre_switch, dre_toggle_cb);
+		lv_obj_t *dre_row = settingsrow_toggle(container, "musicsettings_dac_dre", &dre_switch, dre_toggle_cb);
+		settingsrow_add_accent_icon(dre_row, &icon_replaygain_quick);
 		if (config_get_int("audio", "dac_dre", 1)) {
 			lv_obj_add_state(dre_switch, LV_STATE_CHECKED);
 		}

@@ -4,7 +4,837 @@
 |---|---|---|
 | Touchscreen multitouch | `tools/gt9xx_multitouch_patch.py` | the panel reports five fingers, the driver lets one out |
 | Touchscreen multitouch, R1 | `tools/cst8xx_multitouch_patch.py` | the panel reports two fingers, the driver lets one out |
+| Touchscreen wake glitch, V1 / R1 | `tools/cst8xx_wake_patch.py` | spurious post-wake contact swallows the first tap or slide |
 
+
+## First touch after waking the screen (issue #325)
+
+On the TempoTec V1 -- and on the official V1 firmware for the same reason -- the
+first tap or slide after waking the panel with the power button did nothing, no
+matter which page was up or how long after wake the finger landed, while every
+touch after it behaved normally.
+
+The sequence sits across `pinctrl-ingenic`, `cst8xx_touch.ko` (`hyn_ts`, CST836U
+on `i2c1` `0x15`, `PA16` falling-edge IRQ, `PA17` reset, `aldo2` supply) and
+LVGL's `lv_evdev`:
+
+1. Blanking `/sys/class/graphics/fb0` runs `cst8xx_touch.ko`'s framebuffer
+   notifier, which calls `disable_irq_nosync(PA16)` and then turns `aldo2` off
+   and drives `PA17` low. Because `pinctrl-ingenic` leaves `irq_disable` NULL,
+   Linux disables `PA16` lazily: the falling edge as the controller loses power
+   latches `IRQS_PENDING` on the descriptor.
+2. Unblanking queues `hyn_resume_work`, which sends an empty `SYN_MT_REPORT` +
+   `BTN_TOUCH 0`, restores `aldo2`, holds reset for 20 ms + 200 ms (by which
+   point the CST836U has cleared its XDATA report buffer and returned `PA16`
+   high), verifies chip ID `0xA7`, and calls `enable_irq(PA16)`.
+   `check_irq_resend()` immediately replays `hyn_irq_handler`.
+3. `hyn_irq_handler` reads nine zero bytes from register `0x00` (`point_num = 0`,
+   `buf[3..8] = 0`). The loop was ported from FocalTech's driver, where an idle
+   slot reads back as `0xFF` (`id = 15`, `flag = 3`) and terminates parsing; the
+   CST836U only `0xFF`-fills slots 1 and up, leaving slot 0 at zero (`id = 0`,
+   `flag = 0`, which is `FTS_TOUCH_DOWN` at `(0, 0)`). Never checking
+   `point_num == 0`, the handler emits `ABS_MT_TRACKING_ID 0`, pressure, touch
+   major and `(0, 0)` while `input_handle_event()` drops `BTN_TOUCH 0` as
+   unchanged, and leaves the driver's per-contact scan toggle at `1`.
+4. `lv_evdev` treats `ABS_MT_TRACKING_ID != -1` as `LV_INDEV_STATE_PRESSED`
+   (protocol B semantics). When `panel_touch_flush()` drained that packet and
+   armed `lv_indev_wait_release()`, the pointer stayed permanently `PRESSED`:
+   `indev_proc_press()` discarded every tick and the entire first touch until
+   lifting a real finger finally delivered an undeduped `BTN_TOUCH 0` (and
+   meanwhile stamped `disp->last_activity_time` on every frame). Stock
+   `hiby_player`'s `hgl_ts_read` latches press on `ABS_MT_POSITION_X/Y` and
+   clears only on `BTN_TOUCH 0`, which is why the stock firmware fails the same
+   way.
+
+Fixed at both ends:
+
+- **`tools/cst8xx_wake_patch.py`** (run automatically on
+  `module_driver/cst8xx_touch.ko` by `sonix_firmware_packer.sh`, and checked by
+  `verify_upt.sh --sonix-v1`) folds `if (point_num == 0) event->flag |= 1` into
+  the contact parse loop at `.text + 0x06d8..0x0738` by reusing the two redundant
+  byte reloads GCC emitted and the loop branch's empty delay slot. A zero-point
+  frame sends `flag` 0 -> 1 (`UP`) and 2 -> 3 (`NO_EVENT`), leaves genuine
+  `TOUCH_UP` frames (`flag = 1`) intact, clears the scan toggle and `touchs`,
+  emits no `ABS_MT_*` events, still releases `BTN_TOUCH` if one was held, and
+  coexists in either order with `cst8xx_multitouch_patch.py`.
+- **`src/system/device/touch_evdev.c`** replaces `lv_evdev` for the touch
+  pointer: frames packets at `SYN_REPORT`, takes `BTN_TOUCH` as authoritative on
+  protocol-A panels (waiting for a full `(x, y)` before opening a press so even
+  an unpatched driver's toggled-off scan 0 never flashes a stale coordinate),
+  resynchronises via `EVIOCGKEY` on open, `SYN_DROPPED` and
+  `panel_touch_flush()`, suppresses any finger still physically on the glass
+  across a flush until it lifts, and yields across press/release boundaries so a
+  tap shorter than one refresh period is kept intact.
+
+
+## Smart Mix on large libraries (issue #285)
+
+A 25,000-track library on firmware 1.6.1.1 (TempoTec V1, MP3/FLAC/WAV, complete
+tags) reports "No Smartmix data for this track" for every track while the
+ordinary scan and shuffle are fine. Its log has
+
+    geniusbuild: result 3, 4096 tracks, retained peak 1212416 bytes
+    library: Smart Mix build failed (3); library scan outcome is unchanged
+
+and the reporter confirmed the split: 100 tracks work, the full library does
+not. `result 3` is `GENIUSBUILD_LIMIT`, and 4096 was the builder's row cap; the
+1,212,416-byte peak in the same line is under a quarter of the 4 MiB budget it
+was measured against, so this was never out of memory and no workaround with
+smaller cards was needed. The cap was a design choice, and the three budgets
+behind it (a 4 MiB builder, a 4 MiB decoded snapshot and a 2 MiB BLOB) could
+not simply be multiplied: the old builder held a path and four tag strings per
+track, sorted the whole library twice, and assembled the entire graph in RAM,
+which is about 12 MiB of builder memory for 25,000 tracks before the blob.
+
+What changed, in `geniusbuild.c`:
+
+- **Two streaming walks of the index.** The first counts rows, measures the path
+  pool and interns each *distinct* artist, album and genre string; sorting those
+  distinct values gives the dense ids the old whole-library sort produced,
+  because they are the ranks of the same strings in the same UTF-8 byte order.
+  The second walk writes one path and one 24-byte record per track, with the tags
+  already reduced to their ranks. Tag text is therefore held once per distinct
+  value rather than once per track. Both walks report the revision they saw and
+  the build fails as `GENIUSBUILD_CHANGED` if the index moved between them.
+- **A streaming encoder.** The seven sections are rendered in 16 KiB pieces into
+  the staging BLOB, and the same renderer feeds the SHA-256 graph digest, so the
+  whole blob is never in RAM. Offsets, the generation string, `quick_check`, the
+  fsync and the atomic rename are unchanged.
+- **A bounded neighbour array.** The reader keeps a fixed amount per path (sorted
+  pointer, 40-byte metadata, adjacency range and one membership bit) plus the
+  path pool, so the edge array is what a mounted graph costs. The builder picks
+  the neighbours per track from that budget and from a 2 MiB edge budget: 32 per
+  track for small libraries, scaling down (never below 4) as the library grows.
+  25,000 tracks keep 10 each, 50,000 keep 5.
+- **Bounded ranking.** One pass per seed instead of eight, filling seven score
+  groups in path order, with the per-artist (2) and per-album (3) caps in small
+  fixed hash tables instead of a `memset` of the whole library per seed. A genre
+  larger than 4,096 tracks is sampled with a fixed stride rather than scanned
+  whole, so one enormous genre cannot turn the build into hours; genres at or
+  under that size are ranked exactly as before. For libraries that fit the old
+  cap the published database is **byte for byte identical** to the previous
+  builder's (checked with a 4,000-track fixture), so an existing graph is
+  recognised as current and a graph from the PC exporter still matches.
+- **The reader's per-request metadata became one bit per path.** It used to keep
+  a second 40-byte metadata array per mount; membership is now a bitmap of
+  `paths/8` bytes, which is where the room for the larger libraries comes from.
+  `GENIUSDB_MAX_SNAPSHOT_BYTES` rises from 4 to 12 MiB.
+- **A mix no longer repeats its seed.** Edges are not one-way: another track can
+  list the starting track as similar, the walker offered it as a candidate, and
+  after enough tracks the spacing rules let it in -- a 25,000-track graph put the
+  seed back at position 24 of a 30-track mix. `genius_mix_build()` now marks the
+  seed as used.
+
+New limits: 65,535 rows (up from 4,096), 6 MiB of path and tag text (up from
+1 MiB), 12 MiB of builder allocations, a 12 MiB decoded snapshot and a 2 MiB
+neighbour array; 4,096 bytes per field is unchanged. Reaching any of them still
+reports `GENIUSBUILD_LIMIT` (3), keeps the previous graph and leaves the scan
+outcome alone.
+
+Host numbers, from `make -C sonix-player/tests geniuslarge` (a synthetic index of
+`/music/<dir>/Artist <n> - Track <n>.flac`, 40 genres, one tag set per track):
+
+| library | build | retained peak | blob | decoded snapshot | neighbours each |
+|---|---|---|---|---|---|
+| 4,000 | 0.03 s | 0.3 MiB | 1.4 MiB | 1.5 MiB | 32 |
+| 25,000 | 0.18 s | 3.5 MiB | 4.3 MiB | 4.7 MiB | 10 |
+| 50,000 | 0.53 s | 6.4 MiB | 6.7 MiB | 7.5 MiB | 5 |
+| 20,000, one genre | 0.38 s | 2.9 MiB | 3.9 MiB | 4.3 MiB | 13 |
+
+Those are host seconds and host peaks; they are not V1 timings. The same suite
+builds each library, mounts the result through the real reader, and walks a
+30-track mix from the middle of it, and it checks the row cap, the text cap, the
+generation being reused for unchanged input and rebuilt for a changed tag.
+
+Not verified on hardware: how long the two walks and the ranking take on the V1,
+card write time for a 5-10 MiB staging file, and the player's memory headroom
+with a graph of that size mounted. Check with a 25,000-track card: the log should
+show `geniusbuild: published <n> tracks, ...` once per scan and no
+`Smart Mix build failed`, and a mix should start from any track.
+
+## Bluetooth RX: a freeze, the phone's volume, aptX stutter, and the control centre over the receiver
+
+Reported on firmware 1.6.1 (the log writes the build as `111120260719`) with a
+Galaxy Z Fold 8 on Android 17, in receiver mode: **(1)** after connecting,
+disconnecting and switching codecs three or four times, leaving the receiver to
+open PEQ froze the player until it was powered off by force -- not reproduced on
+purpose, and possibly a one-off; **(2)** the phone's volume is right after a
+fresh connection and, after a codec switch made on the V1, sometimes acts like
+an on/off switch; **(3)** aptX still stutters between the two. And a request: the
+swipe-down control centre should work in receiver mode, so that PEQ and the basic
+settings are reachable without leaving it.
+
+Three logs came with the report (`sonix_player.log`, `bluetooth.log`,
+`bluetooth.old.log`); the player's log runs over nine builds, from
+`061120261142` to the one reported. No V1 was involved in the work below.
+Everything was built and run on the host (the production decisions over fakes,
+the panel and the receiver session on LVGL's headless renderer) and nothing was
+run on a device. What the logs show is kept apart from what is inferred below,
+because most of the fixes rest on the second. The numbers in the first part were
+counted again from the logs before this was written; each session is a
+`btreceiver: <mac> is sending <codec> <rate> Hz` line paired with the next
+`external source finished; device handed back (N underruns)`, and its build is
+the one on the `sysinfo` line above it.
+
+### What the logs show
+
+**The freeze.** Both logs stop at the same moment, `08:38:06.730` (Los Angeles
+time, as the first boot writes it), and the next boot says the previous run did
+not shut down, with no pstore and no `last_kmsg`. There is no watchdog dump, no
+oops and no dropped log lines, and the real-time limit was on (`real-time
+threads may take 900000 of every 1000000 us`, in that boot's log). The last
+seconds are a receiver session starting:
+
+    08:38:02.313  PCM open on 'default': 96000 Hz ...   (the phone has not started to play)
+    08:38:02.568  cs43198_dai_prepare pcm
+    08:38:06.335  the remote player is playing
+    08:38:06.360  says it is playing and nothing has arrived in 3000 ms; this PCM is not the live one
+    08:38:06.360  external source finished; device handed back (0 underruns)
+    08:38:06.729  PCM open on 'default': 96000 Hz ...
+    08:38:06.730  is sending LDAC 96000 Hz 2 ch 16 bit        <- last line
+
+The first-frame check took a live stream for a dead one 25 ms after the phone
+said it was playing, because it counted its three seconds from the moment the
+output *opened*, which was four seconds earlier, before the phone had started to
+play. That closed the DAC and opened it again for nothing. It has done so before:
+`this PCM is not the live one` is in the log 26 times, and 14 of them came within
+a second of the phone saying it was playing (13 of them 6 to 56 ms after it; 8 of
+the 14 on the Fold 8, three of those on the reported build's first boot, at
+`08:31:56`, `08:33:06` and here). Each of the other 13 reopens was followed by a
+`cs43198_dai_prepare` 0.10 to 0.84 s after the output opened (0.47 s and 0.56 s
+for the two before this one) and a log that goes on; after this one there is no
+such line, and no line at all. The log writer syncs once a second, so up to a
+second of the end can be missing.
+
+Not shown, and so not known: **what froze the player.** It is the kind of stop
+the "Issue #265" section below records as "The sudden stops": the log ends within
+a second of an A2DP stream starting and an audio output being opened, with no HCI
+or UART error and no watchdog lines. Three are recorded there, all on the
+transmit side. That section lists the two
+explanations that fit, and says that a stop with the real-time limit on and no
+watchdog lines would be the kernel; this one has the limit on. So the likeliest
+place for the cause is below the player -- the kernel, or the hardware, at the
+moment a stream's traffic starts -- and this work does not touch it. What this
+log adds is the premature close and reopen. Whether it tipped this one over is a
+hypothesis, and not a strong one: the three earlier stops had no such reopen
+(the transmit side has no first-frame check), and 13 of the 14 that did were
+followed by a prepare line and a log that goes on. Removing it takes one DAC close and open out of the moment a
+stream starts, which is the most that can be said for it. The report says the
+freeze came while leaving for PEQ, and the log ends on a stream starting;
+leaving the receiver closes the DAC too, and up to a second of the log can be
+missing, so a leave in that last second fits as well, and the log cannot say
+which it was.
+
+**The volume.** On every new receiving stream (a link, or a codec change building
+the transport again -- `08:27:59`, `08:31:50`, `08:35:27`) bluealsa reports the
+volume of the new PCM as 127. The phone then sends `SetAbsoluteVolume` (9 at
+link-up, 111 later) and the V1 answers *Accepted*. Nothing in the player's log
+applies it, and the player never wrote the receive PCM's `SoftVolume` flag.
+
+**aptX.** Underruns the player counted per receiver session. On the Fold 8,
+aptX at 44.1 kHz, per build:
+
+| build | sessions | seconds | underruns |
+|---|---|---|---|
+| (before the first `sysinfo` line in the file) | 1 | 16 | 1 |
+| `061120261856` | 3 | 67 | 0 |
+| `081120260452` | 4 | 61 | 25 |
+| `091120260147` | 3 | 115 | 18 |
+| `101120261647` | 3 | 20 | 14 |
+| `111120260719` (reported) | 3 | 21 | 6 |
+| **all** | **17** | **299** | **64** (12.9 a minute) |
+
+This is the open item the "Issue #265" section below calls "Bluetooth RX from
+the Fold 8: measured, not solved", with two more builds in it. aptX was clean on
+`061120261856` (SBC was not tried there) and not on the next two builds, and SBC
+has since gone clean again (0 in 18 s on `101120261647`, 0 in 34 s on
+`111120260719`, after 38 in 21 s and 64 in 28 s: 108 and 135 a minute) while
+aptX has not. Around those numbers: another phone (`88:9F:...`, on
+`101120261647`) ran dry 25 times in 96 s on aptX 44.1 (15.7 a minute); the Fold
+8's LDAC 41 times in 13,106 s (0.19 a minute, over 3.6 hours) and its AAC not
+once in 189 s; aptX at 48 kHz, which only two other phones used, once in 179 s;
+aptX HD once in 198 s. The Fold 8 never ran aptX at 48 kHz, so the logs cannot
+say whether the cause is the codec, the rate or the phone. Wi-Fi was off during
+every one of the 23 aptX 44.1 sessions (the player's own `WIFI:ON` and
+`WIFI:OFF` commands say so), so coexistence with it is not the explanation. The
+player logs `btlog: Bluetooth log on` at the start of each of the last four
+boots (from `101120261647` on) and not before, and the sessions before it ran
+dry as well, so the trace does not look like the cause; what it costs the single
+core where it ran is not known.
+
+What the trace adds is small. It hides media packets (`btlog.c` keeps out an ACL
+packet that decodes to nothing but its channel and bytes, and says `N data
+packets not shown` on the next line it lets through), so when the audio itself
+arrived cannot be read. What it lets through on an aptX 44.1 link is one
+nine-byte L2CAP packet about every 120 ms (mean 120.0 ms, standard deviation 18
+to 21 ms, longest interval 153 to 228 ms, over three sessions: two of the Fold
+8's on the reported build and the other phone's longest), with eight or nine
+hidden packets before each. That fits audio sent in blocks of 120 ms; it does not show it. Whether the
+underruns follow late blocks is mixed: in the other phone's 39 s session 10 of
+the 14 underruns the log names fall in an interval of 165 ms or more (such
+intervals are 3.8% of its intervals), and in the Fold 8's 13 s session at
+`08:28:14` one of five does (228 ms), the other four falling in ordinary ones.
+Those five are 2.1 to 2.7 s apart, and in the trace around them there is nothing
+but ACL data, apart from the link's own channel set-up 0.2 s before the first.
+
+### What was inferred, and what was changed for it
+
+**Watchdog (the freeze).** `btreceiver.c` now counts the first-frame window from
+when the sender first says it is playing on this PCM, and starts it again if the
+phone pauses. A PCM opened while the phone is paused and left for a minute is not
+a dead one. A stream that really delivers nothing three seconds after "playing" is
+still caught and handed back. This removes the close and reopen the log shows 14
+times, the last one before the stop. It does not prove that it removes the
+freeze, which is probably something else (above).
+`first audio N ms after the output opened` is now logged, so a log that ends
+without it ended before the sound did.
+
+**Volume.** From bluealsa 4.1.1's source (read, not run): the player starts the
+daemon with `--a2dp-volume`, so every transport begins with `SoftVolume` off, and
+in that mode the decoder passes the samples through and only silences them at
+exactly zero (`io_pcm_scale()` in `io.c`). Every position of the phone's slider but
+the bottom one would then play at full scale: an on/off switch, which is what was
+reported. A codec change builds the transport again with the daemon's defaults,
+which would be why it showed after a codec switch. The player now switches
+`SoftVolume` on, from the worker, for every new receive PCM (a counter in
+`btstack.c` tells a new PCM object from one already dealt with) and after every
+codec change made on the receiver page, and says which it found:
+`the phone's volume would only have muted at zero; it is now applied here, level
+111/127 left, 111/127 right` or, when it was on already, `the phone's volume is
+applied here, level ...`. **Reasoned, not observed:** that this is the cause. It
+does not by itself say why a fresh connection felt right; the new line will say
+which mode each link was in, and a log with it on a bad connection is the proof.
+
+**aptX.** For aptX only, the receiver's buffers are deeper: 160 ms in and 360 ms
+out, against 80 and 120 for every other codec (`receiver_aptx_capture_ms`,
+`receiver_aptx_output_ms`; `0` turns each off; a larger plain setting still
+wins). The reasoning: the output starts only on a full buffer (`audio.c` sets the
+start threshold to the buffer's size), so after a start or an underrun a 120 ms
+output has one 120 ms block queued and no margin against the next one coming
+late, and a late block is a gap. At 360 ms it has three queued, a margin of 240
+ms against the latest block seen (the 228 ms interval, 108 ms late). That is a
+plan for lateness, which the trace shows in one session of two; if the underruns
+come from something else (the decoder starved of the CPU, a lump the capture ring
+cannot hold) the buffers help only as far as they absorb it. The price is delay:
+240 ms more at the output, and up to 80 ms more when the capture side backs up,
+which a film shows as late sound. `the capture ring overran (N ...)` is now
+logged too: audio thrown away on the way in is a stutter that a count of output
+underruns does not see. **Reasoned, not observed:** that the buffers cure it, and
+the cause of the regression in the table is not found. The SBC half of it went
+away between builds without anything here being done for it, and the aptX half
+is what the bisect named under Issue #265 would still settle.
+
+**The equaliser.** The receiver's audio did not go through the equaliser at all:
+the graphic EQ, MSEB and PEQ only ever ran on decoded tracks and on the USB DAC,
+so the control centre's switches for them did nothing to a received stream. It
+now runs through `eq_process` and `eq_process_s32`, which return at once when all
+three are off. This is what makes PEQ in receiver mode worth reaching. **Its cost
+on the single core is not measured**, and LDAC at 96 kHz with a PEQ profile on is
+the case to watch.
+
+### The control centre over the receiver
+
+The sheet is a top-layer overlay, so unblocking it needs nothing unloaded. Only a
+file transfer keeps it shut now.
+
+- **Opening it.** With the classic gestures (the default) it is pulled down from
+  the status bar; with the stock gestures (Appearance) it is pulled up from the
+  bottom 16 px, which `edge_may_open()` in `quickpanel.c` allows over the
+  receiver: it refuses only a file transfer, an open Cover Flow, or a sheet
+  already open. In the stock arrangement the status-bar pull belongs to Cover
+  Flow, which stays shut during the receiver, so that pull does nothing there. No
+  test drives either gesture over the receiver: the layout test asks
+  `quickpanel_blocked()` and builds the card, and does not pull the sheet.
+- **The card.** Where the local track and transport would be, it shows the phone's
+  track title (or the page's title when the phone names none) over `artist or
+  album, playing or waiting, codec and rate`; an error replaces the second line.
+  The transport row is not shown and play, next, previous and "open the player"
+  do nothing: the side keys already send AVRCP to the phone, and the card is about
+  a track that is not here. Brightness, volume, the EQ, MSEB and PEQ switches and
+  the other toggles work as everywhere. Crossfeed, soundfield, mono and ReplayGain
+  are on the sheet and do nothing to a received stream, as before for the USB DAC.
+- **Bluetooth and airplane mode** say `btreceiver_radios_held` and do nothing while
+  the receiver is playing, waiting for a phone, or parked: they would take the
+  radio from under the stream. Leaving by the page is the way to switch it off.
+- **Pages.** A long press on **EQ**, **MSEB** or **PEQ** opens its page without
+  ending the receiver and without asking. That is what `btreceiversession.c` is
+  for: the receiver ends when its page is unloaded, deliberately, since the page
+  is the only place the stream can be seen and stopped, so the control centre
+  *holds* it for the page it is about to open and the receiver is *parked* behind
+  that page. A parked receiver is the same receiver: the side keys, sleep timer,
+  power handling and Wi-Fi priority follow the mode and not the page, and the
+  page's poll goes on starting a phone that connects or reconnects while the user
+  is in PEQ. Going back along the chevron or the swipe lands on the receiver page
+  where it was. The parked receiver ends the moment the way back to its page is
+  gone from the back-stack -- the main menu, a jump to another section -- through
+  an observer on the display's screen-load event, and gives the A2DP sink back
+  then, so it never outlives the pages it was parked for. A hold that is not
+  followed by the page it named lapses, and every other way out of the page stops
+  the receiver as it always did.
+- **Every other page** (the radio settings, Bluetooth settings, a file transfer,
+  and so on) is somewhere the receiver cannot follow, so a long press asks the
+  question the page's own back button asks, and goes on only on yes; with nothing
+  playing there is no question. Tapping the file-transfer tile does the same.
+- **Cover Flow and the player sheet** stay shut in receiver mode (an album picked
+  there would start a local track under the stream).
+- **Strings.** `btreceiver_radios_held`, in eleven languages, written without a
+  native reader.
+
+**Not guarded:** the AirPlay and DLNA tiles, which have no guard against any other
+mode either; enabling one needs Wi-Fi, which receiver mode keeps down unless the
+user turns it on, and what the two would do to a stream already holding the DAC
+was not looked at. The crossfeed and soundfield pages are not among the pages the
+receiver waits behind, since their settings do nothing to it.
+
+Tests: `make -C sonix-player/tests bluetooth quickpanel-layout btreceiver-session`.
+`test_btreceiver` runs the capture thread over a fake ALSA: the aptX buffers (and
+that the other codecs keep theirs), the equaliser on 16- and 32-bit frames, an
+overrun and its recovery, and a phone paused past the window and then played,
+where the old logic closes the DAC and the new one does not -- the old logic was
+put back to check that this test fails. `test_bluetooth` and the new
+`test_btpcmvolume` cover the `SoftVolume` read and write over the real D-Bus
+marshalling, a daemon that does not answer or refuses, and the new-PCM counter.
+`quickpanel-layout` runs the production panel code on LVGL: the receiver card in
+all its states, the transport that is neither shown nor answers, the two radio
+tiles, the three equaliser pages held and opened without a question, every other
+page asking and opening only on yes, a refusal leaving nothing behind, and the
+file transfer still blocking. `btreceiver-session` drives the session on real
+LVGL screens (real `lv_screen_load()` event order), with a back-stack kept as
+`switcher.c` keeps it: parking behind PEQ and the Auto EQ page under it,
+coming back, a swipe home ending it and giving the sink back once, a stale hold
+not leaking, and a second `init` adding no second observer. Eight deliberate
+breakages of the panel's receiver logic and nine of the session were tried one
+at a time; each failed an assertion, and the files were put back and the suites
+run green. `switcher.c`, `btreceiverpage.c` and `coverflow.c` are compiled by no
+test; they were only syntax-checked with `-Wall -Wextra`. The `ui` aggregate does
+not finish on GCC 12 because of three files this work does not touch (see
+`sonix-player/tests/README.md`); the individual UI suites do pass.
+
+**Hardware validation pending.** On a V1 with the Fold 8:
+
+- (a) start a receiver session, pause the phone for 10 s or more, play it, and
+  look for no `this PCM is not the live one` within a second of the phone
+  playing, and for `first audio N ms after the output opened`. That shows the
+  early check is gone, not that the freeze is: the log holds it once, among 196
+  external-source sessions over 44 starts, and it looks like the stop Issue #265
+  records, which this does not address. If it comes back, the last lines of both logs are what to
+  send;
+- (b) after a codec switch made on the V1, move the phone's slider in small steps
+  and look for `it is now applied here` in the player log and a gradual change;
+- (c) play aptX 44.1 for ten minutes and compare the session's underruns with the
+  table above, then with `receiver_aptx_*_ms = 0`;
+- (d) with PEQ on, play LDAC 96 kHz and watch the underruns for the equaliser's
+  cost;
+- (e) pull the control centre down in receiver mode, long-press PEQ, change a band
+  while the phone plays, and back out to the receiver page; also with the phone
+  paused, with it dropping out and in while in PEQ, and with a swipe home from
+  PEQ (the stream must end and the phone must not be left linked to a sink);
+- (f) the Bluetooth tile and airplane mode in receiver mode say why;
+- (g) any other long press asks first.
+
+**Not touched:** the freeze's real cause (the stop Issue #265 records, now with
+a receiver in it), the regression behind the table above (the bisect Issue #265
+names), the MacBook and SafeFly reports mentioned further down, and the AirPlay
+and DLNA tiles over a live receiver.
+
+
+## Tidal: the playlists an account keeps as favourites
+
+"My playlists" on the Tidal page asks `/users/<id>/playlists`, which answers
+with the playlists the account made and nothing else. A playlist favourited in
+Tidal's own app -- an editorial one, an artist's, another listener's -- was in
+the account and nowhere in the player. Those are a list of their own on Tidal's
+side, in the favourites collection next to the tracks, the albums and the
+artists, and the Tidal page now has a row for it: **Favourite playlists**,
+under "My playlists".
+
+No hardware and no Tidal account were involved. The request is the one the
+stock firmware's player carries (`%s/users/%d/favorites/playlists?countryCode=%s`
+and `%s/users/%d/favorites/playlists/%s` are in its binary, as
+`tools/extract_streamkeys.py` unpacks it) and the one python-tidal used until
+July 2025 (its commit `5517f38`), when it moved favourite playlists to the v2
+`my-collection/playlists/folders` calls for the sake of folders and batches.
+The issues behind that commit ask for the new calls and do not report the old
+ones failing, and python-tidal still reads the other three favourites lists
+from this same v1 collection. **Reasoned, not observed:** that Tidal still
+answers the v1 list of playlists, and that the list is complete. A playlist
+filed in a folder in Tidal's app is the case to look at; if it is missing,
+`/users/<id>/playlistsAndFavoritePlaylists` and the v2 call are the two places
+to go next.
+
+What changed:
+
+- **The client** (`tidal.c`). `tidal_favorite_playlists()` is a fourth caller
+  of the shared favourites request (`limit`, `offset`, `order=DATE`,
+  `orderDirection=DESC`, entries wrapped as `{"created":..,"item":{..}}`).
+  `tidal_favorite_remove_playlist()` is a `DELETE` on
+  `/users/<id>/favorites/playlists/<uuid>`: the account's link goes, the
+  playlist stays. It is not `tidal_playlist_delete()`, and there is no call to
+  add one, because nothing in the player lists a playlist the account does not
+  already hold. A playlist of type `EDITORIAL` that names no creator is given
+  `TIDAL` as its owner, which is what python-tidal prints for it.
+- **The page** (`tidalpage.c`). A row reads `TIDAL · 50 tracks`; where no
+  creator is named -- which is how python-tidal finds a listener's playlist,
+  the account's own included -- the length stands alone, so "My playlists"
+  reads `7 tracks` where it read ` · 7`. A favourite opens with the same tracks
+  request as one of the account's own but as a kind of its own: its tracks can
+  be played, favourited and kept on the card, one at a time or as a selection,
+  and cannot be taken out of it. The three dots on a favourite, and a selection
+  of them, offer **Remove from favourites** and ask first. (A selection of
+  favourite tracks does not ask; those can be found again by searching, and a
+  playlist cannot.) The list is kept on the card for the same half day as the
+  others, as `tidal_fav_playlists`, and a removal drops it together with the
+  removed playlist's own rows.
+- **The main page's rows.** A saved arrangement is a list of row numbers, so
+  the new row took the next number, 7, whatever its place on the page, and the
+  default order became a table of its own. A row that an older build's
+  arrangement does not name is put straight under the row it follows by
+  default -- "My playlists", wherever the user had moved that -- where it used
+  to be appended at the bottom. The mask of hidden rows needs no migration.
+- **Signing out** (`do_logout()`) now takes the account's five lists off the
+  card. They are read back for twelve hours before Tidal is asked again, so
+  whoever signed in next on the same card was shown the previous account's
+  favourites and playlists. That was already so for the four lists there were.
+- **Strings.** `favourite_playlists` and
+  `will_no_longer_be_one_of_your_playlists` in the eleven languages, written
+  without a native reader. German says `Lieblingsplaylists`:
+  `Lieblings-Wiedergabelisten` is wider than the row at every size its name can
+  step down to.
+
+Removing needs a session that may write. The stock HiByOS keys sign in with
+`r_usr` alone (the scope fallback in `tidal.c`), so with those Tidal is
+expected to refuse it as it refuses the other writes; the refusal is shown in
+Tidal's words and the list is left as it was. Reading is not affected.
+
+Tests: `make -C sonix-player/tests tidal tidal-ui`. `tidal` runs the real
+client against canned replies (`test_tidal_favplaylists.c`): the request and
+its parameters, the wrapped entries, the three kinds of creator, paging, an
+error in Tidal's words, the `DELETE`, and a refusal for want of `w_usr`.
+`tidal-ui` puts the real page, the real `tidalsync.c` and the real list cache
+on LVGL at 240×320 over a recording stand-in for the client
+(`tests/ui/test_tidal_pages.c`), in three runs: nothing saved, an arrangement
+saved by a build without the row, and one saved by this build. It checks the
+row and where it lands, the list and its heading from the network and from the
+card, what the three dots and the selection sheet offer in each of the two
+lists of playlists and inside a playlist from each, that "no" sends nothing,
+that "yes" un-favourites exactly the rows chosen and never deletes one, a
+refusal, the empty list, the reorder page, and the five lists gone from the
+card after a sign-out. Forty-one deliberate breakages of the feature in
+`tidalpage.c` and `tidalsync.c` were tried against it, one at a time.
+Thirty-seven failed a run. The four that passed change nothing a user can see:
+three are cache drops made twice, once by the page and once by `tidalsync.c`,
+and one is a guard no menu reaches.
+
+Neither suite reaches Tidal: the HTTP layer is canned in the first and the
+whole client is substituted in the second. The headless fonts are Montserrat,
+so no label is measured in the faces the player draws with. By those faces'
+advance widths the new row's name fits the 164 px beside the chevron at full
+size in seven languages, steps down in Dutch, Russian and Ukrainian, and in
+Japanese is about 4 px over at the smallest step, as "Favourite artists"
+already is there: into the gap before the chevron, not onto it. The
+confirmation card is recorded, not drawn, and taps are sent as events, not
+through the touch driver.
+
+**Hardware validation pending:** with an account that keeps an editorial
+playlist, an artist's and another listener's as favourites, one of them filed
+in a folder: the row is there, fifth, and its list matches Tidal's app, the
+folder's playlist included; the editorial one says `TIDAL`; each opens, plays
+through and can be kept on the card, and its tracks' menu has no "Remove from
+playlist". **Remove from favourites** on one row and on a selection, with keys
+that may write (the playlist leaves the list here and in the app, and is still
+to be found in Tidal) and with the stock keys (Tidal's refusal on screen, the
+list unchanged). On a player whose Tidal rows had been rearranged before the
+update: the new row sits under "My playlists" and the hidden rows are still
+hidden; then Tidal settings → Home reorder moves it and hides it, across a
+restart. The row's name in each language, Japanese first. And a sign-out
+followed by a second account: its own favourites and playlists, at once.
+
+## Issue #265: the silent Teslas, the sudden stops, and log lines that never arrived
+
+Worked from the three logs attached to
+[#265](https://github.com/mr-f0xx/sonix-player-tempotec-v1/issues/265) on Nov 9
+(`sonix_player.log`, `bluetooth.log`, `bluetooth.old.log`; Nov 6 to Nov 9, five
+builds, two cars). No hardware was involved: every fix below is tested on the
+host only, and each paragraph says whether it rests on what the logs show or on
+reasoning from them.
+
+### Bluetooth TX to a car: accepted, and silent
+
+What the logs show, for both cars (`4C:FC:AA:1E:B3:80` on Nov 8,
+`4C:FC:AA:12:D5:CC` on Nov 9), every one of the seven times a stream was made:
+
+1. The car makes the link and opens the A2DP signalling channel itself about
+   250 ms later, then asks for nothing.
+2. bluetoothd logs `set_disconnect_timer() timeout 30` and waits. Upstream bluez
+   5.54 waits one second here; this firmware's build waits thirty. Meanwhile
+   every `ConnectProfile(A2DP sink)` is answered `Device or resource busy`
+   (38 times in the player log).
+3. At second thirty bluez configures the stream on its own. The car lists SBC
+   (44.1/48 kHz) and AAC (8 to 96 kHz); bluez takes bluealsa's AAC endpoint and
+   bluealsa picks the highest common rate: `MPEG-2 AAC LC, 96000 Hz, 220000 bps`.
+4. The car accepts Set Configuration, Open and Start. On Nov 9 it then took more
+   than 120,000 media packets over 23 minutes with its volume at 61/127, and
+   played nothing. Raising the volume on the first car (32 to 69/127) changed
+   nothing either.
+
+Across all the logs AAC at 96 kHz was configured nine times, always for a car,
+always silent; AAC at 48 kHz (Buds2 Pro) plays. Phones send AAC at 44.1 or
+48 kHz only. **Reasoned, not proven:** the car advertises a rate it does not
+play. The logs prove what was sent and that it was accepted, not why it was
+silent.
+
+Two things that do not work, both seen in the log: changing the configuration
+in place (08:21:02 and 08:22:34 on Nov 9: the car refuses the new media channel
+with "security block" and drops the link), and opening AVDTP from this side
+(the first car refused it three times the same way).
+
+What changed:
+
+- **Car mode** (`bluetooth.c`). For a device whose class says hands-free or car
+  audio (both cars: `0x240408`), bluealsa is restarted with
+  `--a2dp-force-audio-cd --codec=-AAC` — SBC at 44.1 kHz and nothing else —
+  three seconds after the link, which is inside bluez's thirty, so the
+  endpoints bluez finds when its timer runs out are the plain ones. A
+  connection made from the player switches before the page goes out. The mode
+  ends twenty seconds after the car has gone, or at once when something that is
+  not a car needs the daemon. A daemon that does not take an option is started
+  again with fewer, down to the ordinary set.
+
+  ```ini
+  [bluetooth]
+  car_mode = auto    ; auto | on (every device) | off
+  car_codec = sbc    ; sbc | aac (AAC stays, at 44.1 kHz)
+  ```
+
+  Not verified on a car. Two assumptions carry it: that this bluetoothd, like
+  upstream, keeps the signalling channel when bluealsa's endpoints are replaced
+  under it, and that the vendor's bluealsa 4.1.1 takes `-AAC` as upstream's
+  does (if not, the fallback leaves AAC at 44.1 kHz). A device with the same
+  class that is not a car gets SBC at 44.1 kHz too; `car_mode = off` undoes it.
+- **No automatic codec change in car mode**: the "ask for the better codec"
+  step is the in-place reconfiguration the car answers by dropping the link.
+- **"Busy" is left to bluez.** #266 asked for the profile five times, four
+  seconds apart; all five fall inside the thirty seconds and cannot succeed.
+  `busy` is now said once and looked at again after 35 s.
+- **A note in the log** whenever any sink comes up with AAC above 48 kHz.
+- **The reconnect no longer pages over a new link** (proven cause). Nov 9
+  08:25:48: `going back to 54:10:4F:B0:AD:4D` (earbuds that were not there)
+  went out while the car had just linked; the car closed its channels and the
+  link was gone at 08:25:53. `reconnect_should_stop()` reads a cached device
+  list that nothing refreshed during the 8 s grace. It is refreshed once a
+  second there, and before every attempt.
+
+### The sudden stops
+
+Of 29 starts in the player log, 20 follow a clean end, five follow a held power
+key, one stops at a suspend, and three stop dead within a second of an A2DP
+stream starting:
+
+| last line | what was starting | next kernel start |
+|---|---|---|
+| Nov 8 13:00:36 | TIDAL track change to the Buds2 Pro, `the track started coming out after 93 ms` | 19.6 s later |
+| Nov 8 13:01:18 | Buds2 Pro back 17 s after that boot, track reloading | 15.2 s later |
+| Nov 9 08:26:25 | the car, AAC 96 kHz, `the track started coming out after 117 ms` | 10.8 s later |
+
+No HCI or UART error precedes any of them, the watchdog thread (which dumps
+after five seconds of a stalled interface) wrote nothing, and the device came
+back by itself after a varying delay: everything stopped, and something in
+hardware reset it. The kernel keeps nothing across the reset, so the cause is
+**not known**. Two explanations fit and the logs cannot tell them apart: a
+real-time thread that stops sleeping on the one core (which also starves the
+card's I/O threads, so the watchdog's lines never land), or a fault in the
+kernel when the stream's traffic starts. The two Nov 8 stops happened on build
+`081120260452`, before #266, with the stream going to earbuds: the car is not
+what they have in common, the start of an A2DP stream is.
+
+What changed, to tell the two apart next time: the player logs the kernel's
+real-time limit (`sched_rt_runtime_us`) at start and, when it is off, sets it
+to 95 % (`[system] rt_throttle = 0` leaves it). With the limit on, a spinning
+real-time thread leaves the rest a twentieth of the core, and the watchdog's
+thread dump reaches the card. If a stop like these happens again with the
+limit on and still no watchdog lines, it is the kernel.
+
+### Log lines that never arrived (proven)
+
+On the device's glibc (2.22) `puts()` and `putchar()` write to libc's own
+stdout object, not to the `stdout` variable `logging.c` points at the card log.
+GCC turns every `printf("text\n")` into `puts()`: 125 call sites, none of which
+appears once in 54,702 lines of log — "Entering main event loop..." among them,
+and the line #266 added to say how the previous run ended. The player is now
+built with `-fno-builtin-printf -fno-builtin-__printf_chk` (the second for a
+toolchain that fortifies, where the first alone changes nothing). Without the
+builtin the compiler no longer checks `printf` format strings by itself, so
+`glibc_compat.h`, which already enters every unit, declares the format
+attribute and the host build includes it too.
+`make -C sonix-player/tests printf-flag` fails if a flag goes, if the folding
+comes back, or if a wrong format compiles without a warning.
+
+### Bluetooth RX from the Fold 8: measured, not solved
+
+The player's own underrun count per receiver session, summed per build:
+
+| build | Fold 8 SBC 44.1 | Fold 8 aptX 44.1 | Fold 8 LDAC 96 | others, SBC and aptX |
+|---|---|---|---|---|
+| `061120261856` (Nov 6) | not tried | 0 in 67 s | 10 in 3815 s | 1 in 13 s |
+| `081120260452` | 38 in 21 s | 25 in 61 s | 0 in 42 s | 0 in 248 s |
+| `091120260147` | 64 in 28 s | 18 in 115 s | 4 in 972 s | not tried |
+
+So the report is right, and narrow: the Fold 8's two 44.1 kHz low-latency
+codecs, two underruns a second on SBC, on the builds after Nov 6. It is not the
+radio (LDAC from the same phone is clean at several times the bit rate), not
+SBC or aptX as such (three other sources are clean on the same build), and not
+`btreceiver.c`, which did not change between the clean build and the first bad
+one. The Bluetooth trace hides media packets, so their timing cannot be read.
+**Open.** What would settle it: the same test with CI builds of the commits
+between `7dfb2d4` and `2e23b2f`.
+
+### Not touched
+
+- Maximum brightness and waking: fixed by #268 (the issue #267 section below).
+- MacBook SBC switch, SafeFly aptX, TIDAL track-skip stutter: not analysed.
+
+Tests: `make -C sonix-player/tests bluetooth readfile printf-flag`.
+
+
+## Volume shown as the output voltage
+
+**Settings → Screen → Volume as voltage** (`[screen] volume_voltage`) prints the
+level as what the socket puts out (`502mV`) where the status bar and the volume
+pill print the index (`88`). It is off by default, and off, nothing is
+different: the same text at the same label widths, and no extra work on any
+timer.
+
+The figure is arithmetic on a published number, not a measurement:
+`V = Vfs × 10^(dB/20)`. `dB` is the attenuation the DAC has been given for the
+index. The new `alsa_volume_output_db100()` takes it from the same two helpers
+`write_dac_attenuation()` writes the channel controls from: the gain table in
+force and, while a DoP stream is open, the DSD gain compensation, at 0.5 dB a
+raw step, with index 0 the mute. `Vfs` is the most TempoTec publishes for each
+socket, 2 Vrms on 3.5 mm and 4 Vrms on 4.4 mm, **assumed** to be the top of the
+high-gain table. Low gain is that table 6 dB down, so index 100 reads `1.00V`
+there and `2.00V` in high gain. `volumereadout.c` works in integers (forty
+half-dB ratios and a count of decades, no libm) to the nanovolt, and prints
+three significant figures in V, mV or µV: enough for every step of both tables
+to change the text.
+
+So it is the level of a 0 dBFS sine into no load. Music sits below it, and so
+does everything done to the samples: ReplayGain, the PEQ preamp, channel
+balance. How far a DSD recording sits under full scale is not modelled either;
+the reading follows only the compensation the DAC is given for it. A load takes
+the top of the balanced scale down as well: the 215 mW published for 32 Ω is
+2.6 V across it, not 4. The gain tables and the half-dB step are the stock
+firmware's and have not been measured on a V1.
+
+The socket is a setting, two pills under the switch (`[screen]
+volume_voltage_jack`, 3.5 mm unless changed), because the board cannot say
+which is in use: its one switch node reads the same with either socket occupied
+or neither (see the interface profile section below), and the volume profile is
+the 3.5 mm one for both. Over Bluetooth and on a USB-C DAC the level is applied
+at the far end against a full scale the player does not know, so those outputs
+keep the index and the label goes back to the width it had.
+
+A voltage moves with things that are not volume changes: the gain switch, the
+DSD compensation, a DoP track starting or ending, the output changing. The
+first two are settings, and repaint the status bar themselves. For the rest the
+bar works the reading out again on its existing 250 ms jack timer, only while
+the option is on, and repaints when the text differs. The pill takes the form
+in force each time it is shown. Both labels are measured against every reading
+the form can come to (all 255 steps of the DAC's register and the mute, not
+only the two tables), once per change of form, face or text size, so their
+width holds while the level moves. That makes the pill the seventh font-change
+callback on the V1; `fonts.c` holds eight and silently drops any more.
+
+The room it takes, worked out from MiSans's advance widths and the layout code
+and not seen on a panel:
+
+- **Status bar.** The reading is about 50 px wide at 14 px where the number is
+  24, in a left group of 120 px. Volume and the play glyph still clear a
+  centred 24-hour clock, though with both radios on and a three-digit battery
+  percentage that is a fit to within a pixel or two. A 12-hour clock does not
+  fit beside both radios and the percentage, where with the number it just
+  does: the battery side keeps its gap and the clock ends up over the play
+  glyph. Hiding the percentage, 24-hour time or hiding the clock clears it.
+  The Detect changes glyph pushes the clock the same way while it shows, and
+  with the SonixLink glyph as well the row is 130 px, so the last glyph loses
+  about 10 px to the edge of the group.
+- **Volume pill.** The label goes from 28 px to about 56, and the scale from
+  about 110 px to about 82.
+
+`make -C sonix-player/tests volumereadout` compiles the real `alsa-controls.c`
+tables and DSD offsets with `volumereadout.c`. It checks the half-dB table
+against `pow()`, the three-figure text and the edges where rounding gains a
+digit, and the reading at every index of both gain tables on both sockets:
+strictly rising, never the same text twice running. It checks what is in the
+figure (gain, socket, the compensation only on DoP) and what is not (Bluetooth
+and USB-C get the number). It also runs the real `write_dac_attenuation()`
+against a mixer that only records, and requires the reading to be the
+attenuation the two channel controls were left at, for every index, gain, DoP
+state and compensation setting. `make -C sonix-player/tests volume-overlay`
+runs the production `volume_overlay.c` on headless LVGL at 240×320: the index
+at the unchanged 28 px, then all 256 readings per socket on one line at one
+label width with glyph, label and scale inside the pill, the same through the
+slider, the width given back over Bluetooth, and a new measure after a font
+change. Neither suite links `topbar.c` or `settings.c`, so the status bar's
+side and the settings card are not exercised by any host test. The headless
+fonts are Montserrat, which has no micro sign, so the pixel widths above are
+not asserted anywhere. Nothing here measures an output.
+
+**Hardware validation pending:** with a 0 dBFS sine and an RMS meter on an
+unloaded socket, index 100 on 3.5 mm and on 4.4 mm in both gains (expected
+about 1 V and 2 V, 2 V and 4 V), then a few points down the scale (on 3.5 mm in
+low gain, 88, 60 and 44 should be near 502 mV, 100 mV and 39.9 mV). That checks
+the three things assumed: that high gain at 100 is the published maximum, that
+the scale is half a dB a step, and that 4.4 mm is twice 3.5 mm. Then a DoP
+track with DSD gain compensation at 1 to 6, which the reading follows 1 dB a
+step. Line out holds index 100, so it reads `1.00V` or `2.00V` on 3.5 mm by
+gain; that socket moves to another codec route in the mode and its level there
+is unknown. On the panel: the status bar with the option on in each clock
+position, 12- and 24-hour, with both radios and the percentage; the pill over
+the player and the screensaver with a key held and with a finger on the scale;
+a µV reading in each face and text size; the card on Settings → Screen in each
+language; and Bluetooth or a USB-C DAC connected and removed, which should give
+the number and then the voltage back.
+
+## Waking the screen at 100% brightness (issue #267)
+
+The two follow-up reports on [#267](https://github.com/mr-f0xx/sonix-player-tempotec-v1/issues/267)
+isolate a wake failure to maximum brightness: after screen-off, the backlight
+flashes briefly and goes dark again; reducing brightness even slightly avoids
+it. The power manager previously restored the driver's exact maximum at boot,
+on a live adjustment and at the end of either wake path. The charger-only
+screen had a separate writer with the same endpoint.
+
+A shared hardware-boundary guard now limits nonzero writes to one raw step
+below `max_brightness`, avoiding the stock PWM driver's full-duty,
+constant-output endpoint. On the V1's 0–100 scale, a **100% request writes 99**.
+The UI range and saved setting remain 100; ordinary lower levels are unchanged,
+and a saved maximum is safe without the user navigating a flashing screen to
+change it. Startup adoption/fallback, live changes, normal and Bluetooth-held
+wakes, fades and the charger-only screen all use the guard. A one-level scale
+keeps its sole nonzero level rather than becoming unusable.
+
+Screen-off also always ends at **zero**, even with `[screen] wake_hold_level = 1`:
+that override belongs only to the guarded wake window, not to the entire dark
+spell. Framebuffer powerdown is unchanged, as is the deliberate panel hold
+while Bluetooth audio plays; once that stream stops, the panel still powers
+down after its quiet interval. Panel initialization and repaint/vsync timing
+have not been shortened.
+
+`make -C sonix-player/tests power-display` exercises the production power and
+charging-screen code with fake sysfs/time and real LVGL. It checks every
+brightness write, saved/adopted/fallback maximums, repeated off/on cycles,
+true-zero off with both hold settings, both vsync paths, Bluetooth TX/RX and
+panel-hold transitions, charger-only wakes and the no-device-path simulator.
+It does not exercise the physical PWM or measure current.
+
+**Hardware validation pending:** boot with an existing 100% setting, set 100%
+from both Settings and the control centre, then repeat power-key and timeout
+wakes. Recheck lower brightness, screensaver/double-tap wake, local playback,
+Bluetooth TX/RX and charger-only mode. With no Bluetooth stream the dark screen
+should report brightness `0` and framebuffer blank `4`; a held panel deliberately
+stays unblanked but must still report brightness `0`. The original faint-image
+and overnight battery-drain reports need device/current measurements; these
+host tests alone do not establish their cause or resolution.
 
 ## Bluetooth TX discovery and car pairing
 
@@ -2731,10 +3561,27 @@ here that no code in the player can observe. Both are rare, and both are
 answered by holding power for a moment, which is what the screen would have
 asked for anyway.
 
+The cable half of that decision is deliberately generous. `charger_attached()`
+-- shared by the boot and by the screen watching for an unplug -- does not ask
+for one `online` bit: the two VBUS nodes are the same PMIC the panel's rails go
+through, so their reading wobbles around a panel event, and with the charge
+limit holding the cell at its ceiling the charger does nothing at all, which is
+precisely when the answer matters most. So all of it is consulted: any
+non-battery supply reporting `online`, any non-battery supply holding a
+USB-sized voltage (about five volts; a battery is 4.35 V at best), or the
+battery itself in any state other than discharging or unknown -- "Full" or
+"Not charging" with a cable in is the charge limit doing its job. The marker is
+checked before any of it, so an ordinary boot pays one `access()` and no sysfs.
+A candidate charger boot asks the question a couple of times with a brief pause
+between, because the first read lands microseconds after the panel's rails open
+and close at the PMIC; and whichever way it goes, the log says what was decided
+and why -- the marker's path when it is what sent the boot to the library, the
+unlink's error when the marker could not be removed.
+
 ### The screen
 
 `chargescreen.c` runs before the services start, on purpose: it reads the gauge
-through `battery_read_now()`, the cable through `usb_vbus_present()`, and the
+through `battery_read_now()`, the cable through `charger_attached()`, and the
 power key off its own evdev node, so no input thread is running to answer a key
 it is using. A hold would otherwise open the power menu of a player that has not
 been built yet.
@@ -2747,12 +3594,55 @@ long press waits for, and the player starts. With the cable taken out while the
 screen is dark it switches the player off instead: a device that was off, was
 woken by a cable and no longer has one has nowhere to be.
 
+The screen belongs to the theme, with two exceptions: Dark and Light draw the
+black screen they always had, and the added palettes draw from the active one
+-- the background and the percentage and the outline take the palette's colours
+(the outline what the type wears, tinted like the rest when Dynamic tint is on),
+the state line the accent, the hold hint the palette's secondary text. The bar
+itself keeps the semantic ladder on Dark and Light, unchanged. The added
+palettes wear the accent there instead -- the bar's fill is the accent over a
+fingerprint-lighter accent -- above the two low rungs, which are amber and red
+on every palette, so a nearly flat battery reads as red behind any theme. The
+palette is resolved before the screen is
+built (`theme_resolve_boot_palette()`), which reads only the config: a Custom
+inherently needs the card, which is not mounted at this point in the boot, so
+the charging screen falls back to Dark for it and the pages pick the Custom
+up when `gui_init()` runs the full `theme_init()` a moment later. The first
+frame the backlight comes up over already carries the reading -- the gauge and
+the cable are read before the panel lights, not after.
+
 The panel is blanked and woken the way `power.c` does it, which on this board is
 not optional: the SLCD leaves its memory white on reset and loses a frame pushed
 before it is listening, so the backlight is held at zero across the unblank and
 the settle, and brought up over a frame that is already in the framebuffer. The
 code is short and repeats `power_screen_on()`'s order deliberately; the long note
 on that function is the reason for each step.
+
+The way out of the screen holds the same rule. On a hold, the last charge frame
+stays on the glass until the interface puts its own first frame there: the
+exit no longer deletes the screen's contents and flushes the empty result
+(which put the framebuffer pages in front of a lit backlight and read as a
+white screen while the player started -- the library, TLS and the caches all
+load before the main menu exists), and `power_init()` skips its own unconditional
+unblank when the charging screen left the panel up (`chargescreen_panel_lit()`,
+carried into `power_config_t.panel_up`) -- that second UNBLANK write is a panel
+reset, and a panel reset behind a lit backlight is white. The menu is loaded
+over the charging screen's page by the ordinary `lv_screen_load()` in
+`gui_init()`; the charge frame is what shows until that first frame is on the
+glass, and the charging screen's objects (a dozen, once per boot) are left in
+memory with it.
+
+The hold itself had a tail of its own, and it put the panel down at the exact
+moment the boot finished. The charging screen reads the power key from its own
+evdev node and goes away a moment before the player does; the user is still
+lifting their thumb, and that release is delivered to the input thread the
+player starts for the same node — which never saw the press. The thread read it
+as a short press and toggled the screen off. The panel is lit by the boot, the
+hold ends it, the screen is dark a heartbeat later, and the power key wakes
+it. The player's button thread now tracks whether it saw the matching press
+(`power_press_seen` in `system.c`); a release with no press is the tail of
+somebody else's gesture, and does nothing. It pre-dates the work above — the
+white screen only made the hold look like the whole story.
 
 Every line on the screen is given the panel's width and told to wrap. The three
 states are short in English and not in every language -- the Ukrainian for
@@ -2774,7 +3664,15 @@ glass, the fill within a pixel of the reading it was given and never past the
 box at 100%, `--` and an empty bar for a gauge that answered nothing (never
 `0%`), and the three state lines in each of the ten languages -- stepped through
 one reading at a time, because the screen only repaints a line that has
-changed.
+changed. The pass runs twice: once in Dark, checking the black screen is what
+it has always been, and once in Tokyo Night, checking the palette is picked up
+-- background, outline, percentage, state line and hint all redrawn from the
+active palette, the bar wearing the accent above the low rungs (amber and red
+kept, as on every palette). `make -C sonix-player/tests chargerattached` checks the cable probe
+against fake supplies in a temporary directory -- the `Full` / `Not charging`
+readings the 80% charge limit produces with the cable in, an `online` bit that
+reads `0` with a USB-sized voltage behind it, and the garbage each node is
+allowed to hold.
 
 ## The last five percent
 
@@ -3085,6 +3983,250 @@ layout suite also checks that DAC no longer blocks the Control Centre while
 file-transfer and Bluetooth-receiver modes remain blocked. The tests do not
 replace an on-device touch and listening check.
 
+## External USB DACs that only worked in the trial
+
+Two USB-C dongles were reported against a V1: a JCally and, later, an ESR. Both
+did nothing on the port; both worked at once when developer options ran **Try
+external USB DAC**. That is the whole of the evidence, and it is enough -- two
+unrelated devices, one behaviour, one workaround that changes exactly two
+writes.
+
+The reason is the role rather than the code. `arbitrate_port()` leaves the
+TCS1421 in `NormalDRP` while the port is empty, which is what lets a phone be
+handed the card and is what the stock player does by default. A USB-C sound
+card does not ask for the host role on the CC lines -- it simply waits to be
+enumerated -- so with the port dual and nothing acting as source, the far end
+is never supplied and never appears. Forcing `Source` on the TCS1421 and `host`
+on the x1600 PHY supplies it, which is exactly what the trial does.
+
+So the trial's writes are now available as a setting, not as a twenty-second
+diagnosis:
+
+- **Developer options → External USB DAC** switches on `[usb] host_dac` in
+  `device_config.ini`. While it is on, `usbhostmode.c` asks
+  `usbhostprobe_begin_held()` for the port: the same journal, the same
+  Source/host writes, the same refusal when ADB, DAC mode, an export, a
+  connected UDC or an unknown PHY is in the way -- with **no deadline and no
+  unplug rule**. A dongle that re-enumerates, or is plugged in the next
+  morning, finds the port still supplying it. Only the switch ends it.
+- The row says which of those it is: *held*, *waiting for the controller*,
+  *busy* (kept, retried every three seconds), or *unsupported* (this kernel
+  exposes no role that may be forced -- not retried, since nothing about it can
+  change while the player runs). "Switched on" and "a DAC is being driven" are
+  different sentences, and the second only comes from an ALSA card.
+- ADB, DAC mode, a storage export, suspend, shutdown, a firmware update and a
+  factory reset release the port through `usbhostmode_release()`. ADB, DAC mode
+  and shutdown keep the setting, so the port returns to holding a DAC when they
+  are finished; a firmware update and a factory reset clear it, because neither
+  the recovery they boot into nor the firmware after them would know it
+  inherited a forced role. A failed release is reported and nothing else is
+  allowed the controller.
+- A reservation taken away by someone else (`usb_external_host_yielded()`) is
+  how the held role learns that ADB or DAC mode needs the port: a held role has
+  no second chance to notice, unlike the trial, which re-checks every second.
+- `[power] standby_mem` no longer waits for it: with no cable on the port the
+  role is given back on the way into the suspend and taken again after the
+  wake, rather than keeping a player in a pocket awake all night or blocking the
+  sleep behind a permanently "in use" controller.
+- The twenty-second trial stays, one row below, and refuses while the setting
+  holds the port.
+
+The old note about the trial posed one condition that fits these two reports
+badly: "connect **only** a confirmed bus-powered DAC; a charger or computer must
+not be on the port". That stays -- `Source` is a promise to supply 5 V made
+before anything is identified -- and it is why this remains a setting somebody
+switches on rather than something the poll does by itself.
+
+Not verified here: no board is in this environment. The reasoning is from the
+V1 1.3 kernel in this repository (`sw_switch_hsotg` on the x1600 PHY, the
+`tcs1421_add.ko` module and its four role names) and from the two reports. What
+still needs a device: that the role survives a played track, a standby and a
+reboot; that a DAC re-enumerates after a suspend with the setting on; and what
+the port does when a charger is plugged in while it is held. `make -C
+sonix-player/tests usbhost` now runs `test_usbhostmode` (hold, yield, retry and
+release, with the config and the probe replaced) and the held-mode half of
+`test_usbhostprobe` (no timeout, no unplug release), on top of the existing
+suites. Neither models the electrical behaviour of the socket.
+
+### On the V1: recognised at once, then silent after about ninety seconds
+
+The first board report of the setting. Both dongles behaved the same way: the
+ESR was found immediately and played for about a minute and a half, then the
+sound stopped with the player still playing and the top bar still showing the
+USB-C glyph; unplugging and replugging it brought it back for another minute and
+a half; the JCally did the same. Swapping one dongle for the other took about
+ten seconds to be noticed, and a few times a dongle was not found at all.
+
+So the role acquisition works -- the part this change was for. What fails
+afterwards is everything downstream of it, and the three things below are the
+ones this repository can actually point at. There is no board here: each is
+reasoned from the code, and the log line added last is what tells them apart on
+the next run.
+
+- **The held role is now checked, not just written.** `Source` on the TCS1421 is
+  a request to the controller's own state machine, not a setting that stays: the
+  driver re-runs its role decision on every attach and detach, and the role it
+  started in is `NormalDRP`. Two bad reads a second apart -- nothing on the host
+  bus *and* the attribute not reading `Source` -- write both controls again, no
+  more often than every five seconds. A device enumerated on the bus is proof
+  the far end is alive whatever the attribute says, and is never rewritten under.
+- **A USB device is no longer "played" out of the jack.** `open_pcm_device()`
+  falls back to `default` -- the CS43198 -- when the device it was asked for
+  will not open, which is right for headphones that walked out of range and
+  wrong for a dongle the player is itself the host of: the sound goes into a
+  socket nobody is listening to while the interface keeps the USB-C glyph up,
+  which is exactly the shape of the report. The fallback is now Bluetooth's
+  alone. The USB side gets ten seconds of retries instead of two -- a dongle
+  that has just re-enumerated needs seconds, not milliseconds, before its card
+  is back -- and a track that still cannot open says so and stops rather than
+  playing somewhere else.
+- **The wake no longer rewrites the volume chain under a live USB stream.**
+  `power_screen_on()` re-applies the volume for the CS43198's benefit after every
+  blank. That call is the whole chain, and on the USB route it ends in the
+  dongle's own control; the CS43198 is not in that path at all and a dongle on
+  the bus was never blanked. It is skipped while the USB card is the output.
+- **A second dongle is a second device.** Both land on the lowest free card
+  number, usually card 1, so the number stayed put across a swap and the new
+  device kept the old one's name and level. The poll now reads the bus name the
+  card hangs off (`1-1`) and routes again when that has moved.
+- **The health line says what the stream is doing.** Once per `HEALTH_PERIOD_MS`
+  (10 s) per track it now carries the PCM's state and how much is still queued:
+  `stream RUNNING with 4096 frames queued (92 ms)`. A RUNNING stream whose queue
+  does not go down is a device being handed frames it is not consuming; a
+  PREPARED one never started. That single clause is what separates a dead dongle
+  from a stalled decoder on the next log.
+
+`make -C sonix-player/tests usbhost` covers the first, the fourth and the
+`read_card_bus()` half of the fourth: `test_usbhostprobe` drives the rewrite on
+its slower beat and the "device on the bus is never rewritten" rule, and
+`test_usbaudio_arbitration` resolves a card's device link both ways. The audio
+fallback and the wake are compile-checked only -- there is no ALSA here and the
+host simulator cannot be linked without it.
+
+### On the V1: the ninety seconds, and a hiss under the music
+
+The log from that report (`sonix_player-neu.log`) has both answers in it, and
+neither is where the guesses above were pointing.
+
+**The ninety seconds is Bluetooth being parked.** The sequence is in the log
+five times, to the tenth of a second:
+
+```
+13:31:13.577 power: screen off after 30037 ms without input (timeout 30000 ms)
+13:32:13.442 power: parking Bluetooth after 60115 ms unused
+13:32:13.485 audio[N]: the output moves from 'plughw:3,0' to 'default'
+13:32:14.092 volume: usb-c -> 3.5 mm, 47%
+```
+
+Thirty seconds to a dark screen, a minute more before the radio is parked, and
+300 milliseconds after `park_bluetooth_now()` -> `bluetooth_set_enabled_transient(false)`
+-> `bring_stack_down()` -> `apply_output_routing()` the output was set to
+`default` -- the CS43198 -- because there was no A2DP sink. A dongle on the
+USB-C port lost the route the moment a radio it had nothing to do with was
+switched off. The player reopens the PCM on a route change and on the next
+track, so the music moved to the jack while the USB-C glyph stayed up, and
+`usbaudio_poll()` saw `active_card` still set and did nothing to correct it.
+That is why it looked like a dead dongle rather than a re-route.
+
+It is not a role problem at all, which is why re-writing `Source` and extending
+the open budget last time did not help. `apply_output_routing()` now leaves a
+`plughw:`/`hw:` route alone when it has no sink to point at: `usbaudio.c` owns
+that route and clears it when the port empties. A bluealsa route is still
+cleared, because that daemon is going away under it.
+
+**The hiss is where the level is applied.** Both dongles are quiet but not
+silent with no music, the louder one is worse, and neither a phone nor the
+stock firmware does it. That is the signature of the player holding the device's
+own mixer at 0 dB and turning the *samples* down instead: the music drops 21.5 dB
+at the log's 57% while the dongle's output amplifier still runs at full gain, so
+the music ends up that much closer to the amplifier's own noise floor. A phone
+turns the dongle's control down; the stock firmware does too. Nothing is broken
+in the dongle, and a quieter-output device hisses less for exactly this reason.
+
+`[usb] hardware_volume` now defaults to **1**: the device's control takes the
+nearest step at or above the target and the samples take the remainder, so the
+level still moves in the player's own fine steps while the attenuation happens
+where the noise floor is. On the log's `PCM Playback Volume` (0..50 over
+-50.00..0.00 dB, so 1 dB a step) index 57% puts -21.0 dB on the control and
+-0.5 dB on the samples, against 0 dB and -21.5 dB before: the same loudness at
+the ear and 21 dB less hiss.
+
+Setting `hardware_volume = 0` gets the old behaviour back, which is still the
+right answer for a device whose own control is worse than its noise floor. The
+guard rails stay: a scale that cannot be believed, a control that reads back
+unchanged, or a write that fails all fall back to the samples carrying the whole
+level, as before.
+
+One bug fell out of testing the split. The "asked for something below the top
+and it is still at the top" check used a dead band of a twentieth of the range,
+which on a short control (0..10 over 10 dB) is two whole steps -- so a write that
+landed exactly where it was told was judged to have done nothing and the control
+was given up. A headset with a coarse control would have been pushed back onto
+the samples and started hissing again. The dead band is now capped at a quarter
+of the range and also requires the read-back to differ from what was asked for.
+
+Tests: `test_usbaudio_volume` (new, in `make usbhost`) covers the split against
+a fake mixer -- the device taking the level, a coarse control still moving
+smoothly, a lying dB descriptor, a control that will not move, the old default
+on request, no control at all, and mute. `test_bluetooth` gains the routing case:
+a `plughw:` and an `hw:` route both survive a radio teardown, the jack is still
+taken back, a bluealsa route is still cleared, and a sink being connected still
+wins. Both were checked to fail against the old code before the fix.
+
+### On the V1: nothing audible below 29%
+
+The third report, after both of the above were on the machine and working: the
+ESR played, the hiss was gone, and the volume knob did nothing at all until it
+reached 29% and then came to life.
+
+That number is the whole diagnosis. Index 29 on the stock curve is -43.0 dB, and
+the ESR's own control -- `PCM Playback Volume`, 0..148 over -74.00..0.00 dB --
+stops following at about -43 dB. Everything the player asked for below that was
+therefore the device's analogue output going mute, not quieter music: a volume
+knob with a 43 dB dead stretch at the bottom, which is most of its travel.
+
+It arrived with the fix for the hiss, and in hindsight it is the same mistake
+from the other side. The hiss was the player not using the control at all; this
+was the player trusting the control's *descriptor* about how far down it goes.
+A dongle is free to declare a generous range and mute the analogue stage a third
+of the way into it, and snd_usb_audio publishes whatever the descriptor says
+without knowing any better.
+
+So the range is measured instead of believed. As the device is taken over --
+`usbaudio_poll()`, before the stream opens -- `probe_control_floor()` walks the
+control down a decibel at a time and reads it back at each step; the point where
+the read-back stops following is where the level stops being the control's
+business, with a decibel of margin so driver rounding cannot land on the step
+that failed. Past that the samples take over, so the knob is smooth and quiet all
+the way to 0 instead of dying at 29%. The walk is a few dozen USB control
+transfers, once, and it puts the control back at the top before anything is
+played through it; a control that follows its whole range costs at most a couple
+of hundred and leaves the measurement empty.
+
+Only when there is no measurement at all -- a control with no dB scale, or a
+probe that could not open the card -- does a fixed share apply: a third of the
+declared range, capped at 30 dB. Deliberately shallow, because too much on the
+samples costs some of the hiss back while too much on an unmeasurable control
+costs a dead stretch at the bottom of the knob, and the second is worse to use.
+
+On the ESR the two fixes now meet where they should: the control does the work
+from 0 to -43 dB (which is where the music actually lives) with the amplifier
+noise floor following it down, and the samples do the last 43 dB where the
+control has nothing left to give. `usbaudio:` says which happened, once per
+device, as the port is taken: `stops following below -43.0 dB; past that the
+samples do the work`, or `still follows its whole range; the top third of it is
+used`.
+
+`test_usbaudio_volume` gains the case, against a fake control that goes mute the
+way the ESR does, and against the *real* volume table rather than a stand-in --
+29% only means anything against that table. It checks that the control is never
+asked past its mute point, that 28% comes out at the level the index asks for
+with the samples carrying the difference, that every step from 40% down to 10%
+is quieter than the one above it and none of them is a mute, that the probe
+leaves the control where it found it, and that a control which never gives up is
+limited to the share instead. Checked to fail against the unprobed code first:
+without the walk, the fake is asked for value 60 of its mute point at 62.
+
 ## Bluetooth drop-outs with Wi-Fi joined, and a USB-C DAC that was never found
 
 Two reports from one test session on a V1. Neither could be reproduced here --
@@ -3197,8 +4339,9 @@ are not evidence of what the V1 actually does.
 - `geniusbuild: result 3, 4096 tracks` is the existing intentional Smart Mix
   input limit, not proof of out-of-memory. Supporting this 26k-track library
   requires a separate bounded large-library design; this patch does not change
-  that limit. The logged Bluetooth underruns predate the separate coexistence
-  changes and still need on-device verification.
+  that limit. That design is now in "Smart Mix on large libraries" above. The
+  logged Bluetooth underruns predate the separate coexistence changes and still
+  need on-device verification.
 
 Host tests: `make -C sonix-player/tests usbhost readfile`, using private mocked
 sysfs, mount/claim and LUN fixtures, and real non-seekable procfs/pipe reads,
@@ -3518,3 +4661,481 @@ fake ALSA, queue/ticket logic, and D-Bus metadata signals. It cannot substitute
 for a V1, BlueALSA and the reported senders. A Bluetooth log taken immediately
 after each separate failure is needed to distinguish link-level disconnects,
 codec negotiation and RX-worker failures.
+
+## Bluetooth RX mode that could not be left (issue #245)
+
+Pairing a Bluetooth *transmitter* from the Bluetooth page under **Paired
+Devices** puts the player into RX mode automatically, which is intended. Leaving
+that mode did not work: the confirmation came up, the player stayed on the RX
+screen, and only a reboot got out of it.
+
+The cause was in how the Bluetooth page learns the outcome of an action. That
+outcome is reported by `bluetooth_take_op_result()`, which hands a finished
+answer out exactly once so the page can act on it and move on. Four answers end
+an action -- `BT_OP_OK`, `BT_OP_PAIRED`, `BT_OP_NEEDS_RECEIVER` and
+`BT_OP_FAILED` -- but only three were being cleared. `BT_OP_NEEDS_RECEIVER`,
+the answer that says "this device connects as an A2DP source, so receiver mode
+has to come first", was handed out and left set.
+
+So after the page opened RX mode for it, the same answer was still armed. RX
+mode's own page does not poll it, so nothing acted on it while the mode was up.
+On the way out the Bluetooth page is loaded again, and its first poll runs
+immediately (`lv_timer_ready()`): it read the same stale answer and called
+`open_receiver_mode()` -- pushing the player straight back into RX mode, every
+half second, whatever the user confirmed. Connecting to a transmitter from
+inside the RX page instead asked with the receiver already wanted, which answers
+`BT_OP_OK` and *was* consumed, which is why that path always worked.
+
+`BT_OP_NEEDS_RECEIVER` is now consumed like the other three. `BT_OP_BUSY` stays
+unconsumed on purpose: it marks work still in flight rather than an answer, and
+the page relies on it staying until the real result is posted. The page also
+refuses to re-open RX mode when it is already on that screen, so a repeated
+answer could not rebuild the page under itself either.
+
+`make -C sonix-player/tests bluetooth` checks that every terminal answer is
+reported once and only once, and that `BT_OP_BUSY` is not consumed. Reverting
+the one-line fix makes that check fail. A V1 with a Bluetooth transmitter should
+still confirm the round trip on hardware.
+## Home footer's "No track loaded" line sitting off-centre
+
+The compact home screens (Tokyo Night, Amber on Black, OLED) end in a strip that
+shows the note glyph and the current track. With nothing loaded that glyph is a
+quaver and the line beside it reads *No track loaded*, and that line was drawn
+visibly higher than the glyph -- on the OLED theme it looked like it was riding
+the top edge of the card.
+
+The strip's text column reserves two lines: the title and, under it, the
+artist. Both lines are ordinary labels stacked in a centring column, so the
+column is 2 x line height whether or not anything fills its second half. With
+no track loaded the artist line was empty but still occupied its 16 px, which
+pushed the single placeholder line a full half line above the column's centre
+-- 7 px above the middle of the glyph beside it.
+
+The column now collapses to one line while no track is loaded, so the
+placeholder is centred on the glyph. A loaded track is untouched: two lines,
+title over artist, exactly where they were. The strip is sized from the line height of the
+text itself, so the collapsed column follows a custom face or the Large text
+setting without a second rule.
+
+`make -C sonix-player/tests ui` gains a check on the compact footer for every
+theme that has one: the placeholder must be within half a line of the glyph's
+centre, a playing track must still stack title over artist, dropping back to
+nothing must restore the centred placeholder, and a text-size change must not
+leave it stacked again. Reverting the fix aborts that check.
+
+## The on-screen keyboard's backspace moves into the thumb arc
+
+The delete key sat at the far end of the letter row, above and to the right of
+the accept key. On a 240 px panel that is the smallest key on the least
+convenient edge: ~31 px wide, reached diagonally rather than by the resting
+thumb.
+
+Backspace now lives on the bottom row, immediately left of the accept key on
+both panels. It shares the row with the space bar, one flex share each (~59 px
+on the V1's compact tray), so the key that corrects a mistyped letter is also
+the widest key on the board after the space bar itself, and it sits in the same
+corner pair as the accept key it is used alongside. The letter row above it
+loses nothing: the letters flex wider into the freed space. The T9 keypad gets
+the same treatment -- its backspace grew from 31 px to share the space bar's
+flex share beside the accept key. The hold-to-repeat behaviour is unchanged.
+
+Both panels were rendered at 240x320 through the off-screen LVGL renderer, and
+the Wi-Fi page and Calculator/Notes/Metronome/Pet UI suites still pass
+(`make -C sonix-player/tests .build/test_wifi_pages .build/test_tools_pages`;
+the wifi pages target currently needs `-Wno-error=missing-field-initializers`
+because `wifisettings.c` lags `popover_item_t` by one field).
+
+## Bluetooth TX routing, a receiver that survives a codec change, and the indicator that disagreed with itself (issue #265)
+
+Three of the things in that report are code, and each had a mechanism behind it
+that the log would only have shown as a symptom.
+
+**The car that gets the metadata and not the sound.** A sink publishing its
+bluealsa PCM calls `apply_output_routing()`, which moves the ALSA device name
+from the jack to `bluealsa:DEV=…`. The playback loops re-read that name only
+when they open a track: the check they run every 32 buffers watched
+`alsa_output_key()` — the 3.5 mm/4.4 mm route inside the codec — and not the
+name. So a track that was already playing when the sink appeared carried on
+going to the 3.5 mm socket until it ended or was skipped, while the interface,
+the volume curve and the car (which had the AVRCP metadata, since that is a
+different profile and comes up on its own) all said Bluetooth. Re-seating the
+IEMs did not help either, and that is the tell: that moves the route, and the
+route was not what was wrong.
+
+Both loops now compare the device name too, and reroute when either has moved
+(`output_moved()` in `audio.c`). The name the track last acted on is kept, so a
+device that has already been tried and refused is not retried every 32 buffers.
+
+**The car that never got a PCM at all.** A connection the *player* starts goes
+through `connect_device_ex()`, which asks for the A2DP profile by name when the
+ACL is up and no audio is. A connection the *car* starts — the user picks the V1
+on its screen — goes through nothing at all: bluez raises the ACL, AVRCP comes
+up, and the audio profile is only opened if this end asks. From bluez's side
+nothing has failed, so the log is silent and the sound stays in the jack. The
+worker now notices a paired, connected device that advertises an A2DP Sink (or
+is an audio device by class) with no PCM of its own, and asks for the profile
+once per link, three seconds after the link, with the polling shortened so it
+does not wait the fifteen-second backstop out (`invite_sinks()`). Never while
+the user has an action queued, never while a sink is already playing, and never
+in receiver mode, where bluealsa carries no source profile to ask with.
+
+**The receiver that only came back after being restarted.** A phone changing
+codec tears its transport down and builds the next one; bluealsa publishes no
+PCM at all in between, while the device stays connected and playing throughout.
+The capture loop treated "no PCM" as "nothing will work", so after a few seconds
+it either ended the mode or parked itself waiting for a *stream change* — an
+event that does not exist when there is no transport to change. Switching the
+MacBook from AAC to SBC and back therefore left the mode silent until it was
+switched off and on again.
+
+The loop now asks whether the *device* is still connected
+(`bluetooth_receiver_peer_connected()`) and keeps trying while it is, a few
+seconds apart, instead of waiting for an event: the PCM coming back is enough of
+a change, and the retry finds it. A sender that has actually gone still ends the
+mode, as before.
+
+**The codec indicator that said two things at once.** The page's codec line was
+published when a capture session opened; the tick in its codec menu is a
+separate read of bluealsa's own `Codec` property, refreshed every second. After
+a change the menu said AAC (bluealsa had moved) while the line above it still
+said SBC (the session had not reopened yet). The new answer is published the
+moment the watch sees it, before the reopen, so both follow bluealsa.
+
+Tests: `make -C sonix-player/tests bluetooth` covers the sink invitation (grace,
+once per link, not for a source-only phone, not in receiver mode, not during a
+user action), the session surviving a codec change with the new codec published
+before the reopen, and waiting for a PCM that is gone while the device is not.
+The routing change is a two-line predicate behind `output_moved()`; the loops
+around it need the ALSA hardware, so it is checked by reading rather than by a
+host test.
+
+Hardware validation pending: with a car, confirm the audio starts coming out of
+it without a track change and without a second connect from the player, and that
+the log carries `bluetooth: … is linked with no A2DP profile` when the car
+connected on its own. For RX, switch a MacBook between AAC and SBC three or four
+times: the mode must stay up, and `btreceiver: nothing to open … still linked,
+so trying again` is the line to look for if it does not. Nothing here touches
+the transmitter-specific stutter (SBC/aptX on a Fold 8, aptX from a SafeFly) or
+the reboots; those still need the logs from the report, which this sandbox
+could not fetch from the issue's attachments.
+
+### The reboots: what the log says, and making the next one say it
+
+The report attached `sonix_player.log` with 3.1 MB and 25 player starts across
+three builds (`061120261142`, `061120261856`, `081120260452`). Seventeen of those
+starts follow the player's own power-down path — DAC muted for power-off, output
+parked, `clock: writing … before shutdown`, RTC written — or a firmware update
+(`firmware: update file /mnt/sd_0/v1.upt`), which is what a user-initiated
+restart looks like. Eight do not: the log stops in the middle of ordinary work
+and the next line in the file is a new boot.
+
+What those eight have in common:
+
+* No `***` report. That block is written by the player's own fatal-signal
+  handler, so no thread of it took a SIGSEGV, SIGBUS or SIGABRT.
+* No `Oops`, no `Call Trace`, no `Kernel panic` line. The follower on
+  `/dev/kmsg` copies everything at warning level or worse, and would have caught
+  an oops and restarted the device itself (`restart_after_oops()`).
+* No memory pressure. The audio thread reports `MemAvailable` every 10 s and the
+  last one before the 13:00:36 stop is 17 440 kB of 56 936 kB. This is not the
+  out-of-memory killer taking the player.
+* The next boot prints `kernel: nothing kept from before this start (no pstore,
+  no /proc/last_kmsg)` — this kernel keeps nothing across a reset.
+
+So the machine went down underneath the player, and the log has no way left to
+say whether that was a panic (the player sets `kernel.panic=10`, so a panic
+reboots ten seconds later without a trace), a watchdog reset, or the power. That
+is the actual defect the report is about: eight stops in a day, none of them
+attributable.
+
+The two stops on the build the report was filed against are worth naming anyway,
+because both have a shape: the 13:00:36 one came while TIDAL streamed an AAC
+track over A2DP to the Buds2 Pro, 30 s after the Broadcom driver had started
+repeating `dhd_tcpdata_info_get: No more free tdata_psh_info!!`; the 13:01:18 one
+came eight seconds after the Buds2 Pro was back and the output had been moved to
+`bluealsa:DEV=…,PROFILE=a2dp` mid-track. Neither proves anything on its own.
+
+**`sonix_launch` now writes its verdict into the log.** It knew all along —
+`player exited with status N` or `player killed by signal N` — but only to
+stderr, which nothing keeps. It appends that line to
+`/mnt/sd_0/.local/sonix_player.log` (O_WRONLY without O_CREAT, the seek to the
+end checked, `fsync` before the reboot takes the card) so the next run can read
+it.
+
+**The next start says how the last one ended.** Before appending, the player
+reads the tail of its own log and prints one of three verdicts: the player shut
+down; `sonix_launch` recorded an exit (the line is quoted); or neither, in which
+case it says the machine went down under it, and quotes the last line — with
+`[cut off: writing stopped mid-line]` when the log stopped in the middle of one.
+That turns every future report into a one-line answer, and the third case is
+evidence in itself: a signal kill, even SIGKILL from the memory killer, leaves
+the launcher's line behind; only a dead kernel or the power does not.
+
+**The gapless line names what changed.** `gapless: different format
+(2/44100/16 against 2/44100/16), reopening` is what a reader of this log got
+when the output had moved, and it says nothing. It now says `the output device
+changed (… on 'bluealsa:DEV=…' against … on 'default')` or `the format changed`
+as the case is.
+
+Tests: `test_card_release` runs the three endings through a real start of the
+logging path in a child process each and checks what is written. The launcher is
+freestanding MIPS and is compiled for the target only.
+
+What the next report should show, in the log of the run that follows a reboot:
+
+* `log: the previous run ended: sonix_launch: player killed by signal 11,
+  rebooting` — the player died; its own `***` report is above it in the same
+  file, and the addresses in it go through `addr2line` against
+  `sonix_player_debug`.
+* `… killed by signal 9` — SIGKILL, and with `MemAvailable` fine, a kernel-side
+  kill rather than the player's own exit.
+* `log: the previous run did not shut down and sonix_launch did not record the
+  player exiting` — the machine reset. Then the trace needs the kernel: pstore
+  or a serial console, neither of which this rootfs has today.
+
+## Bluetooth RX that stayed silent after the stream died, and a car that was asked only once (issue #265)
+
+The second log from the same report is 7.5 MB of `btmon` alongside the player's
+own lines, and it holds two different failures under one heading.
+
+### Receiver mode: the PCM is there, the audio is not
+
+The log has thirty `the stream stopped: No such device` and, in between, the
+thing that actually broke the mode:
+
+```
+12:42:08  Device Disconnected  … reason 3 (Connection terminated by remote host)
+12:42:08  bluetooth: receiver stream: aptX 48000 Hz 2 ch 16 bit   ← still named
+12:42:11  btreceiver: says it is playing and nothing has arrived in 3000 ms;
+          this PCM is not the live one
+12:42:14  … the same, a second and a third time …
+12:42:18  btreceiver: 3 sessions in a row with no audio; leaving the next one alone
+12:42:34  receiver mode off
+```
+
+The three `btreceiver:` lines are a *connection reset by peer* from the sender's
+side (`HCI 0x13`, `reason 3`): the link was torn down, and bluealsa kept the PCM
+object of the transport that had died on it. Opening that object succeeds -- it
+is the same object -- and reading it never delivers a frame, which is what "this
+PCM is not the live one" says. Reopening it cannot help, and the log shows it
+cannot: three attempts, then the watchdog gave up and the mode sat silent until
+it was switched off by hand.
+
+Fourteen seconds earlier the same log has the recovery, and it is the other
+direction of the same call:
+
+1. `bluetooth: asking <MAC> to stream here (reconnecting paired source)`
+2. `Device Connected` → `a2dp_config: selected SEP` → `OPEN request succeeded`
+3. `CONFIGURED -> OPEN -> STREAMING` → `btreceiver: … is sending AAC 44100 Hz`
+
+The invitation is what produces a new stream; nothing this end can open will.
+
+**So a run of silent sessions now asks the sender for one.**
+`bluetooth_receiver_ask_to_stream()` posts a job to the Bluetooth worker, which
+calls the same `try_invite_source(…, true, …)` the receiver's own "stream here"
+button uses -- a `ConnectProfile(A2DPSource)` on the paired device, which makes
+bluez open a fresh SEP on the sender. It is posted once per run of silence (the
+job is deduplicated in the queue), only in receiver mode, and only while the
+device is still linked.
+
+The count is three because that is where the log gives up, not because three is
+special: the first two silent sessions are bluealsa's own reopen after the
+sender moved codec, and answering those with an invitation would fight the
+sender for its stream.
+
+Tests: `test_btreceiver` runs a sender that answers PLAYING with a silent PCM
+and checks that three sessions end in exactly one invitation, three handles
+closed, and nothing written; `test_bluetooth` checks the job that invitation
+posts -- one entry in the queue for two reports of silence, the sender's address
+in it, and nothing at all when there is no published PCM to ask about.
+
+### Sending direction: the Tesla, asked once and refused
+
+The same file has the car case from the earlier section, with the answers
+visible:
+
+```
+12:49:48  Name: Tesla Model Y Orca      ← paired, connected
+12:50:01  bluetooth: asking [MAC] for its A2DP stream by itself
+12:50:01  L2CAP: … Result: Connection refused - security block (0x0003)
+12:50:01  ConnectProfile(A2DP sink) -> org.bluez.Error.Failed: Resource temporarily unavailable
+12:50:08  ConnectProfile(A2DP sink) -> org.bluez.Error.Failed: Device or resource busy
+12:54:56  bluetooth: audio profile on [MAC] came up
+```
+
+Two refusals that are both transient: the AVDTP channel is not reachable until
+the link is authenticated, and bluez is still holding the previous attempt a
+moment later. The invitation was remembered as "asked" whatever came back, so
+one refusal took the rest of that link out of the picture -- and the car stayed
+silent until it was reconnected by hand five minutes later, when bluez's own
+policy reconnect brought the profile up on its own.
+
+**A refused invitation is now retried**, four seconds apart, five times per
+link, with the attempt number in the log. The next link starts again from zero,
+because the refusals belong to the old authentication. Once the profile is up,
+or the bound is reached, the device is left to bluez.
+
+Tests: `test_bluetooth` refuses the profile for a linked car and checks the
+retry spacing, the bound, and that a disconnect and reconnect asks again.
+
+## Screen timeout with the lock-screen screensaver (issue #286)
+
+LVGL counts a pointer that remains pressed as ongoing activity. On the
+screensaver lock screen, pressure against the player in a pocket could keep
+refreshing that pointer timestamp and prevent the configured screen-off timeout
+from ever expiring.
+
+While the screensaver is visible, the timeout now uses the explicit user
+activity clock instead of LVGL's repeated pointer timestamp. A real swipe still
+counts: its initial press refreshes that clock, as do physical keys, and waking
+by touch starts a fresh interval. The existing LVGL touch-idle behavior remains
+unchanged on the rest of the interface.
+
+`test_power_display` simulates a held pointer refreshing LVGL's timestamp and
+checks that it cannot hold the screensaver lit indefinitely, that a swipe
+restarts the idle window, and that ordinary pages still respect LVGL activity.
+
+## Subsonic downloads on the SD card
+
+**Streaming → Subsonic** could play a server's music but never keep it: with no
+Wi-Fi, the music was gone. A track, or the rest of the album it sits on, can now
+be saved to the card as an ordinary file and played from there afterwards.
+
+Long-pressing a track in a Subsonic list opens a three-item menu: save this
+track, save the rest of the page (which is the whole album on an album page, the
+whole directory on a folder page) and open the saved-music list. The same list
+is one tap from the arrow now in the corner of the Subsonic home page, and the
+settings page carries a paragraph explaining both. A track already on the card
+is drawn with a tick.
+
+What is saved is what would have been streamed, in the **Quality** in force:
+MP3 or Opus transcoded by the server, or the original file when Raw is chosen;
+Raw entries that are not FLAC/MP3/Opus are refused, exactly as for playback.
+Files land in `Music/Subsonic Downloads/<artist>/<album>/<artist> - <title>` —
+the `Music` folder the podcast and Qobuz downloaders already use — so the
+library, playlists and the queue treat them as local tracks, and one album
+folder holds one `cover.jpg`/`cover.png` with a hidden marker naming the album
+it belongs to, so two albums of the same name do not collide.
+
+`subsonicdl.c` follows the shape the Qobuz and podcast downloaders already use,
+because the constraints are the player's, not the service's: one detached
+low-priority worker with a 256 KiB stack (not the GUI thread, whose stack is
+shared with everything else), one job at a time, reads of 32 KiB through a
+bounded `.part` file that is renamed only once its length matches the server's
+`Content-Length`, a `.tags` sidecar for the title/artist/album the list shows,
+and no half-written track left by a cut connection, a cancellation or a card
+that went away mid-transfer. The card is re-checked on every read, `Wi-Fi` is
+kept awake for the duration through `wifi_in_use()`, and a cancel closes the
+socket from the GUI thread so a stalled read returns at once.
+
+The downloads page is a progress card (track, bar, percentage, Cancel) above
+the files already on the card, newest first; its rows play the local file and
+long-press to delete it. Deleting removes the `.tags` sidecar, and an album
+folder left holding only its cover and marker is removed, then the artist
+folder if that is empty too — nothing outside the download folder is ever
+deleted. A once-a-second timer repaints the numbers only while the page is the
+loaded screen, and it does no I/O; the page re-reads the card on load, when a
+download ends and after a delete.
+
+Files are permanent and nothing prunes them; storage is the user's budget, not
+the app's. Downloads are per quality: a track saved as MP3 256 is not treated as
+present at Opus 320, and re-downloading an album after adding a track fetches
+only the new one.
+
+Tests: `make subsonicdl` runs the worker against a real temporary card and a
+fake transport — FAT-forbidden characters and UTF-8-safe shortening, one album
+folder and one cover for four tracks, a truncated transfer leaving neither a
+file nor a `.part`, a cancelled transfer, and a delete that empties the album
+and artist folders but never anything outside them. `make subsonic-ui` now
+links the real downloads page and checks that the corner arrow opens it, that
+an empty card says so in a translated sentence, and that the page has no
+overlaps in the shipped languages.
+
+## Japanese text in MP3 tags showing as mojibake
+
+An MP3 whose artist and title are Japanese showed them as something like
+`© ä Þ Ý - é`, and filed the artist under `©`. FLAC files with the same names
+were fine, and so were Japanese folder names — so the defect was confined to
+text read out of MP3 tags, which is exactly where the two readers disagree
+about encodings.
+
+The cause is a byte the format does not honour. An ID3v2 text frame names its
+encoding in a byte of its own, and ID3v1 has no such byte at all; both are
+specified as Latin-1. A tagger on a Japanese Windows wrote Shift-JIS into that
+frame and left the byte at `0x00`, because on its own machine the text looked
+right. Read as Latin-1 the bytes become C1 and Latin-1 characters, the artist
+is filed under a punctuation mark, and the title cannot be searched for at all.
+EUC-JP, from a tagger on an older Unix, lands in the same place.
+
+`metadata.c` already knew two of the three cases: text that is really UTF-8 in
+a frame that claims Latin-1, and Windows-1251 Cyrillic written the same way
+(the machine of the person who wrote the tag, again). Japanese is the third,
+and it is the one that cannot be decided from a table: Shift-JIS, EUC-JP,
+Windows-1251 and Latin-1 all use bytes above `0x7F`, and a Japanese name, a
+Russian one and a French one look alike until the bytes are decoded.
+
+So the bytes are decoded, and the result is what decides. Shift-JIS is the one
+that can be recognised outright — its first byte is in `0x81..0x9F` for most
+of the character set, which Latin-1 never draws and Windows-1251 never uses —
+and then whichever of Shift-JIS and EUC-JP comes out as a text made of kana and
+kanji wins. Text that decodes cleanly but into Latin letters is left to
+Latin-1, so `Müller`, `Été` and `Motörhead` keep their accents and are not
+mistaken for Japanese; Cyrillic words written in Windows-1251 are still not
+kana, so Russian stays Russian.
+
+Both encodings address one character set, JIS X 0208: 94 rows of 94 cells.
+`tools/gen_jis_table.py` writes that grid once, as a UTF-8 string pool
+(`jisx0208.c`, 6878 characters in 27 KB) with one 16-bit offset per cell, so a
+reader needs a single lookup for either encoding instead of two tables. The
+generator takes the grid from Python's own EUC-JP codec and cross-checks the
+Shift-JIS arithmetic against the CP932 codec for every pair, with the six
+cells where the two standards disagree on the character named in the tool; a
+`--check` run fails if the checked-in table has drifted from the generator.
+
+The decoding itself moved out of `metadata.c` into `tagtext.c`, because it was
+already used from three places and the fourth — `id3chap.c`, which reads the
+chapter titles of an audiobook's MP3 — had a private copy that would otherwise
+have been left behind. That copy also read UTF-16 as its low bytes, so a
+chapter title above `U+00FF` came out as `?`; it now decodes UTF-16 properly
+and passes encoding-3 text through as the UTF-8 it is. Two smaller faults came
+out of the move: the Latin-1 fallback could write two bytes of a character into
+a buffer with room for only one, and the UTF-16 decoder did not consume a
+byte-order mark that the readers above it were expected to have stripped.
+
+ID3v1 (title, artist, album), ID3v2 frames in every metadata reader, WAV RIFF
+INFO, AIFF NAME/AUTH/ANNO, DSD DIAR/DITI and the audiobook chapter titles all
+read text through the one function, so a fix in one of them is a fix in all.
+Half-width katakana, which Shift-JIS writes as single bytes in `0xA1..0xDF` and
+which a rule that only looks for `0x81..0x9F` would miss, are decoded too.
+
+Nothing changes for text that was already right: UTF-8 in a Latin-1 frame,
+UTF-16 with a byte-order mark and without, Windows-1251, and Latin-1 accents
+all come out exactly as before, and FLAC/OGG tags are UTF-8 by definition and
+never take this path.
+
+Tests: `make -C sonix-player/tests tags` now covers ID3v2.3 and ID3v1 Japanese
+titles in Shift-JIS, the same name in EUC-JP, half-width katakana, ASCII mixed
+with Shift-JIS in one field, Shift-JIS and UTF-16 chapter titles read through
+`id3chap.c`, and the non-regressions — Latin-1 accents, UTF-8 in an encoding-0
+frame, Windows-1251 Cyrillic, and UTF-16 both byte orders. `python3
+tools/gen_jis_table.py --check` verifies the table against the generator, and
+`make -C sonix-player/tests sanitize` runs the whole suite under ASan and UBSan.
+The decoder was also fuzzed against 4 million exact-size output buffers, every
+one of which came back NUL-terminated with nothing written past it.
+
+## Roboto dropped from the image
+
+The 478 KB Roboto that Settings → Appearance → Font offered beside MiSans and
+Neon 80s is gone from both font trees — `sonix-player/assets/fonts` for the
+simulator and `sonix-packer/assets/V1/usr/resource/sonix/fonts` for the image —
+together with the `FONT-LICENSES.txt` beside them, which existed only to carry
+its SIL OFL notice. Nothing else used the file: the interface has always drawn
+from MiSans, and Roboto sat at the end of its own chain with MiSans behind it
+anyway, so a device that had chosen it now comes up on MiSans, the face that was
+drawing its letters it had no glyphs for.
+
+`roboto` is out of the family table in `fonts.c`, and a stored `[ui] font` of
+`roboto` — or the older `roboto_mono` the table used to translate — resolves to
+MiSans instead of logging a choice the build can no longer honour. Fonts from
+the card's `Fonts` folder are untouched, so anyone who wants Roboto back can
+drop a `.ttf` there and pick it like any other family.

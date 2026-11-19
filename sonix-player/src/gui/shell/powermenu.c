@@ -1,5 +1,8 @@
 #include "powermenu.h"
 #include "src/gui/library/browser.h"
+#ifdef HOST_WEB_EMU
+#include "webemu.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +26,8 @@
 #include "src/system/device/system.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/podcastcache.h"
+#include "src/system/streaming/jellyfincache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/streaming/radio.h"
@@ -134,10 +139,20 @@ static void do_reboot(void) {
 	radio_store_close();
 	qobuzcache_clear_on_exit();
 	tidalcache_clear_on_exit();
+	soundcloudcache_clear();
+	jellyfincache_clear_on_exit();
 	podcastcache_clear_on_exit();
 	dlna_clear_on_exit();
 	storage_release_for_shutdown();
 	sync();
+
+#ifdef HOST_WEB_EMU
+	webemu_notify_power("reboot");
+	fflush(stdout);
+	fflush(stderr);
+	webemu_shutdown();
+	_exit(43);
+#endif
 
 	// Through init, the same way down as power_shutdown(). `reboot(RB_AUTOBOOT)`
 	// restarts the machine from inside this process: init's shutdown hooks never

@@ -27,8 +27,15 @@
 #include "src/system/bluetooth/btlog.h"
 #include "src/system/device/sysserver.h"
 #include "src/system/audio/usbaudio.h"
+#include "src/system/audio/tapepads.h"
+#include "src/system/audio/taperecorder.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
+#include "src/system/audio/waveform.h"
 #include "src/system/core/utils.h"
+#include "src/system/net/wifitransfer.h"
+#include "src/system/streaming/networkmusic.h"
+#include "src/system/remote/sonixlink.h"
 #include "src/system/streaming/radio.h"
 #include "src/gui/nowplaying/cover.h"
 
@@ -217,8 +224,11 @@ bool usb_set_dac_mode(bool on) {
 		dac_owns_usb = true;
 		// The gadget must not take a controller whose forced host override
 		// could not be cleared. Cancellation serializes against a trial that
-		// is starting at the same time.
-		if (!usbhostprobe_cancel()) {
+		// is starting at the same time. The external USB DAC setting is
+		// released but kept: this player is being a sound card now, and when
+		// DAC mode is switched off the port goes back to driving a DAC of its
+		// own if that is how it was left.
+		if (!usbhostmode_release(false)) {
 			dac_owns_usb = false;
 			suppress_popups = false;
 			return false;
@@ -688,7 +698,9 @@ static bool gadget_rebind(void) {
 // the player (see the watcher), and unbinding under an exported medium left it
 // unmounted here and gone from the host, until the cable was pulled.
 bool usb_gadget_yield_to_adb(void) {
-	if (!usbhostprobe_cancel()) {
+	// Kept, not cleared: ADB is a thing the user switched on for a moment, and
+	// the port goes back to holding a DAC when it is switched off again.
+	if (!usbhostmode_release(false)) {
 		fprintf(stderr, "usb: cannot start ADB while the host override is awaiting restoration\n");
 		return false;
 	}
@@ -942,10 +954,15 @@ static bool resume_card(bool host_changed_card) {
 		char db_path[512];
 		snprintf(db_path, sizeof(db_path), "%s/.local/library.db", sd_mount);
 		library_open(db_path);
+		sonixlink_set_db_path(db_path);
 		snprintf(db_path, sizeof(db_path), "%s/.local/audiobooks.db", sd_mount);
 		audiobookdb_open(db_path);
 		snprintf(db_path, sizeof(db_path), "%s/.local/genius.db", sd_mount);
 		geniusdb_open(db_path);
+		snprintf(db_path, sizeof(db_path), "%s/.local/thumbs", sd_mount);
+		sonixlink_set_thumbs_path(db_path);
+		sonixlink_set_card_root(sd_mount);
+		waveform_set_cache_dir(sd_mount);
 		logging_resume_after_usb();
 		btlog_card_attach(sd_mount);
 		cover_set_cache_dir(sd_mount);
@@ -970,8 +987,14 @@ static bool storage_export(void) {
 	storage_active = true; // keep the card supervisor from remounting mid-export
 	storage_usb_end();
 
+	taperecorder_finish(); // no new card job can start once export is marked active
+	tapepads_release_card();
+	wifitransfer_release_card();
+	networkmusic_release_card();
 	device_state_note_storage_gone();
-	audio_stop();
+	audio_stop_and_wait(2000);
+	waveform_set_cache_dir(NULL);
+	sonixlink_set_thumbs_path(NULL);
 	library_close();
 	audiobookdb_close();
 	geniusdb_close();

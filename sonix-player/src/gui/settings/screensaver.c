@@ -260,7 +260,7 @@ void screensaver_set_visualizer(bool on) {
 	config_set_bool("screen", "screensaver_visualizer", on);
 	config_save();
 	if (screensaver_is_visible()) {
-		visualizer_enable(on && spectrum_now() && power_screen_is_on());
+		visualizer_enable(VISUALIZER_SCREENSAVER, on && spectrum_now() && power_screen_is_on());
 		if (spectrum_now()) lv_timer_resume(spectrum_timer); else { lv_timer_pause(spectrum_timer); spectrum_reset(); }
 		refresh_content();
 	}
@@ -304,7 +304,7 @@ void screensaver_set_source(screensaver_source_t chosen) {
 		drop_next();
 	}
 	if (screensaver_is_visible()) {
-		visualizer_enable(spectrum_now() && power_screen_is_on());
+		visualizer_enable(VISUALIZER_SCREENSAVER, spectrum_now() && power_screen_is_on());
 		if (spectrum_now()) lv_timer_resume(spectrum_timer); else { lv_timer_pause(spectrum_timer); spectrum_reset(); }
 		refresh_content();
 	}
@@ -922,7 +922,7 @@ void screensaver_show(void) {
 	lv_obj_set_hidden(saver, false);
 	lv_obj_move_foreground(saver);
 	lv_timer_resume(clock_timer);
-	if (spectrum_now()) { visualizer_enable(power_screen_is_on()); lv_timer_resume(spectrum_timer); }
+	if (spectrum_now()) { visualizer_enable(VISUALIZER_SCREENSAVER, power_screen_is_on()); lv_timer_resume(spectrum_timer); }
 }
 
 // Everything that has to happen once it is really gone, whether it was
@@ -932,7 +932,7 @@ static void finish_hide(void) {
 	lv_obj_set_y(saver, 0);
 	lv_timer_pause(clock_timer);
 	lv_timer_pause(spectrum_timer);
-	visualizer_enable(false);
+	visualizer_enable(VISUALIZER_SCREENSAVER, false);
 	spectrum_reset();
 	// Let go of the player's pixels: it frees them at the next track change,
 	// and nothing here may still be pointing at them by then. The picture owned
@@ -994,8 +994,8 @@ bool screensaver_prepare(void) {
 	// is waiting. Lighting up is when it is collected and swapped in -- no card,
 	// no decode, nothing between the button and the backlight.
 	bool waking = power_screen_is_on();
-	if (!waking) { visualizer_enable(false); spectrum_reset(); }
-	else if (spectrum_now()) visualizer_enable(true);
+	if (!waking) { visualizer_enable(VISUALIZER_SCREENSAVER, false); spectrum_reset(); }
+	else if (spectrum_now()) visualizer_enable(VISUALIZER_SCREENSAVER, true);
 
 	if (screensaver_is_visible()) {
 		collect_next();
@@ -1068,6 +1068,11 @@ static void drag_cb(lv_event_t *e) {
 
 	lv_event_code_t code = lv_event_get_code(e);
 	if (code == LV_EVENT_PRESSED) {
+		// Count the start of the swipe once. power.c deliberately does not
+		// trust LVGL's continuously refreshed pointer timestamp while this
+		// lock screen is visible, so a held touch in a pocket cannot keep
+		// the backlight on indefinitely.
+		power_notify_activity();
 		lv_indev_get_point(indev, &start);
 		lv_anim_delete(saver, anim_y_cb);
 		tracking = true;

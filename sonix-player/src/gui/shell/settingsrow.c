@@ -349,8 +349,9 @@ static void fit_row_label(lv_obj_t *label, int32_t width) {
 #define ROW_LABEL_GAP 12
 // The most leading icons alive at once. Twenty-five of them are built to
 // stay: eight on the Settings page (Developer options is the last of them),
-// seven on Subsonic's home and server pages, and five apiece on the Tokyo
-// Night Streaming and More lists, which the V1 builds alongside the grids.
+// seven on Subsonic's home and server pages, and five apiece on the
+// function-glyph Streaming and More lists, which the V1 builds alongside
+// the grids.
 // On top of those, a Subsonic browse page lists up to two hundred rows and
 // puts an icon on every one, so anything short of 225 leaves part of that
 // page plain -- at 24 it was the Developer options row, the twenty-fifth
@@ -362,6 +363,7 @@ typedef struct {
 	lv_obj_t *row;
 	lv_obj_t *icon;
 	theme_semantic_t tone;
+	bool accent;
 } settingsrow_leading_icon_t;
 
 typedef struct {
@@ -386,6 +388,12 @@ static lv_obj_t *settingsrow_leading_icon(lv_obj_t *row) {
 	return NULL;
 }
 
+static bool settingsrow_icon_is_accent(lv_obj_t *row) {
+    for (int i = 0; i < leading_icon_count; i++)
+        if (leading_icons[i].row == row) return leading_icons[i].accent;
+    return false;
+}
+
 static lv_obj_t *settingsrow_caption(lv_obj_t *row) {
 	for (int i = 0; i < caption_count; i++) {
 		if (captions[i].row == row) {
@@ -393,6 +401,27 @@ static lv_obj_t *settingsrow_caption(lv_obj_t *row) {
 		}
 	}
 	return NULL;
+}
+
+// How tall a wrapped description really is, capped at the three lines a row
+// has room for. Reserving all three for a one-line caption left short rows
+// top-heavy: the name and description sat above the middle while the icon and
+// chevron stayed centred on the card. Measuring the text lets the whole stack
+// move down instead.
+static int32_t caption_wrapped_height(lv_obj_t *caption, int32_t width) {
+	int32_t line_h = lv_font_get_line_height(&font_ui_14);
+	const char *text = caption ? lv_label_get_text(caption) : NULL;
+	if (!text || !text[0] || width <= 0) {
+		return line_h;
+	}
+
+	lv_point_t size;
+	lv_text_get_size(&size, text, &font_ui_14,
+					 lv_obj_get_style_text_letter_space(caption, LV_PART_MAIN), 0, width,
+					 LV_TEXT_FLAG_NONE);
+	// Explicit MIN/MAX rather than LV_CLAMP: its argument order has changed
+	// across the LVGL versions this tree has been built against.
+	return LV_MAX(line_h, LV_MIN(size.y, 3 * line_h));
 }
 
 static void settingsrow_register_refresh(void) {
@@ -420,16 +449,21 @@ static void fit_row(lv_obj_t *row) {
 	// belongs to the name. The value counts as much as the chevron: a name like
 	// Longer translated names can run into the value beside them at 24 px.
 	lv_obj_t *right = lv_obj_get_child(row, 1);
-	if (right) {
+	// Plain toggle rows reserve the switch using right padding on their label.
+	// Pill-card headers are flex rows and have no such padding, so their switch
+	// still needs an explicit width reservation.
+	bool switch_right = right && lv_obj_check_type(right, &lv_switch_class) &&
+		lv_obj_get_style_pad_right(label, LV_PART_MAIN) > 0;
+	if (right && !switch_right) {
 		avail -= lv_obj_get_width(right) + ROW_LABEL_GAP;
 	}
 
-	// Tokyo Night's optional leading glyph is appended after the normal row
-	// children, preserving the existing name/value/chevron child indices used
-	// throughout the settings UI. Its width is reserved only while the theme is
-	// enabled, so Dark and Light retain their original label position.
+	// Leading icons are appended after the normal row children, preserving the
+	// existing name/value/chevron child indices used throughout the settings UI.
+	// Function-glyph icons reserve width only in those themes; accent icons
+	// reserve it everywhere so their labels never run underneath the glyph.
 	lv_obj_t *leading = settingsrow_leading_icon(row);
-	int32_t leading_width = theme_uses_function_glyphs() && leading ? lv_obj_get_width(leading) + ROW_LABEL_GAP : 0;
+	int32_t leading_width = (theme_uses_function_glyphs() || settingsrow_icon_is_accent(row)) && leading ? lv_obj_get_width(leading) + ROW_LABEL_GAP : 0;
 	avail -= leading_width;
 
 	lv_obj_t *caption = settingsrow_caption(row);
@@ -438,21 +472,41 @@ static void fit_row(lv_obj_t *row) {
 		lv_obj_set_hidden(caption, !captioned);
 	}
 	if (captioned) {
-		// Translated descriptions can exceed a single V1 line. Give them three
-		// wrapped lines and let the page scroll rather than clipping the text.
-		lv_obj_set_height(row, 76);
+		// Translated descriptions can exceed a single V1 line. Give them up to
+		// three wrapped lines, but only as many as the words actually use, and
+		// centre the name-plus-description stack on the row. A short caption
+		// such as "Remote · controls" then lines up with the icon and chevron
+		// instead of sitting high above them.
+		int32_t text_width = LV_MAX(1, avail);
+		int32_t name_h = lv_font_get_line_height(&font_ui_18);
+		int32_t caption_h = caption_wrapped_height(caption, text_width);
+		int32_t stack_h = name_h + 7 + caption_h;
+
+		// Keep the usual three-line card, but grow it if a theme's button
+		// padding leaves less content height than the words need. Compute the
+		// wanted height from the row's padding so the style/size-changed event
+		// caused by changing it cannot put it back and fire forever.
+		int32_t row_h = lv_obj_get_height(row);
+		int32_t row_pad = LV_MAX(0, row_h - lv_obj_get_content_height(row));
+		int32_t wanted_h = LV_MAX(76, stack_h + 8 + row_pad);
+		if (row_h != wanted_h) {
+			lv_obj_set_height(row, wanted_h);
+		}
+		int32_t content_h = lv_obj_get_content_height(row);
+		int32_t top = LV_MAX(4, (content_h - stack_h) / 2);
+
 		lv_obj_set_style_text_font(label, &font_ui_18, 0);
 		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 		lv_obj_set_style_text_line_space(label, 0, 0);
-		lv_obj_set_width(label, LV_MAX(1, avail));
-		lv_obj_set_height(label, lv_font_get_line_height(&font_ui_18));
-		lv_obj_align(label, LV_ALIGN_TOP_LEFT, leading_width, 4);
+		lv_obj_set_width(label, text_width);
+		lv_obj_set_height(label, name_h);
+		lv_obj_align(label, LV_ALIGN_TOP_LEFT, leading_width, top);
 
 		lv_label_set_long_mode(caption, LV_LABEL_LONG_WRAP);
 		lv_obj_set_style_text_line_space(caption, 0, 0);
-		lv_obj_set_width(caption, LV_MAX(1, avail));
-		lv_obj_set_height(caption, 3 * lv_font_get_line_height(&font_ui_14));
-		lv_obj_align(caption, LV_ALIGN_TOP_LEFT, leading_width, lv_font_get_line_height(&font_ui_18) + 7);
+		lv_obj_set_width(caption, text_width);
+		lv_obj_set_height(caption, caption_h);
+		lv_obj_align(caption, LV_ALIGN_TOP_LEFT, leading_width, top + name_h + 7);
 		return;
 	}
 
@@ -461,6 +515,12 @@ static void fit_row(lv_obj_t *row) {
 		lv_obj_set_style_text_font(label, &font_ui_24, 0);
 	}
 	lv_obj_align(label, LV_ALIGN_LEFT_MID, leading_width, 0);
+	if (switch_right) {
+		// Toggle cards already reserve the switch with right padding on the
+		// label. Keep that reservation and only reduce its width for the glyph.
+		lv_obj_set_width(label, LV_MAX(1, avail));
+		return;
+	}
 	fit_row_label(label, avail);
 }
 
@@ -581,22 +641,27 @@ static void settingsrow_refresh_theme(void) {
 		theme_apply_slider_knob(built_sliders[i]);
 	}
 
-	bool tokyo = theme_uses_function_glyphs();
-	bool flat_rows = compact_rows() && tokyo;
+	bool function_glyphs = theme_uses_function_glyphs();
+	bool flat_rows = compact_rows() && function_glyphs;
 	for (int i = 0; i < leading_icon_count; i++) {
 		lv_obj_t *row = leading_icons[i].row;
 		lv_obj_t *icon = leading_icons[i].icon;
 		if (!row || !icon) {
 			continue;
 		}
-		settingsrow_update_edges(row, flat_rows);
-		lv_obj_set_hidden(icon, !tokyo);
+		// Navigation rows are buttons whose flat/boxed treatment changes by
+		// theme. Option cards set their own edge styles and should keep them.
+		if (lv_obj_check_type(row, &lv_button_class)) {
+			settingsrow_update_edges(row, flat_rows);
+		}
+		bool accent = leading_icons[i].accent;
+		lv_obj_set_hidden(icon, !function_glyphs && !accent);
 		lv_obj_t *label = lv_obj_get_child(row, 0);
 		if (label && lv_obj_check_type(label, &lv_label_class)) {
 			lv_obj_set_style_text_font(label, &font_ui_24, 0);
 		}
-		if (tokyo) {
-			lv_obj_set_style_image_recolor(icon, theme_semantic_color(leading_icons[i].tone), 0);
+		if (function_glyphs || accent) {
+			lv_obj_set_style_image_recolor(icon, accent ? theme()->accent : theme_semantic_color(leading_icons[i].tone), 0);
 			lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
 		} else {
 			lv_obj_remove_local_style_prop(icon, LV_STYLE_IMAGE_RECOLOR, 0);
@@ -1008,9 +1073,10 @@ static void settingsrow_icon_row_deleted_cb(lv_event_t *e) {
 	}
 }
 
-void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone) {
+static lv_obj_t *settingsrow_add_icon_internal(lv_obj_t *row, const lv_image_dsc_t *source,
+											 theme_semantic_t tone, bool accent, bool flex_leading) {
 	if (!row || !source) {
-		return;
+		return NULL;
 	}
 	if (leading_icon_count >= SETTINGSROW_MAX_LEADING_ICONS) {
 		// An icon turned away here is a miscounted cap above, not something
@@ -1019,7 +1085,7 @@ void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_sem
 		lv_obj_t *name = settingsrow_name_label(row);
 		fprintf(stderr, "settingsrow: no leading-icon slot left for %s\n",
 			name && lv_obj_check_type(name, &lv_label_class) ? lv_label_get_text(name) : "(unnamed row)");
-		return;
+		return NULL;
 	}
 
 	lv_obj_t *icon = lv_image_create(row);
@@ -1039,12 +1105,62 @@ void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_sem
 		lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
 		lv_image_set_scale(icon, (uint32_t)(LV_SCALE_NONE * target_side / max_side));
 	}
-	lv_obj_align(icon, LV_ALIGN_LEFT_MID, 0, 0);
+	if (flex_leading) {
+		lv_obj_move_to_index(icon, 0);
+	} else {
+		lv_obj_align(icon, LV_ALIGN_LEFT_MID, 0, 0);
+	}
 
-	leading_icons[leading_icon_count++] = (settingsrow_leading_icon_t){.row = row, .icon = icon, .tone = tone};
+	leading_icons[leading_icon_count++] = (settingsrow_leading_icon_t){
+		.row = row, .icon = icon, .tone = tone, .accent = accent};
 	lv_obj_add_event_cb(row, settingsrow_icon_row_deleted_cb, LV_EVENT_DELETE, NULL);
 	settingsrow_register_refresh();
 	settingsrow_refresh_theme();
+	return icon;
+}
+
+void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone) {
+	settingsrow_add_icon_internal(row, source, tone, false, false);
+}
+
+void settingsrow_add_accent_icon(lv_obj_t *row, const lv_image_dsc_t *source) {
+	settingsrow_add_icon_internal(row, source, THEME_SEMANTIC_BLUE, true, false);
+}
+
+void settingsrow_toggle_pills_add_accent_icon(lv_obj_t *card, const lv_image_dsc_t *source) {
+	if (!card || !source || lv_obj_get_child_count(card) < 2) {
+		return;
+	}
+	lv_obj_t *header = lv_obj_get_child(card, 0);
+	lv_obj_t *pills = lv_obj_get_child(card, 1);
+	if (!header || !pills || lv_obj_get_child_count(header) < 2 ||
+		!lv_obj_check_type(lv_obj_get_child(header, 0), &lv_label_class) ||
+		!lv_obj_check_type(lv_obj_get_child(header, 1), &lv_switch_class)) {
+		return;
+	}
+
+	// Insert before the title before refreshing: this header uses flex layout,
+	// unlike the ordinary rows whose label/value children have fixed indices.
+	lv_obj_t *icon = settingsrow_add_icon_internal(header, source, THEME_SEMANTIC_BLUE, true, true);
+	if (!icon) {
+		return;
+	}
+
+	// Match ordinary accent-icon rows: the title starts one ROW_LABEL_GAP after
+	// the glyph, not one flex gap after it. The smaller header gap left this
+	// title several pixels to the left of High gain, Filters and NOS.
+	lv_obj_set_style_pad_column(header, ROW_LABEL_GAP, 0);
+
+	// With the pills hidden this is an ordinary toggle row. Give the title the
+	// same minimum content height as that row so the flex track centres a
+	// wrapped title on the same midline as the single-line titles above and
+	// below it. Longer translations can still grow the track and the card.
+	int pad = compact_rows() ? 8 : 20;
+	lv_obj_set_style_min_height(lv_obj_get_child(header, 1), row_height() - 2 * pad, 0);
+
+	// Keep the option pills aligned with the title, rather than the card's
+	// icon column.
+	lv_obj_set_style_pad_left(pills, lv_obj_get_width(icon) + ROW_LABEL_GAP, 0);
 }
 
 static void settingsrow_caption_row_deleted_cb(lv_event_t *e) {

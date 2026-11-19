@@ -149,11 +149,11 @@ bool library_reorganize(void);
 // Returns whether it started.
 bool library_organize_check(void);
 
-// Called a few seconds after startup, and wherever the card is back and the
-// index reopened. Starts the run above on the scan thread when the setting is
-// on and nothing is scanning, and says whether it did. An index filed under
-// other settings than the current ones (library_reorganize) is filed again as
-// well: after the run, or on its own when the setting is off.
+// Called after the boot-time track restore, and wherever the card is back and
+// the index reopened. With Detect changes on, starts that check on the scan
+// thread when nothing is scanning and says whether it did. An index filed
+// under other settings is filed again afterwards. With Detect changes off,
+// starts no automatic work at all; manual scans and reorganization are separate.
 bool library_card_returned(const char *root);
 
 // Told about a Detect changes run: LOOKING as soon as it is asked for, on the
@@ -251,8 +251,9 @@ void library_set_log_database(bool enabled);
 // carry their exact length and an empty payload, and must be rejected by the
 // callback before dereferencing that length. Callback runs under
 // the existing index lock and must not call the library. False on SQL error,
-// cancellation or callback refusal. The bounded stream delivers at most 4097
-// rows: a Smart Mix builder accepts at most 4096, rejecting the extra row.
+// cancellation or callback refusal. The bounded stream delivers at most one
+// row past the builder's limit (GENIUSBUILD_MAX_TRACKS + 1): a Smart Mix
+// builder rejects the extra row rather than growing without bound.
 // revision identifies the input view and must still match before publication.
 typedef struct {
 	const char *path, *artist, *album, *genre;
@@ -737,6 +738,10 @@ bool library_playlist_count_is_verified(const char *path, long mtime, long size)
 // Playback state for the "remember track" option: one track plus position.
 void library_playback_state_save(const char *path, double position);
 bool library_playback_state_load(char *path_out, size_t path_size, double *position_out);
+
+// Whether the saved track still has readable backing storage. Ordinary paths
+// are checked directly; a virtual CUE track checks the sheet it belongs to.
+bool library_playback_track_readable(const char *path);
 
 // The playback queue, mirrored on disk so it survives a power cycle. Without it
 // a reboot leaves the player holding the remembered track and nothing around

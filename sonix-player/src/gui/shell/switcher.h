@@ -9,6 +9,12 @@ void screen_history_reset(void); // forget the back-stack (back goes to the menu
 void switch_screen_no_history(lv_obj_t *target_screen); // load without recording
 void switch_screen_return_to(lv_obj_t *target_screen); // discard newer history and load
 
+// True when `screen` is somewhere in the back-stack: the chevron, pressed often
+// enough, lands on it. The current page is not in the stack, only what was left
+// to get here. For a page that has to know whether the way back to it still
+// exists (the Bluetooth receiver, parked behind the equaliser).
+bool switcher_history_contains(lv_obj_t *screen);
+
 // Attach the iOS-style interactive swipe-back to a page surface (a screen or
 // a scrollable list/container that swallows presses): the page follows the
 // finger rightward, showing the previous page underneath.
@@ -41,6 +47,9 @@ void switcher_set_back_guard_peek(lv_obj_t *screen, bool (*peek)(void));
 // artwork's corner, instead of on the (hidden) title row.
 void back_btn_player_mode(bool in_player);
 
+// Choose the player chevron corner without affecting other pages.
+void back_btn_player_right_set(bool right);
+
 // True while the open player shows a loaded cover: the chevron sits on the
 // always-dark artwork backdrop, so it goes white regardless of the theme.
 void back_btn_over_cover(bool over_cover);
@@ -59,6 +68,10 @@ void back_btn_translate(int32_t x);
 // screen. For a page that wants to put something of its own on the same line as
 // the way back -- the player's Studio arrangement puts the ellipsis there.
 int back_btn_centre_y(void);
+
+// Screen bounds of the visible player chevron in its normal left slot, before
+// horizontal sheet motion or a layout-specific override of its ink inset.
+lv_area_t back_btn_player_ink_bounds(void);
 
 // How far under the top edge the chevron sits while the player is open, over
 // the offset the panel already keeps. Zero is the player as it has always

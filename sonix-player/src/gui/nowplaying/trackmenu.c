@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
@@ -12,7 +13,6 @@
 #include "src/gui/library/medialist.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/library/playlistpage.h"
-#include "src/gui/streaming/amppage.h"
 #include "src/gui/streaming/qobuzpage.h"
 #include "src/gui/streaming/tidalpage.h"
 #include "src/gui/shell/confirm.h"
@@ -29,12 +29,18 @@
 #include "src/system/library/metadata.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/core/lang.h"
+#include "src/gui/streaming/amppage.h"
 #include "src/gui/streaming/podcastpage.h"
+#include "src/system/remote/airplay.h"
+#include "src/system/remote/dlna.h"
 #include "src/system/streaming/ampkeep.h"
 #include "src/system/streaming/ampstream.h"
+#include "src/system/streaming/jellyfincache.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/streamkeep.h"
+#include "src/system/streaming/subsonicstream.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/library/library.h"
 #include "src/system/playback/playlist.h"
@@ -943,7 +949,7 @@ static void details_fill(const char *file, const song_metadata_t *tags, int bits
 	// duration, which is how dense the file is. Lossy files already carry it in
 	// the row above, and for a streamed track the cache file may be half
 	// downloaded, making the number meaningless.
-	if (!lossy && !qobuzcache_owns(file) && !tidalcache_owns(file) && duration_secs > 0.5) {
+	if (!lossy && !qobuzcache_owns(file) && !tidalcache_owns(file) && !jellyfincache_owns(file) && duration_secs > 0.5) {
 		struct stat st_kbps;
 		if (stat(file, &st_kbps) == 0 && st_kbps.st_size > 0) {
 			int avg = (int)((double)st_kbps.st_size * 8.0 / duration_secs / 1000.0 + 0.5);
@@ -973,7 +979,7 @@ static void details_fill(const char *file, const song_metadata_t *tags, int bits
 	// which may still be downloading -- a number that grows on screen by itself
 	// and describes the download, not the track.
 	struct stat st;
-	if (!qobuzcache_owns(file) && !tidalcache_owns(file) && stat(file, &st) == 0) {
+	if (!qobuzcache_owns(file) && !tidalcache_owns(file) && !jellyfincache_owns(file) && stat(file, &st) == 0) {
 		snprintf(buffer, sizeof(buffer), "%.1f MB", st.st_size / (1024.0 * 1024.0));
 		details_add_row("trackmenu_size", buffer);
 	}
@@ -985,6 +991,8 @@ static void details_fill(const char *file, const song_metadata_t *tags, int bits
 		details_add_row("trackmenu_source", "qobuz");
 	} else if (tidalcache_owns(file)) {
 		details_add_row("trackmenu_source", "tidal");
+	} else if (jellyfincache_owns(file)) {
+		details_add_row("trackmenu_source", "jellyfin");
 	} else {
 		details_add_row("trackmenu_file", file);
 	}
@@ -1076,7 +1084,7 @@ static void details_rebuild(void) {
 	// average, but only for a local file -- a streamed one may still be half
 	// downloaded and the number would climb by itself.
 	if (lossy && kbps <= 0 && !qobuzcache_owns(state.current_file) && !tidalcache_owns(state.current_file) &&
-		state.progress_total_secs > 0.5) {
+		!jellyfincache_owns(state.current_file) && state.progress_total_secs > 0.5) {
 		struct stat st_lossy;
 		if (stat(state.current_file, &st_lossy) == 0 && st_lossy.st_size > 0) {
 			kbps = (int)((double)st_lossy.st_size * 8.0 / state.progress_total_secs / 1000.0 + 0.5);
@@ -1145,6 +1153,100 @@ static void build_details_page(gui_config_t *cfg) {
 // ---------------------------------------------------------------------------
 // the popover
 // ---------------------------------------------------------------------------
+
+#define TRACKMENU_DELETE_PATH_SIZE 512
+static char delete_pending_path[TRACKMENU_DELETE_PATH_SIZE];
+
+// This action is only for a real file on the user's card. Stream caches and
+// virtual CUE entries may also have card paths, but deleting one here would
+// either break a service cache or unlink the cue sheet rather than one track.
+static bool trackmenu_delete_path_allowed(const char *path) {
+	if (!path || !path[0] || strstr(path, "?track=")) {
+		return false;
+	}
+	const char *root = playlist_card_root();
+	if (!root || !root[0]) {
+		return false;
+	}
+
+	size_t root_len = strlen(root);
+	while (root_len > 1 && root[root_len - 1] == '/') {
+		root_len--;
+	}
+	if (root_len <= 1 || strncmp(path, root, root_len) != 0 || path[root_len] != '/') {
+		return false;
+	}
+
+	// Do not turn the now-playing menu into a way to evict temporary service
+	// downloads. Their own pages know when a cached file can be removed.
+	if (qobuzcache_owns(path) || tidalcache_owns(path) || jellyfincache_owns(path) ||
+		podcastcache_owns(path) || podcastcache_is_episode(path) || soundcloudcache_is_soundcloud_path(path) ||
+		subsonicstream_owns(path) || dlna_owns_path(path) || dlna_owns_playback()) {
+		return false;
+	}
+	airplay_state_t airplay;
+	airplay_get_state(&airplay);
+	if (airplay.playing) {
+		return false;
+	}
+
+	struct stat st;
+	return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool trackmenu_can_delete(const device_state_t *state) {
+	return state && !state->live && musicsettings_allow_delete() &&
+		   trackmenu_delete_path_allowed(state->current_file);
+}
+
+static void trackmenu_delete_confirmed(void *user) {
+	(void)user;
+	char path[TRACKMENU_DELETE_PATH_SIZE];
+	if (!delete_pending_path[0]) {
+		return;
+	}
+	snprintf(path, sizeof(path), "%s", delete_pending_path);
+	delete_pending_path[0] = '\0';
+
+	// Recheck the permission and the path after the confirmation: the card may
+	// have been removed, or the setting changed, while the question was open.
+	if (!musicsettings_allow_delete() || !trackmenu_delete_path_allowed(path) || unlink(path) != 0) {
+		gui_notify_popup("medialist_cannot_delete_the_tracks");
+		return;
+	}
+
+	const char *gone[] = {path};
+	library_remove_tracks(gone, 1);
+	medialist_refresh_visible();
+	toast_success("medialist_track_deleted");
+}
+
+static void trackmenu_delete_track_cb(void *user) {
+	(void)user;
+	device_state_t state;
+	device_state_get(&state);
+	if (!trackmenu_can_delete(&state)) {
+		gui_notify_popup("medialist_cannot_delete_the_tracks");
+		return;
+	}
+
+	snprintf(delete_pending_path, sizeof(delete_pending_path), "%s", state.current_file);
+	const char *slash = strrchr(state.current_file, '/');
+	const char *title = state.metadata.title;
+	if (!title[0]) {
+		title = slash ? slash + 1 : state.current_file;
+	}
+	char message[320];
+	snprintf(message, sizeof(message), "%s\n%s", title, tr("trackmenu_delete_track_note"));
+	confirm_show("medialist_delete_from_card", message, "delete", trackmenu_delete_confirmed, NULL);
+}
+
+static void trackmenu_back_cb(void *user) {
+	(void)user;
+	// Equivalent to the player's floating chevron, available from inside the
+	// overflow menu as well: close the now-playing sheet to its previous page.
+	player_sheet_close(true);
+}
 
 static void open_queue_cb(void *user) {
 	(void)user;
@@ -1407,10 +1509,116 @@ void trackmenu_details_open(const char *path) {
 	switcher_set_player_return(NULL);
 }
 
+// ---------------------------------------------------------------------------
+// The A-B loop. One row in the track menu opens a second, focused menu:
+// the track tables are already eight to ten rows deep, and three rows of
+// their own would crowd out the entries that are there. The points are
+// marked at the position the player reports, and the progress bar shows
+// them.
+
+// The position to mark, or -1 when there is no timeline to put a point on.
+// A live stream has no position, and a track whose length is not known has
+// no scale for one.
+static double ab_markable_position(void) {
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.current_file[0] || state.live || state.progress_total_secs <= 0.0 ||
+		state.progress_current_secs < 0.0) {
+		return -1.0;
+	}
+	return state.progress_current_secs;
+}
+
+static void ab_mark_a_cb(void *user) {
+	(void)user;
+	double pos = ab_markable_position();
+	if (pos < 0.0) {
+		gui_notify_popup("ab_loop_no_position");
+		return;
+	}
+	audio_ab_set_a(pos);
+	char time[24];
+	formatDoubleSeconds(pos, time, sizeof(time));
+	char msg[48];
+	snprintf(msg, sizeof(msg), "%s %s", tr("ab_loop_a_set_at"), time);
+	toast_plain(msg);
+}
+
+static void ab_mark_b_cb(void *user) {
+	(void)user;
+	double pos = ab_markable_position();
+	if (pos < 0.0) {
+		gui_notify_popup("ab_loop_no_position");
+		return;
+	}
+	audio_ab_set_b(pos);
+	char time[24];
+	formatDoubleSeconds(pos, time, sizeof(time));
+	char msg[48];
+	snprintf(msg, sizeof(msg), "%s %s", tr("ab_loop_b_set_at"), time);
+	toast_plain(msg);
+}
+
+static void ab_clear_cb(void *user) {
+	(void)user;
+	if (audio_ab_a() < 0.0 && audio_ab_b() < 0.0) {
+		return; // nothing set: the tap has nothing to undo
+	}
+	audio_ab_clear();
+	toast_plain("ab_loop_cleared");
+}
+
+// The row the track menu opens: the second menu, anchored where the first
+// one was. The action runs after the first popover has closed, so the two
+// never overlap. Public, because the audiobook menu opens the same second
+// menu from the player (see trackmenu.h).
+void trackmenu_ab_loop_open(void *user) {
+	(void)user;
+	static const popover_item_t ITEMS[] = {
+		{"ab_loop_mark_a", ab_mark_a_cb, NULL},
+		{"ab_loop_mark_b", ab_mark_b_cb, NULL},
+		{"ab_loop_clear", ab_clear_cb, NULL},
+	};
+	// The anchor is the overflow button, when the row came from the track
+	// menu. The audiobook menu has no track menu in front of it -- its own
+	// popover was opened straight from the player -- so the anchor may never
+	// have been set; the screen is where the menu then centres itself.
+	// Not through trackmenu_show_items(): this is the menu the row reaches,
+	// not a table that may carry the row.
+	lv_obj_t *anchor = artist_menu_anchor ? artist_menu_anchor : lv_screen_active();
+	popover_show(anchor, ITEMS, (int)(sizeof(ITEMS) / sizeof(ITEMS[0])));
+}
+
+// Shows a track-menu table, dropping the A-B loop row when the playback
+// settings switch turns it off: a listener who never marks points should
+// not see the row, and the feature it reaches is not offered at all.
+//
+// The tables stay static so the string-extraction tool reads their
+// initialisers; what is filtered is the copy shown. The row is found by its
+// label, the one thing every entry of a table is guaranteed to have.
+void trackmenu_show_items(lv_obj_t *anchor, const popover_item_t *items, int count) {
+	if (musicsettings_ab_loop_enabled()) {
+		popover_show(anchor, items, count);
+		return;
+	}
+	popover_item_t without[12];
+	int n = 0;
+	for (int i = 0; i < count; i++) {
+		if (n >= (int)(sizeof(without) / sizeof(without[0]))) {
+			break;
+		}
+		if (items[i].label && strcmp(items[i].label, "ab_loop") == 0) {
+			continue;
+		}
+		without[n++] = items[i];
+	}
+	popover_show(anchor, without, n);
+}
+
 void trackmenu_open(lv_obj_t *anchor) {
-	// Two tables rather than one with the label patched at runtime, because of
-	// the string-extraction tool: it reads popover_item_t initialisers (see
-	// LABEL_STRUCTS in tools/extract_strings.py), not assignments. A
+	// Separate tables rather than changing a label after initialization,
+	// because of the string-extraction tool: it reads popover_item_t initialisers
+	// (see LABEL_STRUCTS in tools/extract_strings.py), not assignments. A
 	// "trackmenu_show_podcast" written with an equals sign would never reach the
 	// language files and would stay untranslated everywhere.
 	//
@@ -1419,53 +1627,75 @@ void trackmenu_open(lv_obj_t *anchor) {
 	// because a podcast episode has no album and calling it one would be a
 	// borrowed term to make a menu line up.
 	static const popover_item_t ITEMS[] = {
-		{"trackmenu_queue", open_queue_cb, NULL, false, false},
-		{"smartmix_start", start_genius_cb, NULL, false, false},
-		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
-		{"show_album", open_album_cb, NULL, false, false},
-		{"show_artist", open_artist_cb, NULL, false, false},
-		{"details", open_details_cb, NULL, false, false},
-		{"settings", open_settings_cb, NULL, false, false},
+		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"ab_loop", trackmenu_ab_loop_open, NULL},
+		{"smartmix_start", start_genius_cb, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"show_artist", open_artist_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
+	};
+	static const popover_item_t ITEMS_DELETE[] = {
+		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"ab_loop", trackmenu_ab_loop_open, NULL},
+		{"smartmix_start", start_genius_cb, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"trackmenu_delete_track", trackmenu_delete_track_cb, NULL},
+		{"show_artist", open_artist_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
 	};
 	static const popover_item_t ITEMS_TIDAL[] = {
-		{"trackmenu_queue", open_queue_cb, NULL, false, false},
-		{"smartmix_start", start_genius_cb, NULL, false, false},
-		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
-		{"show_album", open_album_cb, NULL, false, false},
-		{"show_artist", open_tidal_artist_cb, NULL, false, false},
-		{"details", open_details_cb, NULL, false, false},
-		{"settings", open_settings_cb, NULL, false, false},
+		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"ab_loop", trackmenu_ab_loop_open, NULL},
+		{"smartmix_start", start_genius_cb, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"show_artist", open_tidal_artist_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
 	};
 	static const popover_item_t ITEMS_PODCAST[] = {
-		{"trackmenu_queue", open_queue_cb, NULL, false, false},
-		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
-		{"trackmenu_show_podcast", open_album_cb, NULL, false, false},
-		{"details", open_details_cb, NULL, false, false},
-		{"settings", open_settings_cb, NULL, false, false},
+		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"ab_loop", trackmenu_ab_loop_open, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"trackmenu_show_podcast", open_album_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
 	};
 	// A Tidal or Qobuz track that was played from its download gains one line:
 	// the cache copies it into the library, where it stays. A table rather than
 	// a line appended at runtime for the same reason as the two above -- the
 	// string-extraction tool only reads these initialisers.
 	static const popover_item_t ITEMS_KEEP[] = {
-		{"trackmenu_queue", open_queue_cb, NULL, false, false},
-		{"smartmix_start", start_genius_cb, NULL, false, false},
-		{"add_to_playlist", add_to_playlist_cb, NULL, false, false},
-		{"show_album", open_album_cb, NULL, false, false},
-		{"show_artist", open_artist_cb, NULL, false, false},
-		{"trackmenu_keep_on_card", keep_on_card_cb, NULL, false, false},
-		{"details", open_details_cb, NULL, false, false},
-		{"settings", open_settings_cb, NULL, false, false},
+		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"ab_loop", trackmenu_ab_loop_open, NULL},
+		{"smartmix_start", start_genius_cb, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"show_artist", open_artist_cb, NULL},
+		{"trackmenu_keep_on_card", keep_on_card_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
 	};
 	// The Apple Music track's own table: its download assembles the file
 	// rather than copying one, so it gets its own action.
 	static const popover_item_t ITEMS_AMP[] = {
-		{"trackmenu_queue", open_queue_cb, NULL, false, false},
-		{"smartmix_start", start_genius_cb, NULL, false, false},
-		{"show_album", open_album_cb, NULL, false, false},
-		{"trackmenu_keep_on_card", amp_keep_cb, NULL, false, false},
-		{"details", open_details_cb, NULL, false, false},
-		{"settings", open_settings_cb, NULL, false, false},
+		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"ab_loop", trackmenu_ab_loop_open, NULL},
+		{"smartmix_start", start_genius_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"trackmenu_keep_on_card", amp_keep_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
 	};
 
 	device_state_t state;
@@ -1476,22 +1706,28 @@ void trackmenu_open(lv_obj_t *anchor) {
 	// The Tidal Downloaded list is made of files already present on the card.
 	// Offering "Download" again is both misleading and useless offline.
 	bool keepable = !podcast && !tidal_track && streamkeep_is_stream_track(state.current_file);
+	// Deletion is opt-in in Music > Settings > Library, just as it is in the
+	// library lists, and only a real user file on the card belongs here.
+	bool deletable = !keepable && !tidal_track && !podcast && trackmenu_can_delete(&state);
 
 	artist_menu_anchor = anchor;
 
 	// Smart Mix stays available on every non-podcast menu, as upstream has it.
 	// Only the episode table omits it; the Tidal and keep-on-card tables add
-	// their own action to the upstream row set.
+	// their own action to the upstream row set. A local track gets the delete
+	// row only when the existing safety setting is enabled.
 	if (amp_track) {
-		popover_show(anchor, ITEMS_AMP, (int)(sizeof(ITEMS_AMP) / sizeof(ITEMS_AMP[0])));
+		trackmenu_show_items(anchor, ITEMS_AMP, (int)(sizeof(ITEMS_AMP) / sizeof(ITEMS_AMP[0])));
 	} else if (keepable) {
-		popover_show(anchor, ITEMS_KEEP, (int)(sizeof(ITEMS_KEEP) / sizeof(ITEMS_KEEP[0])));
+		trackmenu_show_items(anchor, ITEMS_KEEP, (int)(sizeof(ITEMS_KEEP) / sizeof(ITEMS_KEEP[0])));
 	} else if (tidal_track) {
-		popover_show(anchor, ITEMS_TIDAL, (int)(sizeof(ITEMS_TIDAL) / sizeof(ITEMS_TIDAL[0])));
+		trackmenu_show_items(anchor, ITEMS_TIDAL, (int)(sizeof(ITEMS_TIDAL) / sizeof(ITEMS_TIDAL[0])));
 	} else if (podcast) {
-		popover_show(anchor, ITEMS_PODCAST, (int)(sizeof(ITEMS_PODCAST) / sizeof(ITEMS_PODCAST[0])));
+		trackmenu_show_items(anchor, ITEMS_PODCAST, (int)(sizeof(ITEMS_PODCAST) / sizeof(ITEMS_PODCAST[0])));
+	} else if (deletable) {
+		trackmenu_show_items(anchor, ITEMS_DELETE, (int)(sizeof(ITEMS_DELETE) / sizeof(ITEMS_DELETE[0])));
 	} else {
-		popover_show(anchor, ITEMS, (int)(sizeof(ITEMS) / sizeof(ITEMS[0])));
+		trackmenu_show_items(anchor, ITEMS, (int)(sizeof(ITEMS) / sizeof(ITEMS[0])));
 	}
 }
 

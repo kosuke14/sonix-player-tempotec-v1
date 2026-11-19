@@ -8,11 +8,17 @@
 
 #include "src/gui/shell/confirm.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/shell/gridpage.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/keyboard.h"
 #include "src/gui/nowplaying/player.h"
+#include "src/gui/nowplaying/coverloader.h"
+#include "src/gui/library/browser.h"
+#include "src/gui/board_profile.h"
 #include "src/gui/shell/popover.h"
 #include "src/gui/streaming/qobuzart.h"
+#include "src/gui/streaming/qobuzgenregrid.h"
+#include "src/gui/streaming/qobuzgenreorder.h"
 #include "src/gui/streaming/stockkeys_ui.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/spinner.h"
@@ -26,6 +32,7 @@
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/qobuz.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/qobuzdl.h"
 #include "src/system/streaming/streamturn.h"
 #include "src/system/streaming/qobuzsync.h"
 #include "src/system/device/system.h"
@@ -79,6 +86,7 @@ typedef enum {
 	JOB_FAV_ALBUMS,
 	JOB_USER_PLAYLISTS,
 	JOB_FEATURED,
+	JOB_GENRES,
 	JOB_PLAY,
 } job_kind_t;
 
@@ -106,6 +114,12 @@ static unsigned job_serial;
 // reading (it reads inside the async, which runs after the worker is done).
 static qobuz_track_t result_tracks[QOBUZ_MAX_HELD];
 static qobuz_album_t result_albums[QOBUZ_MAX_HELD];
+static qobuz_genre_t result_genres[QOBUZ_MAX_HELD];
+// Root genres are fetched and ranked as a whole; UI pages are slices of this
+// cache so a preferred genre on a later API page can still appear first.
+static qobuz_genre_t ordered_genres[QOBUZ_MAX_HELD];
+static int ordered_genre_count;
+static long ordered_reggae_id;
 static qobuz_artist_t result_artists[QOBUZ_MAX_HELD];
 static qobuz_playlist_t result_playlists[QOBUZ_MAX_HELD];
 static int result_count;
@@ -188,6 +202,7 @@ static void build_busy_layer(void) {
 // ---------------------------------------------------------------------------
 
 static lv_obj_t *list_container;
+static int genre_content_width;
 static lv_obj_t *list_title;
 static lv_obj_t *list_empty;
 
@@ -377,6 +392,22 @@ static void ask_playlist_delete(void *user) {
 	confirm_show("delete_the_playlist", message, "delete", do_playlist_delete, NULL);
 }
 
+static void open_dl_history_cb(lv_event_t *e);
+
+// The selection is copied by the downloader before the list can change.
+static void download_row(void *user) {
+    int format = (int)(intptr_t)user;
+    if (menu_index < 0 || menu_index >= result_count) return;
+    row_menu_t kind = row_menu_kind(list_kind);
+    bool started = false;
+    if (kind == ROW_MENU_TRACK_ADD || kind == ROW_MENU_TRACK_REMOVE)
+        started = qobuzdl_track(&result_tracks[menu_index], format);
+    else if (kind == ROW_MENU_ALBUM_ADD || kind == ROW_MENU_ALBUM_REMOVE)
+        started = qobuzdl_album(result_albums[menu_index].id_text, format);
+    if (started) open_dl_history_cb(NULL);
+    else toast_plain("Cannot start download (busy, no writable card, or signed out)");
+}
+
 static void row_menu_cb(lv_event_t *e) {
 	lv_event_stop_bubbling(e); // the tap belongs to the menu, not to the row
 	if (switcher_back_drag_active() || player_sheet_drag_active()) {
@@ -424,7 +455,19 @@ static void row_menu_cb(lv_event_t *e) {
 		return;
 	}
 
-	popover_show(lv_event_get_current_target(e), &item, 1);
+	popover_item_t items[4] = {item};
+    row_menu_t kind = row_menu_kind(list_kind);
+    int count = 1;
+    if (kind == ROW_MENU_TRACK_ADD || kind == ROW_MENU_TRACK_REMOVE ||
+        kind == ROW_MENU_ALBUM_ADD || kind == ROW_MENU_ALBUM_REMOVE) {
+        items[count++] = (popover_item_t){.label = "Download MP3", .action = download_row,
+                                         .user = (void *)(intptr_t)QOBUZ_FORMAT_MP3, .verbatim = true};
+        items[count++] = (popover_item_t){.label = "Download FLAC 16-bit", .action = download_row,
+                                         .user = (void *)(intptr_t)QOBUZ_FORMAT_CD, .verbatim = true};
+        items[count++] = (popover_item_t){.label = "Download FLAC 24-bit (up to 192 kHz)", .action = download_row,
+                                         .user = (void *)(intptr_t)QOBUZ_FORMAT_HIRES192, .verbatim = true};
+    }
+    popover_show(lv_event_get_current_target(e), items, count);
 }
 
 // Side of a row thumbnail, in pixels.
@@ -682,8 +725,8 @@ static void list_unloaded_cb(lv_event_t *e) {
 	}
 }
 
-// One list row: name on top, detail below, and -- where applicable -- the
-// ellipsis menu on the right.
+// One list row: name on top, detail below. Long-pressing the row opens the
+// per-row menu where applicable.
 //
 // The two labels form a flex column with a declared gap, each exactly one line
 // high: that is what makes the ellipsis the only possible outcome for text that
@@ -706,7 +749,7 @@ static lv_obj_t *make_row(const char *name, const char *detail, const char *cove
 	// and a button keeps the press to itself: without this neither drag works
 	// on these lists.
 	lv_obj_set_event_bubble(row, true);
-	lv_obj_add_event_cb(row, row_clicked_cb, LV_EVENT_CLICKED, (void *)(intptr_t)index);
+	lv_obj_add_event_cb(row, row_clicked_cb, LV_EVENT_SHORT_CLICKED, (void *)(intptr_t)index);
 
 	// The cover, where there is a URL for one. It starts as the grey note and
 	// becomes the real image once the thread has downloaded it: the list is
@@ -759,21 +802,9 @@ static lv_obj_t *make_row(const char *name, const char *detail, const char *cove
 		lv_obj_set_style_text_font(sub, &font_ui_18, 0);
 	}
 
-	// The ellipsis button, where the list has something to offer per entry.
+	// Long-press opens the per-row menu, where the list has something to offer per entry.
 	if (row_menu_kind(result_kind) != ROW_MENU_NONE) {
-		lv_obj_t *menu_btn = lv_btn_create(row);
-		lv_obj_set_size(menu_btn, 44, 44);
-		lv_obj_set_style_bg_opa(menu_btn, LV_OPA_TRANSP, 0);
-		lv_obj_set_style_border_width(menu_btn, 0, 0);
-		lv_obj_set_style_shadow_width(menu_btn, 0, 0);
-		lv_obj_set_style_pad_all(menu_btn, 0, 0);
-		lv_obj_add_event_cb(menu_btn, row_menu_cb, LV_EVENT_CLICKED, (void *)(intptr_t)index);
-
-		lv_obj_t *dots = lv_image_create(menu_btn);
-		lv_image_set_src(dots, &icon_ellipsis_vertical);
-		lv_obj_add_style(dots, &theme_style_icon, 0);
-		lv_obj_set_style_image_recolor_opa(dots, LV_OPA_COVER, 0);
-		lv_obj_center(dots);
+		lv_obj_add_event_cb(row, row_menu_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)index);
 	}
 
 	return row;
@@ -786,6 +817,7 @@ static void fill_list(int from) {
 	if (from == 0) {
 		art_forget_rows();
 		lv_obj_clean(list_container);
+		qobuzgenre_grid_layout(list_container, result_kind == JOB_GENRES);
 	}
 	list_kind = result_kind;
 
@@ -820,6 +852,10 @@ static void fill_list(int from) {
 			make_row(a->title, detail, a->cover, false, i);
 			break;
 		}
+        case JOB_GENRES:
+            qobuzgenre_grid_add(list_container, genre_content_width, result_genres[i].id,
+                                result_genres[i].name, result_genres[i].slug, i, ordered_reggae_id, row_clicked_cb);
+            break;
 		case JOB_SEARCH_ARTISTS: {
 			const qobuz_artist_t *a = &result_artists[i];
 			snprintf(detail, sizeof(detail), "%d album", a->album_count);
@@ -1591,9 +1627,24 @@ static void *worker_main(void *arg) {
 			snprintf(result_title, sizeof(result_title), "%s", tr("my_playlists"));
 			break;
 		case JOB_FEATURED:
-			n = qobuz_featured_albums("new-releases", off, result_albums + off, want);
-			snprintf(result_title, sizeof(result_title), "%s", tr("new_releases"));
-			break;
+            n = job.id ? qobuz_genre_new_releases(job.id, off, result_albums + off, want) :
+                         qobuz_featured_albums("new-releases", off, result_albums + off, want);
+            snprintf(result_title, sizeof(result_title), "%.150s", job.id ? job.text : tr("new_releases"));
+            break;
+        case JOB_GENRES:
+            if (off == 0) {
+                ordered_genre_count = qobuzgenre_load_ordered(ordered_genres, QOBUZ_MAX_HELD, &ordered_reggae_id);
+            }
+            if (ordered_genre_count < 0) {
+                n = -1;
+            } else {
+                n = ordered_genre_count - off;
+                if (n < 0) n = 0;
+                if (n > want) n = want;
+                memcpy(result_genres + off, ordered_genres + off, (size_t)n * sizeof(*result_genres));
+            }
+            snprintf(result_title, sizeof(result_title), "%s", tr("genre"));
+            break;
 
 		case JOB_PLAY:
 			do_play(job.index);
@@ -1752,6 +1803,13 @@ static void row_clicked_cb(lv_event_t *e) {
 	job_t job = {0};
 
 	switch (list_kind) {
+    case JOB_GENRES:
+        if (result_genres[index].id <= 0) return;
+        job.kind = JOB_FEATURED;
+        job.id = result_genres[index].id;
+        snprintf(job.text, sizeof(job.text), "%s", result_genres[index].name);
+        run(&job, "loading");
+        return;
 	case JOB_SEARCH_TRACKS:
 	case JOB_ALBUM_TRACKS:
 	case JOB_PLAYLIST_TRACKS:
@@ -2066,8 +2124,22 @@ static void open_login_cb(lv_event_t *e) {
 // ---------------------------------------------------------------------------
 
 static lv_obj_t *home_container;
+static lv_obj_t *home_grid;
 static lv_obj_t *settings_btn;
 static lv_obj_t *search_btn;
+
+// Qobuz's four destinations are the whole page, so they are drawn as the same
+// two-by-two card grid the SoundCloud, Radio and Subsonic pages use: two square
+// tiles to a row, sized from the space under the heading, and never a fifth row
+// to scroll to. Search, the settings and the downloads stay corner buttons.
+//
+// The pictures come from tools/tile_art.py, the recipe every one of those card
+// pages uses. The flat themes -- the ones that draw function glyphs instead of
+// illustrations -- put the glyph itself on the card, tinted with the theme's
+// colour, as those pages do.
+#define QOBUZ_HOME_TILES 4
+#define QOBUZ_TILE_ART_PX 48
+#define QOBUZ_TILE_GLYPH_PX 40
 
 static const int QUALITY_VALUES[4] = {QOBUZ_FORMAT_MP3, QOBUZ_FORMAT_CD, QOBUZ_FORMAT_HIRES96,
 									  QOBUZ_FORMAT_HIRES192};
@@ -2123,27 +2195,35 @@ static lv_obj_t *corner_button(gui_config_t *cfg, int slot, const lv_image_dsc_t
 // ---------------------------------------------------------------------------
 
 static lv_obj_t *qsettings_screen;
-static lv_obj_t *quality_pills[4];
+static lv_obj_t *quality_value;
 
 static void quality_refresh(void) {
-	int current = qobuz_get_format();
-	for (int i = 0; i < 4; i++) {
-		if (!quality_pills[i]) {
-			continue;
-		}
-		bool on = QUALITY_VALUES[i] == current;
-		lv_obj_set_style_bg_color(quality_pills[i], on ? theme()->accent : theme()->surface_pressed, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(quality_pills[i], 0), on ? theme_on_accent() : theme()->text_primary,
-									0);
-	}
+    if (!quality_value) return;
+    int current = qobuz_get_format();
+    for (int i = 0; i < 4; i++) {
+        if (QUALITY_VALUES[i] == current) {
+            static const char *const compact[] = {"MP3 320", "FLAC 16/44.1", "FLAC 24/96", "FLAC 24/192"};
+            lv_label_set_text(quality_value, compact[i]);
+            return;
+        }
+    }
 }
 
-static void quality_pick_cb(lv_event_t *e) {
-	if (switcher_back_drag_active()) {
-		return;
-	}
-	qobuz_set_format((int)(intptr_t)lv_event_get_user_data(e));
-	quality_refresh();
+static void quality_pick(void *user) {
+    qobuz_set_format((int)(intptr_t)user);
+    quality_refresh();
+}
+
+static void quality_open(lv_event_t *e) {
+    if (switcher_back_drag_active()) return;
+    popover_item_t items[4] = {0};
+    for (int i = 0; i < 4; i++) {
+        items[i].label = QUALITY_NAMES[i];
+        items[i].action = quality_pick;
+        items[i].user = (void *)(intptr_t)QUALITY_VALUES[i];
+        items[i].checked = qobuz_get_format() == QUALITY_VALUES[i];
+    }
+    popover_show(lv_event_get_current_target(e), items, 4);
 }
 
 static void do_logout(void *user) {
@@ -2180,57 +2260,8 @@ static void build_settings_page(gui_config_t *cfg) {
 	qsettings_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(qsettings_screen, cfg, "qobuz_settings");
 
-	// Quality: a card with the name on top and the four pills below, exactly
-	// like "DSD output" or "Replay gain" on the Music page.
-	lv_obj_t *card = lv_obj_create(container);
-	lv_obj_set_width(card, lv_pct(100));
-	lv_obj_set_height(card, LV_SIZE_CONTENT);
-	lv_obj_add_style(card, &theme_style_card, 0);
-	lv_obj_set_style_radius(card, 12, 0);
-	lv_obj_set_style_border_width(card, 0, 0);
-	lv_obj_set_style_shadow_width(card, 0, 0);
-	lv_obj_set_style_pad_all(card, 20, 0);
-	lv_obj_set_style_pad_row(card, 18, 0);
-	lv_obj_set_scrollable(card, false);
-	lv_obj_set_event_bubble(card, true);
-	lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-
-	lv_obj_t *name = lv_label_create(card);
-	lv_label_set_text(name, tr("audio_quality"));
-	lv_obj_add_style(name, &theme_style_text, 0);
-	lv_obj_set_style_text_font(name, &font_ui_24, 0);
-
-	lv_obj_t *pills = lv_obj_create(card);
-	lv_obj_set_size(pills, lv_pct(100), LV_SIZE_CONTENT);
-	lv_obj_set_style_bg_opa(pills, 0, 0);
-	lv_obj_set_style_border_width(pills, 0, 0);
-	lv_obj_set_style_pad_all(pills, 0, 0);
-	lv_obj_set_style_pad_gap(pills, 12, 0);
-	lv_obj_set_scrollable(pills, false);
-	lv_obj_set_event_bubble(pills, true);
-	lv_obj_set_flex_flow(pills, LV_FLEX_FLOW_ROW_WRAP);
-	lv_obj_set_flex_align(pills, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
-
-	for (int i = 0; i < 4; i++) {
-		lv_obj_t *btn = lv_btn_create(pills);
-		lv_obj_set_size(btn, LV_SIZE_CONTENT, 56);
-		lv_obj_set_style_pad_hor(btn, 22, 0);
-		lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
-		lv_obj_set_style_shadow_width(btn, 0, 0);
-		lv_obj_set_style_border_width(btn, 0, 0);
-		lv_obj_add_event_cb(btn, quality_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)QUALITY_VALUES[i]);
-
-		// Nearly symbols, but not quite: the decimal separator is
-		// locale-dependent ("FLAC 16/44.1" in English), so these go through
-		// tr() like everything else.
-		lv_obj_t *label = lv_label_create(btn);
-		lv_label_set_text(label, tr(QUALITY_NAMES[i]));
-		lv_obj_set_style_text_font(label, &font_ui_22, 0);
-		lv_obj_center(label);
-
-		quality_pills[i] = btn;
-	}
+    settingsrow_add(container, "audio_quality", &quality_value, quality_open, NULL);
+    lv_obj_set_style_text_font(quality_value, &font_ui_18, 0);
 
 	settingsrow_action(container, "leave", logout_cb, NULL);
 
@@ -2239,10 +2270,59 @@ static void build_settings_page(gui_config_t *cfg) {
 	switcher_attach_back_gesture(qsettings_screen);
 }
 
-static void simple_job_cb(lv_event_t *e) {
+// One of the home cards asked for a list. The grid has already dropped a tap
+// that was really a swipe, so the actions below need no event of their own.
+static void run_simple_job(job_kind_t kind) {
 	job_t job = {0};
-	job.kind = (job_kind_t)(intptr_t)lv_event_get_user_data(e);
+	job.kind = kind;
 	run(&job, "loading");
+}
+
+static void home_favourite_tracks_action(void) { run_simple_job(JOB_FAV_TRACKS); }
+static void home_favourite_albums_action(void) { run_simple_job(JOB_FAV_ALBUMS); }
+static void home_playlists_action(void) { run_simple_job(JOB_USER_PLAYLISTS); }
+static void home_genres_action(void) { run_simple_job(JOB_GENRES); }
+
+// The cards are twice a menu row's height and they are the whole page, so the
+// picture is drawn large and centred with the caption underneath in every
+// theme -- including the flat ones, whose menu rows would put the glyph beside
+// the text. Dark and Light show the illustrations at the size the generator
+// emits them; the flat themes show the glyph in their own accent.
+static void home_style_tiles(void) {
+	if (!home_grid) {
+		return;
+	}
+	static const lv_image_dsc_t *const art[QOBUZ_HOME_TILES] = {
+		&icon_menu_qobuz_favourites,
+		&icon_menu_qobuz_albums,
+		&icon_menu_qobuz_playlists,
+		&icon_menu_qobuz_genres,
+	};
+	static const lv_image_dsc_t *const glyphs[QOBUZ_HOME_TILES] = {
+		&icon_qobuz_favourites_glyph,
+		&icon_qobuz_albums_glyph,
+		&icon_qobuz_playlists_glyph,
+		&icon_qobuz_genres_glyph,
+	};
+	// The tones match the illustrations' own hues, so the flat themes keep the
+	// colour coding the cards have in Dark and Light.
+	static const theme_semantic_t tones[QOBUZ_HOME_TILES] = {
+		THEME_SEMANTIC_PURPLE,
+		THEME_SEMANTIC_BLUE,
+		THEME_SEMANTIC_CYAN,
+		THEME_SEMANTIC_GREEN,
+	};
+	bool glyph = theme_uses_function_glyphs();
+	for (int i = 0; i < QOBUZ_HOME_TILES; i++) {
+		// Both pictures are rendered at exactly the size they are drawn at, so
+		// a card shows its own pixels and never a resampled copy of them.
+		gridpage_set_tile_icon_style(home_grid, i, glyph ? glyphs[i] : art[i],
+									 glyph ? QOBUZ_TILE_GLYPH_PX : QOBUZ_TILE_ART_PX, glyph,
+									 theme_semantic_color(tones[i]), false);
+		// Picture above, caption underneath, in every theme. Re-applying the
+		// layout also measures the caption against the picture's new width.
+		gridpage_set_tile_orientation(home_grid, i, false);
+	}
 }
 
 // The "Wi-Fi settings" row of the no-network notice, as on the transfer page:
@@ -2267,20 +2347,23 @@ static bool wifi_is_connected(void) {
 #endif
 }
 
+// The page has one of four states, and only the last of them has anything a
+// card can lead to. The tiles take the panel in that state and the container
+// -- two rows at most -- takes it in the other three, so the page is never a
+// grid of dead cards above a sentence saying what is missing.
 static void rebuild_home(void) {
 	lv_obj_clean(home_container);
 
-	if (!qobuz_configured()) {
-		update_corner_buttons();
-		stockkeys_ui_populate_missing(home_container, rebuild_home);
-		return;
-	}
+	bool ready = false;
 
-	// The network comes before the login, and not the other way round: signing
-	// in is a conversation with Qobuz's servers, so with no network the "Sign
-	// in" row could only fail. The notice says what is actually missing.
-	if (!wifi_is_connected()) {
-		update_corner_buttons();
+	if (!qobuz_configured()) {
+		stockkeys_ui_populate_missing(home_container, rebuild_home);
+	} else if (!wifi_is_connected()) {
+		// The network comes before the login, and not the other way round:
+		// signing in is a conversation with Qobuz's servers, so with no network
+		// the "Sign in" row could only fail. The notice says what is actually
+		// missing.
+		//
 		// The same notice as the Wi-Fi transfer page: centred message, with the
 		// "Wi-Fi settings" row below leading to where it is fixed.
 		lv_obj_t *note = lv_label_create(home_container);
@@ -2294,22 +2377,16 @@ static void rebuild_home(void) {
 		lv_label_set_text(note, tr("enable_wi_fi_first"));
 		lv_obj_t *row = settingsrow_add(home_container, "wi_fi_settings", NULL, open_wifi_settings_cb, NULL);
 		lv_obj_set_style_margin_top(row, 16, 0);
-		return;
-	}
-
-	if (!qobuz_logged_in()) {
-		update_corner_buttons();
+	} else if (!qobuz_logged_in()) {
 		settingsrow_add(home_container, "sign_in", NULL, open_login_cb, NULL);
-		return;
+	} else {
+		ready = true;
 	}
 
-	// No "Search" row: it is the magnifier in the corner, where it sits on
-	// every other searchable page.
-	settingsrow_add(home_container, "favourite_tracks", NULL, simple_job_cb, (void *)(intptr_t)JOB_FAV_TRACKS);
-	settingsrow_add(home_container, "favourite_albums", NULL, simple_job_cb, (void *)(intptr_t)JOB_FAV_ALBUMS);
-	settingsrow_add(home_container, "my_playlists", NULL, simple_job_cb, (void *)(intptr_t)JOB_USER_PLAYLISTS);
-	settingsrow_add(home_container, "new_releases", NULL, simple_job_cb, (void *)(intptr_t)JOB_FEATURED);
-
+	if (home_grid) {
+		lv_obj_set_hidden(home_grid, !ready);
+	}
+	lv_obj_set_hidden(home_container, ready);
 	update_corner_buttons();
 }
 
@@ -2327,6 +2404,207 @@ bool qobuzpage_open_album(const char *album_id, const char *title) {
 	return true;
 }
 
+// History is derived from completed files, so it survives restarts and never
+// points at failed or cache-evicted downloads. It is available without Wi-Fi.
+#define DL_HISTORY_LIMIT 100
+static lv_obj_t *dl_history_screen;
+static lv_obj_t *dl_history_container;
+static qobuzdl_entry_t dl_entries[DL_HISTORY_LIMIT];
+static int dl_entry_count;
+typedef struct {
+    char folder[768]; // empty for a legacy loose track
+    int entry;
+    lv_obj_t *thumb;
+    cover_image_t cover;
+} download_row_t;
+static download_row_t dl_rows[DL_HISTORY_LIMIT];
+static int dl_row_count;
+static int dl_cover_next;
+static int dl_cover_slot[COVERLOADER_QOBUZ_DOWNLOAD_COUNT];
+static bool dl_was_busy;
+static lv_obj_t *dl_progress_bar;
+static lv_obj_t *dl_progress_title;
+static lv_obj_t *dl_progress_amount;
+
+static void dl_progress_paint(const qobuzdl_progress_t *p) {
+    if (!dl_progress_bar) return;
+    lv_label_set_text(dl_progress_title, p->title[0] ? p->title : "Preparing download");
+    int track_percent = p->bytes_total ? (int)(100.0 * (double)p->bytes_done / (double)p->bytes_total) : -1;
+    if (track_percent > 100) track_percent = 100;
+    int percent = track_percent;
+    if (p->album && p->total_tracks > 0) {
+        double fraction = track_percent >= 0 ? track_percent / 100.0 : 0;
+        percent = (int)(100.0 * (p->completed_tracks + fraction) / p->total_tracks);
+        if (percent > 100) percent = 100;
+        lv_label_set_text_fmt(dl_progress_amount, "Album %d%% (estimate) · %d / %d%s", percent,
+                              p->completed_tracks, p->total_tracks, p->failed_tracks ? " (some failed)" : "");
+    } else if (track_percent >= 0) {
+        if (p->album) lv_label_set_text_fmt(dl_progress_amount, "Track %d · %d%%", p->completed_tracks + 1, track_percent);
+        else lv_label_set_text_fmt(dl_progress_amount, "%d%%", track_percent);
+    } else {
+        if (p->album) lv_label_set_text_fmt(dl_progress_amount, "Track %d · size unknown", p->completed_tracks + 1);
+        else lv_label_set_text(dl_progress_amount, "Preparing or size unknown");
+    }
+    lv_bar_set_value(dl_progress_bar, percent < 0 ? 0 : percent, LV_ANIM_OFF);
+}
+
+static void dl_progress_build(void) {
+    lv_obj_t *card = lv_obj_create(dl_history_container);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_add_style(card, &theme_style_card, 0);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_set_style_pad_row(card, 8, 0);
+    lv_obj_set_scrollable(card, false);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    dl_progress_title = lv_label_create(card);
+    lv_obj_set_width(dl_progress_title, lv_pct(100));
+    lv_label_set_long_mode(dl_progress_title, LV_LABEL_LONG_DOT);
+    lv_obj_add_style(dl_progress_title, &theme_style_text, 0);
+    lv_obj_set_style_text_font(dl_progress_title, &font_ui_20, 0);
+    dl_progress_bar = lv_bar_create(card);
+    lv_obj_set_size(dl_progress_bar, lv_pct(100), 12);
+    lv_bar_set_range(dl_progress_bar, 0, 100);
+    lv_obj_set_style_bg_color(dl_progress_bar, theme()->surface_pressed, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(dl_progress_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(dl_progress_bar, theme()->accent, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(dl_progress_bar, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_radius(dl_progress_bar, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+    dl_progress_amount = lv_label_create(card);
+    lv_obj_set_width(dl_progress_amount, lv_pct(100));
+    lv_label_set_long_mode(dl_progress_amount, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(dl_progress_amount, &theme_style_text_dim, 0);
+    lv_obj_set_style_text_font(dl_progress_amount, &font_ui_18, 0);
+}
+
+
+static void dl_history_play(lv_event_t *e) {
+    int index = (int)(intptr_t)lv_event_get_user_data(e);
+    if (index < 0 || index >= dl_row_count || switcher_back_drag_active()) return;
+    download_row_t *row = &dl_rows[index];
+    if (row->folder[0]) {
+        browser_open_dir_public(row->folder);
+        switch_screen(browser_screen);
+    } else {
+        const char *paths[1] = {dl_entries[row->entry].path};
+        device_state_play_list_ordered(paths, 1, 0);
+        switch_screen(player_screen);
+    }
+}
+
+static void dl_cover_schedule(int slot) {
+    if (dl_cover_next >= dl_row_count) { dl_cover_slot[slot] = -1; return; }
+    int index = dl_cover_next++;
+    dl_cover_slot[slot] = index;
+    coverloader_request(COVERLOADER_QOBUZ_DOWNLOAD_BASE + slot,
+                        dl_entries[dl_rows[index].entry].path, bp_pick(36, 60));
+}
+
+static void dl_cover_poll(void) {
+    for (int i = 0; i < COVERLOADER_QOBUZ_DOWNLOAD_COUNT; i++) {
+        int index = dl_cover_slot[i];
+        if (index < 0 || index >= dl_row_count) continue;
+        bool finished = false;
+        bool found = coverloader_take(COVERLOADER_QOBUZ_DOWNLOAD_BASE + i, &dl_rows[index].cover, &finished);
+        if (!finished) continue;
+        if (found && dl_rows[index].thumb) {
+            lv_obj_remove_style(dl_rows[index].thumb, &theme_style_icon, 0);
+            lv_obj_set_style_image_recolor_opa(dl_rows[index].thumb, LV_OPA_TRANSP, 0);
+            lv_image_set_src(dl_rows[index].thumb, &dl_rows[index].cover.dsc);
+        }
+        dl_cover_schedule(i);
+    }
+}
+
+static void dl_history_refresh(void) {
+    for (int i = 0; i < COVERLOADER_QOBUZ_DOWNLOAD_COUNT; i++) coverloader_release(COVERLOADER_QOBUZ_DOWNLOAD_BASE + i);
+    lv_obj_clean(dl_history_container);
+    for (int i = 0; i < dl_row_count; i++) cover_free(&dl_rows[i].cover);
+    memset(dl_rows, 0, sizeof(dl_rows));
+    dl_row_count = dl_cover_next = 0;
+    dl_progress_bar = dl_progress_title = dl_progress_amount = NULL;
+    dl_entry_count = qobuzdl_history(dl_entries, DL_HISTORY_LIMIT);
+    dl_was_busy = qobuzdl_busy();
+    if (dl_was_busy) {
+        qobuzdl_progress_t p;
+        dl_progress_build();
+        qobuzdl_progress(&p);
+        dl_progress_paint(&p);
+    }
+    if (!dl_entry_count) settingsrow_add(dl_history_container, "No completed downloads", NULL, NULL, NULL);
+    char base[768];
+    snprintf(base, sizeof(base), "%s/Music/Qobuz Downloads", storage_sd_root() ? storage_sd_root() : "");
+    for (int i = 0; i < dl_entry_count; i++) {
+        char folder[768];
+        snprintf(folder, sizeof(folder), "%s", dl_entries[i].path);
+        char *slash = strrchr(folder, '/');
+        if (!slash) continue;
+        *slash = 0;
+        bool album = strcmp(folder, base) != 0;
+        bool seen = false;
+        if (album) for (int j = 0; j < dl_row_count; j++)
+            if (!strcmp(dl_rows[j].folder, folder)) { seen = true; break; }
+        if (seen) continue;
+        int index = dl_row_count++;
+        download_row_t *d = &dl_rows[index];
+        d->entry = i;
+        if (album) snprintf(d->folder, sizeof(d->folder), "%s", folder);
+        lv_obj_t *row = lv_btn_create(dl_history_container);
+        lv_obj_set_size(row, lv_pct(100), bp_pick(48, 88));
+        lv_obj_add_style(row, &theme_style_card, 0);
+        lv_obj_add_style(row, &theme_style_card_pressed, LV_STATE_PRESSED);
+        lv_obj_set_style_pad_hor(row, bp_pick(6, 14), 0);
+        lv_obj_set_style_pad_column(row, 8, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_event_bubble(row, true);
+        lv_obj_add_event_cb(row, dl_history_play, LV_EVENT_CLICKED, (void *)(intptr_t)index);
+        d->thumb = lv_image_create(row);
+        lv_obj_set_size(d->thumb, bp_pick(36, 60), bp_pick(36, 60));
+        lv_image_set_inner_align(d->thumb, LV_IMAGE_ALIGN_CENTER);
+        lv_image_set_src(d->thumb, album ? &icon_album : &icon_music2);
+        lv_obj_add_style(d->thumb, &theme_style_icon, 0);
+        lv_obj_set_style_image_recolor_opa(d->thumb, LV_OPA_COVER, 0);
+        char title[384];
+        if (album) {
+            const char *name = strrchr(folder, '/');
+            snprintf(title, sizeof(title), "%.383s", name ? name + 1 : folder);
+            // Old album folders carried the Qobuz id after the year.
+            char *suffix = strrchr(title, '[');
+            size_t len = strlen(title);
+            if (suffix && suffix > title && suffix[-1] == ' ' && len && title[len-1] == ']' && suffix >= title+2 && suffix[-2] == ')') suffix[-1] = 0;
+        } else snprintf(title, sizeof(title), "%.128s%s%.199s", dl_entries[i].artist,
+                        dl_entries[i].artist[0] ? " - " : "", dl_entries[i].title);
+        lv_obj_t *label = lv_label_create(row);
+        lv_label_set_text(label, title);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_flex_grow(label, 1);
+        lv_obj_set_style_max_height(label, 2 * lv_font_get_line_height(&font_ui_20), 0);
+        lv_obj_add_style(label, &theme_style_text, 0);
+        lv_obj_set_style_text_font(label, &font_ui_20, 0);
+    }
+    coverloader_start();
+    for (int i = 0; i < COVERLOADER_QOBUZ_DOWNLOAD_COUNT; i++) dl_cover_schedule(i);
+}
+
+static void dl_history_tick(lv_timer_t *timer) {
+    (void)timer;
+    if (lv_screen_active() != dl_history_screen) return;
+    qobuzdl_progress_t p;
+    qobuzdl_progress(&p);
+    if (dl_was_busy != p.running) dl_history_refresh();
+    else if (p.running) dl_progress_paint(&p);
+    dl_cover_poll();
+}
+
+static void open_dl_history_cb(lv_event_t *e) {
+    (void)e;
+    dl_history_refresh();
+    switch_screen(dl_history_screen);
+}
+
 static void home_loaded_cb(lv_event_t *e) {
 	(void)e;
 	// The card may have been inserted or removed since the page was built, and
@@ -2342,7 +2620,12 @@ static void home_loaded_cb(lv_event_t *e) {
 
 // ---------------------------------------------------------------------------
 
+static void genre_theme_refresh(void) {
+	if (list_kind == JOB_GENRES) qobuzgenre_grid_refresh(list_container);
+}
+
 static void build_list_page(gui_config_t *cfg) {
+	genre_content_width = (int)cfg->screen_width - 2 * cfg->padding;
 	list_screen = lv_obj_create(NULL);
 	lv_obj_add_event_cb(list_screen, list_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	lv_obj_add_event_cb(list_screen, list_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
@@ -2373,13 +2656,41 @@ void qobuzpage_init(gui_config_t *cfg) {
 	qobuz_screen = lv_obj_create(NULL);
 	home_container = settingsrow_page(qobuz_screen, cfg, "qobuz");
 
-	// Two buttons top right, like the Music gear: settings and search. The title
+	// Three buttons top right: settings, search and downloads. The title
 	// must be told the corner is taken, otherwise its text runs under them.
-	settingsrow_title_corner_slots(settingsrow_page_title(qobuz_screen), cfg, 2);
+	settingsrow_title_corner_slots(settingsrow_page_title(qobuz_screen), cfg, 3);
 	settings_btn = corner_button(cfg, 0, &icon_music_settings, open_settings_cb);
 	search_btn = corner_button(cfg, 1, &icon_search, open_search_cb);
+    corner_button(cfg, 2, &icon_download, open_dl_history_cb);
+    dl_history_screen = lv_obj_create(NULL);
+    dl_history_container = settingsrow_page(dl_history_screen, cfg, "Download history");
+    switcher_attach_back_gesture(dl_history_screen);
+    player_sheet_attach_drag(dl_history_screen, true);
+    player_sheet_attach_drag(dl_history_container, true);
+    lv_timer_create(dl_history_tick, 1000, NULL);
+
+	// Four destinations, so two square tiles fill the panel under the heading
+	// exactly. New releases are reached through their genre -- the same four
+	// cards, no fifth -- so the section is the genre picker and nothing else.
+	const grid_entry_t home_entries[] = {
+		{"favourite_tracks", &icon_menu_qobuz_favourites, NULL, home_favourite_tracks_action},
+		{"favourite_albums", &icon_menu_qobuz_albums, NULL, home_favourite_albums_action},
+		{"my_playlists", &icon_menu_qobuz_playlists, NULL, home_playlists_action},
+		{"new_releases_by_genre", &icon_menu_qobuz_genres, NULL, home_genres_action},
+	};
+	home_grid = gridpage_build(qobuz_screen, cfg, home_entries, QOBUZ_HOME_TILES, 2, 2, true);
+	// "New releases by genre" is longer than a card, and so is its translation
+	// in every language but English ("Nouveautés par genre", "Neuheiten nach
+	// Genre"), so the captions get two lines instead of an ellipsis after the
+	// first.
+	for (int i = 0; i < QOBUZ_HOME_TILES; i++) {
+		gridpage_set_tile_label_lines(home_grid, i, 2);
+	}
+	home_style_tiles();
+	theme_register_refresh(home_style_tiles);
 
 	build_list_page(cfg);
+	theme_register_refresh(genre_theme_refresh);
 	build_search_page(cfg);
 	build_settings_page(cfg);
 	build_login_page(cfg);

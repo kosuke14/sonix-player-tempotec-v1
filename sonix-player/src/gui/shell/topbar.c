@@ -16,6 +16,8 @@
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/quickpanel.h"
 #include "src/gui/shell/theme.h"
+#include "src/gui/shell/statusbarstyle.h"
+#include "src/gui/shell/volumereadout.h"
 #include "src/system/remote/airplay.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/audio/audio.h"
@@ -88,6 +90,25 @@ static int battery_icon_size = BATTERY_ICON_SIZE;
 #define FLICK_OPEN_PX 24
 
 static lv_obj_t *top_bar;
+static bool player_color_enabled;
+static lv_color_t player_color;
+static bool player_ground_enabled;
+static bool player_ground_dark;
+static bool player_palette_enabled;
+static lv_color_t player_palette_accent;
+static void topbar_apply_player_ink(void);
+
+static void topbar_apply_player_color(void) {
+	if (!top_bar) return;
+	topbar_apply_player_ink();
+}
+
+void topbar_set_player_color(bool enabled, lv_color_t color) {
+	player_color_enabled = enabled;
+	player_color = color;
+	topbar_apply_player_color();
+}
+
 static lv_obj_t *bat_widget;
 static lv_obj_t *bat_fill;
 static lv_obj_t *bat_shell;
@@ -111,6 +132,51 @@ static lv_timer_t *battery_timer;
 static lv_timer_t *jack_timer;
 static int last_jack_state = -1;
 static int last_usb_audio_state = -1;
+
+// Tint the requested glyphs and all parts of the battery icon while leaving
+// the background, text, signal strength, and battery level/visibility intact.
+// When a dark player-layout ground (Vinyl/Sticker) overrides a light or themed
+// status bar, keep the text and icons readable on that dark ground too.
+static void topbar_apply_player_ink(void) {
+	bool dark_ground_on_light = player_ground_enabled && player_ground_dark && !theme()->dark;
+	bool light_text = player_palette_enabled || dark_ground_on_light;
+	lv_color_t fg = (player_ground_enabled && player_ground_dark) ? lv_color_white() : theme()->text_primary;
+
+	bool tint_icons = false;
+	bool tint_fill = false;
+	lv_color_t ink = lv_color_white();
+	if (player_palette_enabled) {
+		tint_icons = true;
+		tint_fill = true;
+		ink = player_palette_accent;
+	} else if (player_color_enabled) {
+		tint_icons = true;
+		tint_fill = true;
+		ink = statusbarstyle_ink(player_color, fg);
+	} else if (dark_ground_on_light) {
+		tint_icons = true;
+		ink = lv_color_white();
+	}
+
+	lv_obj_t *icons[] = {vol_icon, play_icon, wifi_icon, bt_icon, bat_shell, bat_bolt};
+	for (size_t i = 0; i < sizeof(icons) / sizeof(icons[0]); i++)
+		statusbarstyle_icon(icons[i], tint_icons, ink);
+	statusbarstyle_fill(bat_fill, tint_fill, ink);
+
+	lv_obj_t *labels[] = {clock_label, bat_label};
+	for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+		if (!labels[i]) continue;
+		if (light_text)
+			lv_obj_set_style_text_color(labels[i], lv_color_white(), LV_STATE_USER_1);
+		lv_obj_set_state(labels[i], LV_STATE_USER_1, light_text);
+	}
+	statusbarstyle_icon(hp_icon, light_text && (last_usb_audio_state || last_jack_state != JACK_BALANCED),
+						player_palette_enabled ? player_palette_accent : lv_color_white());
+	statusbarstyle_icon(library_icon, light_text,
+						player_palette_enabled ? player_palette_accent : lv_color_white());
+	statusbarstyle_icon(sonixlink_icon, light_text,
+						player_palette_enabled ? player_palette_accent : lv_color_white());
+}
 
 // The last battery reading painted. Kept here rather than inside the poll so a
 // theme switch can throw it away: the poll only repaints when the reading has
@@ -274,6 +340,16 @@ static void refresh_status_icon_color(lv_obj_t *icon) {
 // so a measure that came up short would let it grow, never wrap the number onto
 // a second line. The number keeps to the side of the glyph that says what it
 // means; the spare room opens up after it.
+//
+// What "every reading" is belongs to volumereadout.h, because the number is not
+// the only thing this label prints: with Settings > Screen > Volume as voltage
+// on it reads "502mV", and then the widest reading is one of the voltages --
+// about twice the width of "100" in MiSans, which the clock makes room for the
+// way it does for a glyph (place_clock()). The form measured for is kept, so
+// that the label is measured again when the reading changes form and not on
+// every step of the level.
+static int vol_fitted_form = -1; // a volumereadout_form_t; -1 is "not measured"
+
 static void fit_volume_label(void) {
 	if (!vol_label) {
 		return;
@@ -282,9 +358,8 @@ static void fit_volume_label(void) {
 	const lv_font_t *font = lv_obj_get_style_text_font(vol_label, LV_PART_MAIN);
 	int32_t letter_space = lv_obj_get_style_text_letter_space(vol_label, LV_PART_MAIN);
 	int32_t widest = 0;
-	for (int percent = 0; percent <= 100; percent++) {
-		char text[8];
-		snprintf(text, sizeof(text), "%d", percent);
+	char text[VOLUMEREADOUT_TEXT_MAX];
+	for (int i = 0; volumereadout_sample(i, text, sizeof(text)); i++) {
 		lv_point_t size;
 		lv_text_get_size(&size, text, font, letter_space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
 		if (size.x > widest) {
@@ -292,9 +367,13 @@ static void fit_volume_label(void) {
 		}
 	}
 	lv_obj_set_style_min_width(vol_label, widest, 0);
+	vol_fitted_form = (int)volumereadout_form();
 }
 
-// Volume, as a number with the glyph that matches its level.
+// Volume, as a reading with the glyph that matches its level. The reading is
+// the index unless the user has asked for the voltage (volumereadout.h); the
+// glyph goes by the index either way, since it says where on the scale the
+// level is and not how loud that turns out to be.
 void topbar_refresh_volume(int percent) {
 	if (!vol_label) {
 		return;
@@ -307,7 +386,15 @@ void topbar_refresh_volume(int percent) {
 		percent = 100;
 	}
 
-	lv_label_set_text_fmt(vol_label, "%d", percent);
+	// Number or voltage, and for which socket: when that has changed since
+	// the label was measured, its width is for readings it no longer shows.
+	if ((int)volumereadout_form() != vol_fitted_form) {
+		fit_volume_label();
+	}
+
+	char text[VOLUMEREADOUT_TEXT_MAX];
+	volumereadout_text(percent, text, sizeof(text));
+	lv_label_set_text(vol_label, text);
 
 	// Keep the main-screen volume number white at every level.
 	lv_obj_set_style_text_color(vol_label, lv_color_white(), 0);
@@ -387,6 +474,7 @@ static void refresh_headphone_icon(bool force) {
 			lv_obj_remove_local_style_prop(hp_icon, LV_STYLE_IMAGE_RECOLOR_OPA, 0);
 		}
 		lv_obj_set_hidden(hp_icon, false);
+		topbar_apply_player_ink();
 		return;
 	}
 	lv_image_set_src(hp_icon, &icon_headphones);
@@ -412,6 +500,7 @@ static void refresh_headphone_icon(bool force) {
 		lv_obj_remove_local_style_prop(hp_icon, LV_STYLE_IMAGE_RECOLOR, 0);
 		lv_obj_remove_local_style_prop(hp_icon, LV_STYLE_IMAGE_RECOLOR_OPA, 0);
 	}
+	topbar_apply_player_ink();
 }
 
 // Called before the wake repaint so a cable removed while the screen was dark
@@ -675,6 +764,31 @@ static void refresh_play_icon(const device_state_t *state) {
 	lv_obj_set_hidden(play_icon, false);
 }
 
+// A voltage moves with things the index does not: the gain switch, a DSD track
+// starting or ending (its compensation is in force only while one plays), and
+// the sound going over to Bluetooth or a USB-C DAC, which takes the reading
+// back to the number. None of those is a volume change and none announces
+// itself here, so left to the five-second poll the bar would go on showing,
+// for up to that long, a level that is no longer the one at the socket. The
+// reading is therefore worked out again on the fast timer -- integer
+// arithmetic on values already in memory, no I/O -- and the label repainted
+// only when it comes out different.
+//
+// With the option off the number depends on the index alone, there is nothing
+// here to follow, and nothing is done.
+static void refresh_volume_reading(void) {
+	if (!vol_label || !volumereadout_enabled()) {
+		return;
+	}
+
+	int percent = get_volume_percent();
+	char text[VOLUMEREADOUT_TEXT_MAX];
+	volumereadout_text(percent, text, sizeof(text));
+	if (strcmp(text, lv_label_get_text(vol_label)) != 0) {
+		topbar_refresh_volume(percent);
+	}
+}
+
 // The things noticed with the hands, on their own fast timer: what is in the
 // jacks, what is on the USB-C port, and whether the charger is in. Everything
 // here returns at once when nothing has changed.
@@ -682,6 +796,10 @@ static void jack_timer_cb(lv_timer_t *timer) {
 	(void)timer;
 
 	refresh_headphone_icon(false);
+
+	// After the jacks and the port, which is where a change of output is found
+	// out; before the battery, whose "nothing has moved" returns from here.
+	refresh_volume_reading();
 
 	// The charger, on the same beat and for the same reason as the jacks: it is
 	// something the user just did with their hands, and up to five seconds of a
@@ -738,25 +856,22 @@ static void jack_timer_cb(lv_timer_t *timer) {
 		settled = candidate;
 	}
 
-	if (percent == last_battery_percent && settled == last_battery_charging) {
-		return;
+	if (percent != last_battery_percent || settled != last_battery_charging) {
+		last_battery_percent = percent;
+		last_battery_charging = settled;
+		update_battery_indicator(percent, settled == 2);
+		led_set_charge_state(settled != 0, settled == 2);
 	}
-	last_battery_percent = percent;
-	last_battery_charging = settled;
 
-	update_battery_indicator(percent, settled == 2);
-
-	// And the LED, which says the same thing in the dark, from the same settled
-	// answer: the pattern is never rewritten for a reading that is about to
-	// change back. The cable goes with it -- a charge that has finished still
-	// leaves the player on a charger, and that is what keeps the LED off the
-	// darken-in-standby option.
-	led_set_charging(settled == 2);
-	led_set_on_charger(settled != 0);
+	// The status LED needs to follow PCM changes even outside Now Playing and
+	// when the battery has not changed. Reuse the same device-state snapshot.
+	bool playing = state.status == AUDIO_STATUS_PLAYING;
+	led_update_playback(playing, state.stream_sample_rate,
+						playing && !state.live && podcastcache_is_episode(state.current_file),
+						playing && !state.live && audio_get_dsd_multiple() > 0);
 }
 
-// The periodic poll: battery, volume persistence, playback glyph and the
-// status LED all ride this one timer.
+// The slower poll: volume persistence, playback glyph and special LED modes.
 static void timer_update_cb(lv_timer_t *timer) {
 	(void)timer;
 
@@ -776,18 +891,8 @@ static void timer_update_cb(lv_timer_t *timer) {
 	topbar_refresh_volume((int)state.volume);
 	refresh_play_icon(&state);
 
-	// The battery and the charge LED ride jack_timer instead, which runs often
-	// enough for plugging the charger in to show at once. What is on this poll
-	// is what nobody is standing over -- the playback colour, Wi-Fi transfer,
-	// DAC mode.
-	led_update_playback(state.status == AUDIO_STATUS_PLAYING, state.stream_sample_rate,
-						!state.live && podcastcache_is_episode(state.current_file),
-						!state.live && audio_get_dsd_multiple() > 0);
-	// Wi-Fi transfer takes the same route: its pattern stays lit, screen off
-	// included, for as long as the transfer is on. The switch rather than the
-	// process, because this poll is five seconds apart and the server takes a
-	// moment to come up and to die -- the light would lag the toggle by most of
-	// a poll in both directions.
+	// The page sets the Wi-Fi transfer light immediately; this poll also catches
+	// the server being stopped by card removal / USB export.
 	led_set_wifi_transfer(wifitransfer_get_enabled());
 
 	// And Bluetooth receiver mode, which like the transfer is a thing the
@@ -917,6 +1022,7 @@ void topbar_set_clock_position(int pos) {
 // hand, which has a light and a dark variant and would otherwise keep the one
 // from before the switch until the next poll.
 static void topbar_refresh_theme(void) {
+	topbar_apply_player_color();
 	last_battery_percent = -2;
 	last_battery_charging = -1;
 	if (jack_timer) {
@@ -1344,6 +1450,27 @@ void topbar_bring_to_front(void) {
 	if (top_bar) {
 		lv_obj_move_foreground(top_bar);
 	}
+}
+
+void topbar_set_player_ground(bool enabled, lv_color_t color) {
+	if (!top_bar) return;
+	player_ground_enabled = enabled;
+	player_ground_dark = enabled && ((color.red * 299 + color.green * 587 + color.blue * 114) / 1000) < 128;
+	if (enabled) lv_obj_set_style_bg_color(top_bar, color, 0);
+	else lv_obj_remove_local_style_prop(top_bar, LV_STYLE_BG_COLOR, 0);
+	topbar_apply_player_ink();
+}
+
+void topbar_set_player_palette(bool enabled, lv_color_t accent) {
+	player_palette_enabled = enabled;
+	player_palette_accent = accent;
+	if (!top_bar) return;
+	topbar_apply_player_ink();
+}
+
+// Borrowed image is detached by the player before its buffer is freed.
+void topbar_set_player_frost(const lv_image_dsc_t *image) {
+	if (top_bar) statusbarstyle_frost(top_bar, image);
 }
 
 // Shows or hides the whole bar. The player page hides it so the album art can

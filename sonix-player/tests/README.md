@@ -6,6 +6,7 @@ Run from the repository root on a Linux host:
 make -C sonix-player/tests test
 make -C sonix-player/tests sanitize
 make -C sonix-player/tests swvolume
+make -C sonix-player/tests volumereadout
 make -C sonix-player/tests eq
 make -C sonix-player/tests usbdac-eq
 make -C sonix-player/tests usbhost
@@ -17,35 +18,85 @@ make -C sonix-player/tests basebuild
 make -C sonix-player/tests stock-prepare
 make -C sonix-player/tests peq-ui
 make -C sonix-player/tests quickpanel-layout
+make -C sonix-player/tests btreceiver-session
+make -C sonix-player/tests power-display
+make -C sonix-player/tests chargerattached
+make -C sonix-player/tests batteryprofile batteryprofile-ui
 make -C sonix-player/tests corners
 make -C sonix-player/tests playbutton
+make -C sonix-player/tests musicsettings-rows
+make -C sonix-player/tests volume-overlay
 make -C sonix-player/tests playerdeck
 make -C sonix-player/tests vinylayout
 make -C sonix-player/tests waveform-overlay
 make -C sonix-player/tests edge-lock
+make -C sonix-player/tests home-swipe
 make -C sonix-player/tests calculator
 make -C sonix-player/tests notes
+make -C sonix-player/tests tapedeck tools-ui
 make -C sonix-player/tests tagwrite
 make -C sonix-player/tests artsearch
 make -C sonix-player/tests tagdate
 make -C sonix-player/tests genius
 make -C sonix-player/tests mostplayed
+make -C sonix-player/tests playback-state
 make -C sonix-player/tests podcastplayed
+make -C sonix-player/tests podcastdir
+make -C sonix-player/tests podcastrss
 make -C sonix-player/tests radio-store
 make -C sonix-player/tests led-rate
 make -C sonix-player/tests aamlayout
+make -C sonix-player/tests statusbar-ui
 make -C sonix-player/tests extractkeys
+make -C sonix-player/tests tidal
+make -C sonix-player/tests tidal-ui
+make -C sonix-player/tests subsonicdl
+make -C sonix-player/tests subsonic-all
 ```
 
-The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `peq-ui`, `quickpanel-layout`, `corners`, `playbutton`, `playerdeck`, `vinylayout`, `waveform-overlay`, `edge-lock` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
+The non-UI suites require only a C compiler, Make and Python 3 (plus standard pthread/dl/math libraries). The `hiresbadge-ui`, `peq-ui`, `quickpanel-layout`, `btreceiver-session`, `power-display`, `batteryprofile-ui`, `corners`, `playbutton`, `musicsettings-rows`, `volume-overlay`, `playerdeck`, `vinylayout`, `waveform-overlay`, `edge-lock`, `tidal-ui` and aggregate `ui` targets also need the LVGL 9.6.0 checkout described below. None requires ALSA, SDL, a MIPS toolchain, a music server, a real account, or downloaded audio.
 
 `run_subsonic_tests.py` starts a temporary threaded localhost HTTP server plus three HTTPS servers carrying the certificates in `tls_fixtures.py`, runs the C binary with a private temporary config directory, verifies its requests, then shuts down. All account values are synthetic. Build products live in ignored `.build/`; response/PCM fixtures are generated in memory rather than added to Git, and the three test certificates are pasted into that Python file rather than downloaded.
+
+The `subsonicdl` test is the SD-card download worker on its own: a real
+temporary directory stands in for the card and a fake transport serves the
+bytes, so it checks the file names (FAT-forbidden characters, UTF-8-safe
+shortening), that an album shares one folder and one cover, that a truncated
+transfer leaves neither a file nor a `.part`, that a cancel deletes what it had
+written, and that deleting a track removes an emptied album and artist folder
+and nothing else. Link it against `subsonicdl.c` and stubs only — it needs no
+LVGL and no `support.c`. `subsonic-all` runs it together with the bridge
+integration suite and the Subsonic page UI suite, which links the real
+downloads page and opens it from the home page's corner arrow.
+
+The `tapedeck` tests run the recording worker against a fake ALSA capture PCM
+and a temporary card: playback-only hardware is rejected, metering does not
+save, recordings have valid WAV headers and sample data, and stop, unplug, card
+handover and failed saves close the input without publishing an incomplete WAV.
+The sampler test checks 16 distinct factory sounds, manual taps, exact bar
+boundaries, step-quantized overdubs, numbered and unnumbered kit loading,
+resampled stereo WAV streaming, long-clip controls and release of card-backed
+voices before unmount. It round-trips tempo, pattern and sample assignments
+through a real sequence file, rejects missing samples and invalid saves,
+checks the three effects, and compares recorded stereo PCM with the live
+post-FX output. It also covers bounded capture, slow/failed card writes and
+finalizing a factory-only take before card export. `tools-ui` drives Tape Deck
+on the real LVGL renderer, including all 16 touch targets at 240×320, live FX,
+sequence save/reload, and recording and playing back a take. Physical checks
+are described in the [Tape Deck guide](../../docs/tape-deck.md).
+
+The `statusbar-ui` test checks LVGL rendering of the frosted player status bar,
+icon recoloring, layout-background choices, and restoration of status colors.
 
 The `waveform-overlay` UI test checks that both scrolling text pills stay clear of the smaller favourite button, across artwork shapes, font sizes and missing-artist metadata.
 
 The `vinylayout` UI test checks the Vinyl sleeve/record arithmetic at 240×320 across text sizes, the reference-slanted pressing mark in the exposed lower-right arc, the visible even-diameter 2 px grooves, the larger centre label peeking below the sleeve, the tiny-screen fallback, a no-overlap guarantee against the whole deck (including transparent info/seek rows), repeated apply/take-back and sleeve-over-record layering on the real LVGL renderer. It does not link the player's audio/network shell.
 
 The `playerdeck` UI test exercises the V1 deck's real LVGL flex layout while switching between Standard and Waveform, including large font metrics and the fallback when waveform allocation fails. It checks row spacing and that every playback button stays clear of the bottom edge.
+
+The `batteryprofile` test uses temporary sysfs files and a wrapped I²C adapter to check stock V1 units, missing or invalid readings, read-only charge-limit access, discharge estimates, and same-source deltas. `batteryprofile-ui` drives the production page at 240×320 with fake battery samples. It covers USB and screen-off behavior, charge history, baseline and resample actions, polling off-page, and translated metric layouts. To validate a real cell's load response, follow the [on-device A/B procedure](../../docs/battery-profiler.md).
+
+The `musicsettings-rows` UI test checks that NOS does not reuse Filters' waveform bitmap and that the expandable DSD gain card shares the icon/title columns and collapsed midline of ordinary Music settings rows across all 11 shipped languages, all five themes, both switch states and larger text.
 
 The `tagwrite` suite checks FLAC and ID3 rewrites, artwork/audio preservation, validation and refusal of unsafe layouts. The `artsearch` suite uses a mocked network to test catalog parsing, URL validation and download limits. The aggregate `ui` suite exercises the Tag Manager browser, editor and cover selection at the V1 resolution with a mocked service.
 
@@ -100,6 +151,36 @@ piece missing; it needs 7z and is skipped without it. The tests cannot prove
 that the radio accepts or uses the classification, that a stock script behaves
 the same on every firmware revision, or that receiver packet loss is fixed.
 
+### Bluetooth receiver: buffers, equaliser, watchdog and volume
+
+The same `bluetooth` target also holds the receiver's own fixtures, none of which
+touches a radio. `test_btreceiver` runs the real capture thread over a fake ALSA
+and checks the deeper aptX buffers (and that SBC, AAC and LDAC keep the ordinary
+ones, that a larger plain setting still wins, and that `0` turns the extra room
+off), that the equaliser runs on 32-bit frames and, when the output will not
+take 32-bit words, on the 16-bit fallback, that a full capture ring is recovered
+from and the session goes on, and that a
+phone left paused for longer than the first-frame window and then played is not
+taken for a dead stream: the DAC is not closed and opened again, and a stream
+that really never delivers still is. `test_bluetooth` drives the phone's-volume
+logic over fakes for bluealsa's PCM properties: a new receiving PCM gets the
+software volume switched on (and the level and codec-change cases around it,
+including a daemon that does not answer or refuses). `test_btpcmvolume` marshals the real `SoftVolume`
+property read and write on the receive PCM and checks the counter that tells a
+new PCM object from the one already dealt with.
+
+`make -C sonix-player/tests btreceiver-session` runs the receiver's session
+(parking behind the equaliser, coming back, ending when the way back is gone)
+on real LVGL screens, so the order LVGL sends its screen-load and unload events
+in is the real one; only the receiver, the A2DP sink and the back-stack are
+stand-ins. It needs the LVGL checkout, like the other UI targets.
+
+What none of these can show: that the V1's DAC survives a close and reopen at
+any particular moment, that the volume mode really was the cause of the
+on/off feel, that the deeper aptX buffers stop the stutter, what the equaliser
+costs on the single core while a 96 kHz LDAC stream plays, or that nothing else
+on the device reacts badly to a page opened over a live receiver.
+
 ## USB host arbitration and storage safety
 
 `make -C sonix-player/tests usbhost` exercises the production host-trial state
@@ -147,7 +228,10 @@ exact, a deeply attenuated stream must stay quiet, clean and in range (rounded
 and dithered, not truncated into grit), and the scaling must apply only while
 the sound is leaving over the USB-C port. The three routing answers (Bluetooth,
 a card on the port, that card's volume control) are stubbed; the curve, the
-coefficients and the scaling are the real ones.
+coefficients and the scaling are the real ones. The external PCM preparation
+check also verifies that USB software attenuation is applied to a private copy
+(including mute and packed 24-bit/unsigned 8-bit formats), while Bluetooth
+output, the internal DAC and unity gain leave the input unchanged.
 
 ## Equaliser on PCM, including radio
 
@@ -176,17 +260,32 @@ opens no ALSA device.
 `make -C sonix-player/tests peq-ui` links the real PEQ page and DSP engine to
 LVGL's headless renderer. It checks the profile pills at 240×320 in all eleven
 languages and five themes, selection and back-drag guarding, refresh of an open
-band editor after a quick switch, and profile-scoped reset. The shell and network
-AutoEq browser are stubbed.
+band editor after a quick switch, and profile-scoped reset. It then types a
+band's frequency (in Hz and in kHz, switching unit both ways), gain and Q on the
+band editor's keypad: whole-Hz values between slider steps, rounding, clamping
+at both limits, the sign key, cancel, an emptied display and leaving the page,
+plus the fit of every key and of the tappable values over the sliders. The shell
+and network AutoEq browser are stubbed.
 
 `make -C sonix-player/tests quickpanel-layout` uses the production Control
 Centre list parser, accessors and move operations with headless LVGL. It checks
-that DAC mode no longer blocks the sheet while Wi-Fi transfer and Bluetooth
-receiver mode still do, and that the PEQ profile control does not displace
+that neither DAC mode nor Bluetooth receiver mode blocks the sheet while a Wi-Fi
+transfer still does; what the card says in receiver mode (the phone's track, the
+codec and rate, an error in place of them) and that the local transport is
+neither shown nor answers; that the Bluetooth and airplane tiles say why they
+refuse while a receiver is playing, waiting for a phone or parked; that EQ, MSEB
+and PEQ open without ending the receiver and ask nothing, that every other page
+asks first and opens only on yes, and that a refused question leaves nothing
+behind; and that the PEQ profile control does not displace
 existing defaults, fills an empty place in a saved v4 layout, waits in Settings
 when the grid is full, and survives a move into the first eight and a reload.
 Unrelated playback/radio handlers are removed by linker section GC; no sheet is
-built. The full `ui` target includes both PEQ-related suites.
+built, and the radio, player and DAC answers are stand-ins. The full `ui` target
+includes both PEQ-related suites and the receiver session. (On GCC 12 the `ui`
+aggregate stops at three files this suite does not touch --
+`tests/ui/test_main_menu.c`, `src/gui/library/music.c` and
+`src/gui/wireless/wifisettings.c` fail `-Werror` -- so run the targets above one
+at a time.)
 
 ## Wi-Fi hidden networks
 
@@ -203,6 +302,91 @@ are stubbed; `tests/stubs/` carries the two LVGL typedefs `power.h` needs so
 this stays a plain-C suite. The Wi-Fi page itself -- the "Add hidden network"
 row and the manual-entry page behind it -- is covered by `test_wifi_pages`
 in the headless UI suite below.
+
+## Wi-Fi file transfer
+
+`make -C sonix-player/tests wifitransfer` runs the embedded HTTP server over
+loopback against a temporary card. It checks pairing and code rotation, nested
+folder uploads and byte-for-byte downloads, refusal to overwrite existing files,
+card-only path resolution, and removal of unfinished uploads on disconnect or
+server stop. The V1's mount and radio are stubbed; stop uses the real function
+called by USB export and hotplug.
+
+`make -C sonix-player/tests wifitransfer-ui` (with the LVGL checkout) runs the
+real 240×320 page with a fake network. It checks that the QR and manual pairing
+code fit on the screen and that link loss, address changes, and screen exit end
+the session. See the [on-device checklist](../../docs/wi-fi-transfer.md#device-check-after-flashing)
+for camera scanning, real Wi-Fi and microSD validation.
+
+## Tidal's favourite playlists
+
+`make -C sonix-player/tests tidal` runs the real Tidal client (`tidal.c`)
+against canned replies; the HTTP layer is the part the test supplies. Beside
+the device-code sign-in (`test_tidal_login`), `test_tidal_favplaylists` signs
+in through those replies and checks the list of playlists an account keeps as
+favourites: that nothing is sent while signed out; the request itself
+(`/users/<id>/favorites/playlists` with the country, paging and ordering
+parameters and the bearer token); the wrapped entries; the three kinds of
+creator -- Tidal's editors, shown as `TIDAL`, an artist by name, and another
+listener with no name at all; square and wide pictures; paging; that the
+account's own playlists are still asked for at `/users/<id>/playlists`; an
+error reported in Tidal's words; and the removal, a `DELETE` on the favourites
+collection and not the deletion of a playlist, including its refusal for want
+of the write scope. Plain C, no LVGL.
+
+`make -C sonix-player/tests tidal-ui`, which the `ui` target also runs, puts
+the page on the real renderer at 240×320. Here the client is what is
+substituted -- an account with one playlist of its own and four favourites,
+which answers at once and writes down what it is asked -- and everything above
+it is real: `tidalpage.c` with its worker thread and its list history,
+`tidalsync.c` writing to the account on a thread of its own, the list cache on
+a scratch card, the shared rows, the popover and the configuration store.
+`test_tidal_pages` runs three times, because the arrangement of the main page
+is read once per process.
+
+With nothing saved, it checks that the main page has the row under "My
+playlists" and that "My playlists" is still the fourth; that the row asks for
+the favourites and not for the account's own playlists; the heading and the
+rows (`TIDAL · 50 tracks`, and `12 tracks` where nobody is named); that a
+second visit is read back from the card; that a favourite opens by its UUID
+and that its tracks, one at a time and as a selection, can be favourited and
+kept on the card but not taken out of it; that back returns to the favourites;
+that the three dots on a favourite offer **Remove from favourites** and
+nothing else, ask by name, send nothing on "no", and on "yes" un-favourite
+that playlist -- never delete it -- then read the list again from Tidal and
+drop the playlist's own rows from the card; that a refusal is shown in Tidal's
+words, as a popup from one row and as a toast from a selection, with the list
+left as it was; that a selection asks too and is sent in the order of the
+page, one at a time; that an emptied list says so; that "My playlists" still
+offers the deletion and its tracks the removal; and that signing out takes the
+account's five lists off the card, so the next account is shown its own.
+
+The `saved` run starts from an arrangement written by a build that did not
+have the row (seven numbers, rearranged, one row hidden): the row appears
+straight under "My playlists", the hidden row stays hidden, the reorder page
+lists all eight, and moving the new row and switching it off are written to
+the configuration under its own number. The `arranged` run reads such an
+arrangement back.
+
+Every language file is required to carry the strings involved, and the three
+that are handed to `snprintf()` as formats to take exactly the one argument
+they are given.
+
+To look at the pages, set `SONIX_PAGE_SNAPSHOTS` to an output prefix:
+
+```sh
+SONIX_PAGE_SNAPSHOTS=.build/page make -C sonix-player/tests tidal-ui
+```
+
+This writes ignored `.build/page-v1-tidal-home.ppm`,
+`-favourite-playlists.ppm`, `-favourite-playlists-menu.ppm` and
+`-home-reorder.ppm`.
+
+Neither suite talks to Tidal, and whether Tidal still answers these requests
+as the canned replies assume is not something they can say. The headless fonts
+are Montserrat, which has no middle dot and none of the player's metrics, so
+no label width is checked. The confirmation card is recorded rather than
+drawn, and taps are sent as events, not through the touch driver.
 
 ## Real codec integration
 
@@ -456,6 +640,17 @@ table with plays in it: the row-id pass named a `sortkey` column that
 `PLAY_COUNTS` has never had, so the statement failed to prepare and the page
 showed its "nothing to show" note whatever was counted.
 
+## Boot-time playback state and automatic card checks
+
+`make -C sonix-player/tests playback-state` links the real library, CUE parser
+and SQLite. It checks that a saved `album.cue?track=3` is validated through its
+real sheet rather than rejected as a missing filename, and that the track
+position, ordered queue and album name survive closing and reopening the
+database. With an indexed track and **Detect changes** explicitly off, it also
+checks that `library_card_returned()` starts no worker and emits no update
+notification. Unrelated codec and Smart Mix entry points are stubbed; no audio
+or card scan is needed.
+
 ## Heard podcast episodes, against the real database
 
 `make -C sonix-player/tests podcastplayed` checks the store behind the podcast
@@ -464,6 +659,111 @@ marks themselves, the sorted set the lookup binary-searches, what survives a
 restart, and a card whose database is deleted under the player. `utils.c`'s file
 identity is the only stubbed helper -- its contract, that deleted or replaced
 counts as changed, is reproduced with `stat()`.
+
+## The podcast catalogue, on both of its directories
+
+`make -C sonix-player/tests podcastdir` checks the seam between the two
+directories the Podcasts section can use -- Apple's, which needs no key, and
+Podcast Index, which needs a pair -- and that both fill the same structs the
+pages, the cache and the downloader read. It needs no key, no account and no
+network: the HTTP helper is stubbed the way `artsearch` stubs it, so every
+assertion about a request is made on the URL and the headers the production
+code built. The real `podcast.c`, JSON parser, settings store, region list and
+SHA-1 are linked; the network, the streaming keys and the two language
+functions are not.
+
+The JSON is the shape each directory really answers with, trimmed to the parts
+that are easy to get wrong. Checks include:
+
+- which directory a configuration picks: no `api_base` and no keys is Apple,
+  no `api_base` and a pair is Podcast Index, `apple` or an
+  `itunes.apple.com` base is Apple whatever keys are present, an
+  `api.podcastindex.org` base is Podcast Index, and a host that merely starts
+  with the name (`itunes.apple.com.evil.example`) is not it;
+- that an empty `api_base =` line reads as no value, rather than turning every
+  request into a relative one;
+- Apple's requests carry a User-Agent and nothing else -- no `X-Auth`, no
+  `Authorization` -- and that Podcast Index's still carry all three headers,
+  with the signature re-derived from the time in the request;
+- the search term is encoded, the storefront is left off, and `limit` is
+  capped at what Apple actually serves;
+- the chart's storefront comes from the region row, its depth is one of the
+  three Apple serves, its ids arrive as quoted strings, its 100 px artwork is
+  asked at 600 px, and an empty storefront falls back to the American chart
+  while Worldwide does not ask twice;
+- an episode list leads with the show itself, which is not counted as an
+  episode, and an episode with no audio is dropped from the count but not from
+  the raw one that tells the list whether another page is worth asking for;
+- a show longer than Apple's two-hundred-entry ceiling is listed from its own
+  feed instead: the feed is fetched, its episodes come back newest first, the
+  oldest one is reachable at all, an episode both sources know keeps the id the
+  directory gave it, one only the feed knows gets an id derived from its guid,
+  and that episode then plays when asked for by the id it was listed under;
+- the feed is *not* fetched when it would not help -- a show that has exactly
+  as many episodes as arrived, a page smaller than the ceiling, a lookup whose
+  list is one row short of it, or a show whose row carries no feed address --
+  and is not believed when it is the shorter of the two lists, which is what
+  keeps a show that publishes only trailers from losing the episodes its
+  directory does index;
+- a feed that cannot be read leaves the directory's list untouched and sets no
+  error: an error page where the feed was, a feed host that does not answer;
+- durations arrive in milliseconds and leave in seconds, timestamps in ISO
+  8601 and leave as unix time, with or without the time of day;
+- an episode id the player has never seen is not guessed at and costs no
+  request, one it has listed is found again inside its podcast, and one that
+  is not in that podcast's list is gone rather than replaced by another;
+- the shared failures read the same whichever directory refused: a 5xx, a 4xx,
+  an unreachable network, and a body that is not JSON.
+
+The suite was checked by mutation: it fails when the directory choice is
+forced, when the show row is counted as an episode, when the artwork is left
+at 100 px, when the duration is left in milliseconds, when the chart depth is
+fixed, when the declared audio type is hardcoded, when the feed is read without
+the list having hit the ceiling, when any feed at all is believed over the
+directory's, when the episode-by-id lookup does not fall back to it, and when
+the memory of which show an episode belongs to is too small to reach the start
+of a long list.
+
+This tests the requests and the parsing, not the download or the playback of
+what comes back; those have their own suites and see only the structs, which
+do not know which directory filled them.
+
+## Reading a podcast's own feed
+
+`make -C sonix-player/tests podcastrss` checks the reader behind that
+fallback: `src/system/streaming/podcastrss.c`, on the XML scanner the ebook
+reader already uses (`src/system/ebook/epub_xml.c`). No network, no keys, and
+no directory -- the feed is a string in the test.
+
+It is a scanner rather than a parser with a tree, because the wild is not
+well-formed: the checks are about the disagreement between feeds rather than
+about one conforming document. Three readings are exercised on their own
+before any whole feed is read, since each fails differently --
+
+- `podcastrss_pubdate`: RFC 822 with and without its weekday, with a named or
+  a numeric zone and with no time at all, in lower case, and ISO 8601 instead;
+  and nothing that is not a date, including a two-digit year, which is a guess
+  about a century and sorts worse than no date;
+- `podcastrss_duration_secs`: hours, minutes and seconds, minutes and seconds,
+  a bare number of seconds, the whitespace a feed indents with, and a refusal
+  of `40 minutes` -- a pattern that matches the first number in a field would
+  read that as forty seconds and the row would lie about its length;
+- `podcastrss_guid_id`: stable across calls, different for different guids,
+  positive, and out of the range the directories hand out, because this is the
+  id a downloaded episode is found again by.
+
+Then the walk, against a feed carrying namespaces, CDATA with an entity inside
+it, indentation around a field, an empty element, show notes in HTML, an item
+with no audio and one with no title. Checks include that the channel's own
+title and artwork are not read as an episode's, that the two items that are
+not episodes are counted as seen but not shown, that a guid longer than the
+buffer is cut rather than run off the end of it, that an episode the directory
+numbered keeps that number, that a page smaller than the feed stops reading
+once the page is full, and that a document with no items in it answers -1
+rather than an empty list -- which is what tells the caller to keep the
+directory's list. Finding one episode again by its derived id is checked the
+same way, including the episode with no title, which is still the one that was
+asked for.
 
 ## Headless calculator and notes page tests
 
@@ -534,6 +834,36 @@ paths, invalid sizes, missing seeds, cancellation/card invalidation, shorter
 mixes when candidates run out, and failure when only the seed is available.
 No LVGL, database or card is required.
 
+## Smart Mix on large libraries
+
+`make -C sonix-player/tests geniuslarge` links the real builder, the real reader
+and the real mix generator to a synthetic index and a temporary "card" directory
+under `/tmp`. Only the library lookups are stubbed (`library_read_tags`,
+`library_get_indexed`, `library_revision`); the staging database, the BLOB and
+the atomic rename are the production ones, and so is the SQLite copy the tests
+build.
+
+Cases:
+
+- **25,000 and 50,000 tracks**: the build publishes instead of reporting
+  `GENIUSBUILD_LIMIT`, the decoded snapshot stays inside
+  `GENIUSDB_MAX_SNAPSHOT_BYTES`, and a 30-track mix comes back from the middle
+  of the library with no repeats (this is what caught the walker offering the
+  seed again through a mutual edge).
+- **One genre for the whole library** (20,000 tracks): the largest cluster the
+  ranking can meet, which must finish in bounded time rather than be scanned
+  whole for every seed.
+- **Unchanged and changed input**: a second build of the same tags reports
+  `GENIUSBUILD_CURRENT` without rewriting, and a changed tag rebuilds.
+- **Caps**: one row past `GENIUSBUILD_MAX_TRACKS`, and a path pool over
+  `GENIUSBUILD_MAX_TEXT_BYTES`, each report `GENIUSBUILD_LIMIT` and leave any
+  previous graph in place.
+
+It prints the build time, retained peak, blob and snapshot size per case; the
+numbers in `PATCHES.md` come from this run. The times are host times, not V1
+times. A case may also be run alone with an argument (`./.build/test_geniuslarge 2`
+for 50,000 tracks), and the suite takes a few seconds.
+
 ## TempoTec base version in About
 
 Run `make -C sonix-player/tests basebuild` from the repository root. This checks
@@ -546,8 +876,134 @@ metadata and clearing cached values. No stock firmware, LVGL or cross-compiler
 is required.
 
 `make -C sonix-player/tests hiresbadge` checks the hi-res badge's quality
-threshold, unknown stream metadata, lossy exclusion and DSD handling.
+threshold, unknown stream metadata, lossy exclusion, DSD handling, the four
+design values and their safe fallback. `make -C sonix-player/tests hiresbadge-ui`
+renders all four designs on LVGL at small sleeve sizes and two font sizes: it
+checks the exact text, the official logo's gold/black pixels, corner fit,
+repeated switching, non-interactive badges, and moving between sleeves and the
+header. Snapshots check the badge's visible size and mirrored chevron inset
+with and without the player status bar.
 
 `make -C sonix-player/tests quickpanel-layout` also exercises the optional
 V1 dual-slider layout using LVGL hit-testing, both gesture positions, page
 counts, DAC status, persistence, volume limits and separate slider callbacks.
+
+## Smart status LED
+
+`make -C sonix-player/tests led-rate led-telemetry` checks the stock
+sample-rate colour bands and runs the real effect worker with a recording I²C
+backend and in-memory sysfs. It covers saved Stealth at boot (no lit frame),
+blackout while charging or blinking, suspend/resume, both fallback LED paths,
+and the red/green notice counts, priority and return to the latest state.
+Synthetic bass and treble exercise the real PCM tap, including stale samples
+and independent screensaver/LED capture. A modest bass attack has to span the
+full dim-to-peak range even over ongoing bass, hold briefly, and settle again
+without a held note retriggering the pulse. The Energy Glow fixture checks
+that the saved style starts up, treble and out-of-phase stereo contribute to
+RMS energy, and the worker smoothly rises, holds, and fades instead of
+flashing. It also checks switching styles while playing and the charging and
+Stealth overrides. The Rainbow Breath fixture checks the six hues, smooth
+colour transitions, the brightness envelope at every setting, and an active
+wheel without PCM capture. It also verifies saved selection and returns to the
+right state after an alert, charging, or Stealth. At brightness 1, only dark
+and the first lit step are available. No physical LED or audio is needed.
+
+`make -C sonix-player/tests wifitransfer wifitransfer-ui` also checks that a real
+upload is confirmed only after publication and a quiet period, that failures,
+aborts and restarts don't signal success, and that the page consumes the
+notification exactly once. The I²C timing, brightness and listening experience
+still need the on-device check in [the LED guide](../../docs/sgm31324-led-control.md).
+
+## Display power and maximum brightness
+
+`make -C sonix-player/tests power-display` uses the LVGL checkout above. It
+compiles the production `power.c` and `chargescreen.c` display transitions with
+an in-memory sysfs fixture and virtual time. The power tick is not dispatched;
+transitions are called explicitly, with audio/radio/clock services stubbed. No
+real sysfs node is opened and no actual sleeps or suspend/shutdown occur.
+
+Checks include saved 100% brightness, adoption of a stock maximum, fallback
+from a dark panel, unknown/invalid maximums, oversized config, unchanged lower
+levels, the user-facing 100% range, and all hardware writes staying below full
+duty while zero stays zero. Repeated normal wakes cover credible and fallback
+vsync, both wake-hold settings, and brightness changes while dark. Other cases
+cover Bluetooth TX/RX held-panel wakes, a stream starting/stopping while dark,
+a platform without a blank node, the simulator's NULL paths and the independent
+charger-only selection/off/wake path. A fade towards maximum must terminate at
+the guarded level rather than loop forever.
+
+This tests the userspace workaround for issue #267, not a physical PWM driver,
+touch gesture, panel, audio link or standby current. Hardware acceptance steps
+and the distinction from the separate battery-drain report are in `PATCHES.md`.
+
+## Volume as voltage
+
+`make -C sonix-player/tests volumereadout` checks the reading that Settings →
+Screen → Volume as voltage puts in the status bar and on the volume pill. It is
+plain C with no LVGL. `alsa-controls.c` is compiled into the test against the
+declarations-only ALSA header in `tests/stubs/`, so the two gain tables, the
+DSD offsets and the output profile are the real ones; its state is set by
+writing its statics, and the config is two integers in memory.
+
+Checks include the half-dB table against `pow()` over the whole of the DAC's
+register, exact decades, and nothing above full scale or below the mute; the
+three-figure text and its unit against the value it was made from, with every
+edge where rounding gains a digit; each index of both gain tables on both
+sockets rising strictly and never printing the same text twice; the gain
+switch as 6.0 dB and the 4.4 mm socket as a factor of two; the DSD compensation
+counted only while a DoP stream is open, and clamped at full scale; the plain
+number over Bluetooth, on USB-C and with the option off; the two settings read
+once and saved when set; and every reading being among the samples a label is
+measured against. One test runs the production `write_dac_attenuation()`
+against a mixer that only records, and requires the reading to be the
+attenuation the two channel controls were left at for every index, gain, DoP
+state and compensation setting.
+
+`make -C sonix-player/tests volume-overlay` uses the LVGL checkout above. It
+runs the production `volume_overlay.c` and `volumereadout.c` at 240×320 with
+the audio side reduced to four functions the test sets. With the option off the
+pill prints the index in the 28 px label it has always had. On, every one of
+the 256 readings of each socket must sit on one line of a label that keeps one
+width, with the glyph, the label and the scale inside the pill and the scale
+still more than half its usual length. The slider must print the same reading
+as the keys. The label must take its old width back over Bluetooth and be
+measured again after a font change.
+
+Both suites were checked by mutation: they fail when the write path and the
+reading are made to disagree, when samples are left out of the measure, when
+the label is one pixel short, and when a change of form or font is not
+measured again.
+
+This tests arithmetic and layout, not an output. The 2 V and 4 V the figure
+starts from are TempoTec's published maximums and no host test can confirm
+them; `PATCHES.md` lists what to check with a meter. `topbar.c` and
+`settings.c` are not linked into either suite, so the status bar's label and
+the settings card are covered by neither. The headless fonts are Montserrat,
+which has no micro sign, so no pixel width other than the 28 px is asserted.
+
+## Sticker layout geometry and layering
+
+`make -C sonix-player/tests stickerlayout` links the production
+`stickerlayout.c` against LVGL 9.6 on a 240×320 display and checks
+`sticker_layout_box()` across both full-screen (320 px) and status-bar-visible
+(296 px) heights and all three V1 text sizes, plus widget layering on the cover
+panel (tilted neon frames behind the opaque sleeve, corner pills and discs in
+front without horizontal overlap, and clean hide/restore).
+
+
+### Network folders (outbound WebDAV / FTP)
+
+`make -C sonix-player/tests networkmusic` uses the host's `libcurl.so.4` (7.66+
+with HTTP and FTP support) and starts isolated loopback WebDAV and FTP fixtures.
+It verifies authentication, directory listing (including MLSD and legacy LIST),
+URL/path scoping, bytes and folders saved on a temporary card, skipping existing
+tracks, transfer limits, and cancellation/USB-release cleanup. When `openssl`
+is installed it also checks HTTPS and implicit FTPS with a temporary certificate.
+No real server, account, or microSD is needed. `networkmusic-ui` checks the
+240×320 LVGL setup, navigation, progress, and Save and play handoff with a stub
+worker. `streaming-preview-ui` exercises the browser versions of the Network
+folders and Listen Together screens on the same renderer, with no native network
+backend linked. It opens them from the grid and list, edits each protocol's
+profile, and checks that Connect, Start Hosting, and Join Stream stay disabled.
+These tests do not substitute for the hardware checklist in
+[`docs/network-folders.md`](../../docs/network-folders.md).

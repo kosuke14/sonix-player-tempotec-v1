@@ -17,7 +17,7 @@ the section heading on the Plugins page.
 
 | Section | Module (id) | What switching it off removes |
 | --- | --- | --- |
-| Streaming services | `tidal`, `qobuz`, `podcasts`, `radio`, `subsonic` | The service's pages and its Streaming tile or list row. (`tidal` and `qobuz` also require API keys, which can be extracted on-device via **Set up from stock firmware**; see [qobuz-stock-firmware.md](qobuz-stock-firmware.md).) |
+| Streaming services | `tidal`, `qobuz`, `podcasts`, `radio`, `soundcloud`, `subsonic`, `jellyfin` | The service's pages and its Streaming tile or list row. (`tidal` and `qobuz` also require API keys, which can be extracted on-device via **Set up from stock firmware**; see [qobuz-stock-firmware.md](qobuz-stock-firmware.md). See [soundcloud.md](soundcloud.md) for SoundCloud setup and [jellyfin.md](jellyfin.md) for Jellyfin setup.) |
 | Earbuds | `airpods` | The AirPods worker and its page. |
 | Library | `ebook` | The Books shelf and the EPUB reader (home Books tile). |
 | Player | `coverflow` | The album carousel and its larger cover cache. |
@@ -25,7 +25,7 @@ the section heading on the Plugins page.
 | Music features | `eq`, `peq`, `mseb`, `autoeq` | The equaliser, parametric EQ, MSEB tuning and AutoEq pages and their quick-panel buttons. |
 | Music features | `mono`, `soundfield`, `crossfeed`, `channel_balance`, `volume_limit` | The filter in the audio chain and its row in Music settings. |
 | Music features | `lastfm`, `listenbrainz` | Scrobbling to that service. |
-| Tools | `calculator`, `notes`, `tagmanager`, `metronome` | The tile on the More page. |
+| Tools | `calculator`, `notes`, `tagmanager`, `metronome`, `tapedeck` | The tile on the More page. See the [Tape Deck guide](tape-deck.md) for input requirements. |
 | Games | `gearboy`, `flappy`, `game2048`, `snake`, `dino`, `pet` | The tile on the More page. `gearboy` is only listed in builds with the Game Boy core. |
 
 Not every feature is a module. Cover Flow's own layout switch, Audiobooks, the

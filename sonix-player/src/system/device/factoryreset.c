@@ -4,6 +4,7 @@
 #include "factoryreset.h"
 
 #include "src/system/audio/audio.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
 #include "src/system/core/config.h"
 #include "src/system/library/audiobookdb.h"
@@ -14,6 +15,8 @@
 #include "src/system/bluetooth/btlog.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/podcastcache.h"
+#include "src/system/streaming/jellyfincache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/device/sysserver.h"
@@ -153,9 +156,10 @@ void factoryreset_run(void) {
 	printf("factoryreset: (build host) would delete %s and %s, write the note and reboot\n", CONFIG_FILE,
 		   EBOOK_CONFIG_FILE);
 #else
-	// Stock recovery erases /data, including the host-trial journal. Do not
-	// proceed until the forced role is safely restored and journal removed.
-	if (!usbhostprobe_cancel()) {
+	// Stock recovery erases /data, including the host journal, and takes the
+	// USB host setting with it. Do not proceed until the forced role is safely
+	// restored and the journal removed.
+	if (!usbhostmode_release(true)) {
 		fprintf(stderr, "factoryreset: USB role could not be restored; reset refused\n");
 		return;
 	}
@@ -185,6 +189,8 @@ void factoryreset_run(void) {
 	// must not leave streamed tracks behind.
 	qobuzcache_clear_on_exit();
 	tidalcache_clear_on_exit();
+	soundcloudcache_clear_on_exit();
+	jellyfincache_clear_on_exit();
 	podcastcache_clear_on_exit();
 	dlna_clear_on_exit();
 
@@ -206,6 +212,10 @@ void factoryreset_run(void) {
 		STREAMKEYS_DATA_FILE,
 		"/usr/data/qobuz_session.ini",
 		"/usr/data/tidal_session.ini",
+		"/usr/data/soundcloud-credentials.json",
+		"/usr/data/soundcloud-credentials.json.tmp",
+		"/usr/data/jellyfin-credentials.json",
+		"/usr/data/jellyfin-credentials.json.tmp",
 	};
 	for (size_t i = 0; i < sizeof(OURS) / sizeof(OURS[0]); i++) {
 		if (unlink(OURS[i]) == 0) {
@@ -272,6 +282,10 @@ static const char *const KEEP[] = {
 	"qobuz_session.ini.tmp",
 	"tidal_session.ini",
 	"tidal_session.ini.tmp",
+	"soundcloud-credentials.json",
+	"soundcloud-credentials.json.tmp",
+	"jellyfin-credentials.json",
+	"jellyfin-credentials.json.tmp",
 	"lastfm.session",
 	"listenbrainz.token",
 };

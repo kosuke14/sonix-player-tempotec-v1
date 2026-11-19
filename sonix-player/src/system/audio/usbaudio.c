@@ -3,6 +3,7 @@
 #include "src/system/audio/audio.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/audio/swvolume.h"
+#include "src/system/audio/usbhostmode.h"
 #include "src/system/audio/usbhostprobe.h"
 #include "src/system/core/config.h"
 #include "src/system/bluetooth/bluetooth.h"
@@ -25,7 +26,9 @@
 #ifndef TYPEC_PARTNER
 #define TYPEC_PARTNER "/sys/class/typec/port0-partner"
 #endif
+#ifndef SOUND_CLASS
 #define SOUND_CLASS "/sys/class/sound"
+#endif
 #ifndef USB_AUDIO_BUS
 #define USB_AUDIO_BUS "/sys/bus/usb/devices"
 #endif
@@ -73,6 +76,7 @@
 #define ID_SETTLE_SECS 3
 
 static atomic_int active_card = -1;		// the USB card in use, -1 when none
+static char usb_bus[32];			// the bus device that card is on, "1-1"
 static char active_name[64];			// its id, for the interface
 static char volume_control[64];			// the control the level is written to
 static long volume_min, volume_max;
@@ -180,7 +184,7 @@ static bool host_bus_has_device(void) {
 // interfaces' own class numbers -- "1-1:1.0/bInterfaceClass" is 01 for Audio
 // -- which sysfs holds from the moment the device is enumerated, long before
 // snd-usb-audio has finished probing it into a sound card. The sound card is
-// what find_usb_card() looks for; this is the same thing seen earlier, and the
+// what find_usb_output() looks for; this is the same thing seen earlier, and the
 // difference is seconds a slow probe can need and a handover must not be
 // allowed to take away.
 static bool bus_has_audio_device(void) {
@@ -373,7 +377,7 @@ static void card_device_path(int n, char *out, size_t out_size) {
 	char resolved[PATH_MAX];
 
 	out[0] = '\0';
-	snprintf(link, sizeof(link), SOUND_CLASS "/card%d/device", n);
+	snprintf(link, sizeof(link), "%s/card%d/device", SOUND_CLASS, n);
 	if (realpath(link, resolved)) {
 		snprintf(out, out_size, "%s", resolved);
 	}
@@ -390,7 +394,7 @@ static bool card_is_usb(int n) {
 	char link[PATH_MAX];
 	char resolved[PATH_MAX];
 
-	snprintf(link, sizeof(link), SOUND_CLASS "/card%d/device/subsystem", n);
+	snprintf(link, sizeof(link), "%s/card%d/device/subsystem", SOUND_CLASS, n);
 	if (realpath(link, resolved)) {
 		size_t len = strlen(resolved);
 		if (len >= 4 && strcmp(resolved + len - 4, "/usb") == 0) {
@@ -402,10 +406,11 @@ static bool card_is_usb(int n) {
 	return strstr(resolved, "/usb") != NULL;
 }
 
-// The lowest-numbered USB sound card, or -1. Lowest rather than newest because
-// there is only ever one socket: a second would mean a hub, and the first is as
-// good a choice as any.
-static int find_usb_card(void) {
+// The lowest-numbered USB card with a playback PCM on device 0 (the device
+// this router opens). For port ownership count any USB sound card, including
+// a capture-only microphone; it must not take over the headphone output.
+static int find_usb_output(bool *audio_present) {
+	*audio_present = false;
 	DIR *dir = opendir(SOUND_CLASS);
 	if (!dir) {
 		return -1;
@@ -419,20 +424,21 @@ static int find_usb_card(void) {
 		}
 		char *end = NULL;
 		long n = strtol(de->d_name + 4, &end, 10);
-		if (!end || *end || n < 0) {
+		if (end == de->d_name + 4 || *end || n < 0 || n > INT_MAX || !card_is_usb((int)n)) {
 			continue; // pcmC0D0p and the rest of the class
 		}
-		if (card_is_usb((int)n) && (found < 0 || n < found)) {
-			found = (int)n;
-		}
+		*audio_present = true;
+		char playback[PATH_MAX];
+		snprintf(playback, sizeof(playback), "%s/pcmC%ldD0p", SOUND_CLASS, n);
+		if ((found < 0 || n < found) && access(playback, F_OK) == 0) found = (int)n;
 	}
 	closedir(dir);
 	return found;
 }
 
 static void read_card_id(int card, char *out, size_t out_size) {
-	char path[128];
-	snprintf(path, sizeof(path), SOUND_CLASS "/card%d/id", card);
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/card%d/id", SOUND_CLASS, card);
 
 	out[0] = '\0';
 	FILE *f = fopen(path, "r");
@@ -443,6 +449,64 @@ static void read_card_id(int card, char *out, size_t out_size) {
 		out[strcspn(out, "\r\n")] = '\0';
 	}
 	fclose(f);
+}
+
+// The bus name of the device behind card `n` -- "1-1", the directory the
+// kernel made for it under the controller -- or "" when it cannot be resolved.
+//
+// This is what tells one dongle from another. The card number does not: a
+// dongle unplugged and another plugged in both land on the lowest free number,
+// usually card 1, so the number stays the same across a swap and the interface
+// goes on describing the old device by name until something else happens to
+// change. Read off the card's own device link, which points along the bus:
+// card1/device is ../../../1-1:1.0, and its parent is the device.
+static void read_card_bus(int card, char *out, size_t out_size) {
+	char link[PATH_MAX];
+	char resolved[PATH_MAX];
+
+	out[0] = '\0';
+	// The card's own device node, which is the thing that does not exist when
+	// there is no such card. Its target is what is resolved below, and a link
+	// planted there (a test's, or a udev rule's) is followed like any other.
+	snprintf(link, sizeof(link), "%s/card%d/device", SOUND_CLASS, card);
+	if (access(link, F_OK) != 0 || !realpath(link, resolved)) {
+		return;
+	}
+	// Resolved it is .../usb1/1-1/1-1:1.0: the last part is an interface and
+	// its parent the device. A device link that does not end in one (a driver
+	// that points the card straight at the device) already says it.
+	//
+	// Walked part by part rather than by editing the string in place: what is
+	// wanted is the two last parts either way, and the loop says that plainly.
+	const char *parts[4] = {NULL, NULL, NULL, NULL};
+	const char *at = resolved;
+	while (*at) {
+		while (*at == '/') {
+			at++;
+		}
+		if (!*at) {
+			break;
+		}
+		parts[0] = parts[1];
+		parts[1] = parts[2];
+		parts[2] = parts[3];
+		parts[3] = at;
+		while (*at && *at != '/') {
+			at++;
+		}
+	}
+	if (!parts[2]) {
+		return;
+	}
+	// The last part is the interface when it carries one ("1-1:1.0"), and the
+	// device otherwise.
+	const char *name = strchr(parts[3], ':') ? parts[2] : parts[3];
+	size_t len = strcspn(name, "/");
+	if (len >= out_size) {
+		len = out_size - 1;
+	}
+	memcpy(out, name, len);
+	out[len] = '\0';
 }
 
 // The device's own playback volume, whatever it decided to call it.
@@ -460,7 +524,7 @@ static void read_card_id(int card, char *out, size_t out_size) {
 static void find_volume_control(int card) {
 	snd_ctl_t *ctl;
 	snd_ctl_elem_list_t *list;
-	char name[32];
+	char name[PATH_MAX];
 
 	volume_control[0] = '\0';
 	volume_min = volume_max = 0;
@@ -576,21 +640,227 @@ static void find_volume_control(int card) {
 //
 // How the level is split between the device and the samples:
 //
-//   * no volume control: all of it on the samples (swvolume.c);
-//   * by default, the device's control is held at its 0 dB step (at its top
-//     when it has no dB scale) and all of the level goes on the samples. It is
-//     what a phone does. A dongle's own control can be coarser than it
-//     declares -- a whole run of indices landing on one step -- or stop well
-//     above silence, and neither can be seen from here. What the device claims
-//     its 0 dB step is worth is not believed either way: a descriptor that
-//     lies about gain must not cancel the software attenuation;
-//   * with [usb] hardware_volume = 1 and a dB scale, the control takes the
-//     nearest step at or above the target and the samples the difference, so
-//     a coarse or shallow control still moves smoothly all the way down.
+//   * no volume control, or a scale that cannot be believed: all of it on the
+//     samples (swvolume.c);
+//   * by default and with a dB scale, the control takes the nearest step at or
+//     above the target and the samples take the difference, so a coarse or
+//     shallow control still moves smoothly all the way down;
+//   * with [usb] hardware_volume = 0, the control is held at its 0 dB step (at
+//     its top when it has no dB scale) and all of the level goes on the
+//     samples, which is what a phone does.
+//
+// The default is the first of those two because the second one hisses. A
+// dongle's own attenuator is inside the same chip as its output amplifier: turn
+// the music down there and the amplifier's own noise floor comes down with it.
+// Turn the *samples* down instead -- which is what pinning the control at 0 dB
+// does -- and the music is quieter while the amplifier still runs at full gain,
+// so what comes out of the jack has the music 20-odd dB closer to the hiss. The
+// difference is not subtle on a sensitive pair of IEMs, and it was reported
+// exactly as it behaves: a quiet hiss under the music on both dongles, worse on
+// the louder one, absent on a phone (which turns the dongle down) and absent on
+// the stock firmware (which does too).
+//
+// Nor is the control always the coarser of the two. "PCM Playback Volume" is
+// 1 dB per step here, and the samples carry whatever fraction is left, so the
+// level still moves in the player's own fine steps -- the split does not cost
+// resolution, it only decides where the attenuation physically happens. What it
+// does cost is that a descriptor can lie about its own scale, which is why the
+// scale is still checked below and the whole strategy falls back to the samples
+// when it cannot be believed or when a write does not take.
+//
+// Only part of the control's range is used, though, and that is the second
+// lesson from the same hardware. A dongle's volume control usually goes mute
+// long before the bottom of the range its descriptor declares: the ESR reports
+// 0..148 over -74.00..0.00 dB, and everything past about -43 dB is silence, not
+// quieter music. Handing it the whole level therefore gives a volume knob with
+// a long dead stretch at the bottom -- reported as "nothing at all until 29%,
+// and then it starts", which is exactly where -43 dB is on the player's own
+// index law. So the control is taken as far down as it will actually go and no
+// further: it is walked a decibel at a time, read back at every step, and the
+// point where it stops following is where the level stops being its business
+// and the samples take over. Nothing has to be heard to find it, and it is true
+// of the device in front of us whatever its descriptor claims. Only a device
+// whose control cannot be measured at all falls back on a fixed share.
 //
 // The value written is read back. A driver is allowed to round it; sitting at
 // the top of its range after being asked for well below is a control that does
 // nothing, and then it is given up and the samples take the whole level.
+//
+// ---------------------------------------------------------------------------
+// The share used when the control cannot be measured: a third of its declared
+// range, and no more than 30 dB. Enough that the amplifier is working well
+// below full gain -- which is what the hiss fix is for -- and little enough
+// that the level is still coming out of the samples long before any dongle's
+// control gives up. Everything past it is smooth because the samples are, and
+// the samples do not go mute.
+#define USB_CTL_SHARE_DIV 3
+#define USB_CTL_SHARE_MAX_DB 3000
+
+// Where the control actually stops following, in hundredths of a dB below its
+// own 0 dB step. Measured, not declared; see probe_control_floor().
+static long usb_ctl_floor_db = LONG_MIN;
+
+// How far a control is walked down while its floor is being found, how fine the
+// steps are, and how many consecutive steps have to come back unfollowed before
+// an edge is believed.
+//
+// The whole declared range, because that is the point: a device's mute point is
+// somewhere in the part of it the descriptor is most optimistic about, and the
+// ESR's is at -43 dB of a 74 dB span -- past any fixed guess this file could
+// make. The walk stops early once the edge is found, and a control that never
+// gives up costs at most a couple of hundred USB control transfers, once, as the
+// device is taken over.
+#define USB_CTL_PROBE_STEP_DB 100
+#define USB_CTL_PROBE_STEPS 256
+#define USB_CTL_PROBE_MISSES 3
+
+static long control_share_db(void);
+
+// Walks the control down from its 0 dB step and reports where it stops
+// following: the value read back either stops changing or jumps to the bottom
+// of the range even though the request was nowhere near it.
+//
+// This is the only way to know. snd_usb_audio publishes whatever range the
+// descriptor gave it, and a dongle is free to declare a generous one and mute
+// the analogue output a third of the way down -- the ESR does exactly that. The
+// walk is a handful of USB control transfers, once per card, before the stream
+// is opened (usbaudio_poll() runs it as the device is taken over), so it costs
+// nothing anybody can hear.
+//
+// Leaves usb_ctl_floor_db at LONG_MIN when the control never stops following,
+// which is the good case: the share below is then the only limit and the whole
+// of it is usable.
+static void probe_control_floor(int card) {
+	usb_ctl_floor_db = LONG_MIN;
+	if (!volume_control[0] || !volume_has_db || volume_max <= volume_min) {
+		return;
+	}
+
+	snd_ctl_t *ctl;
+	char name[32];
+	snprintf(name, sizeof(name), "hw:%d", card);
+	if (snd_ctl_open(&ctl, name, 0) < 0) {
+		return;
+	}
+
+	snd_ctl_elem_id_t *id;
+	snd_ctl_elem_value_t *elem;
+	snd_ctl_elem_value_t *check;
+	snd_ctl_elem_id_alloca(&id);
+	snd_ctl_elem_value_alloca(&elem);
+	snd_ctl_elem_value_alloca(&check);
+	snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
+	snd_ctl_elem_id_set_name(id, volume_control);
+	snd_ctl_elem_value_set_id(elem, id);
+	snd_ctl_elem_value_set_id(check, id);
+
+	long top = volume_max;
+	long last_followed_db = LONG_MIN;
+	int misses = 0;
+	long floor_db = LONG_MIN;
+
+	// Down the range a decibel at a time, and no further than the range goes.
+	for (int step = 1; step <= USB_CTL_PROBE_STEPS; step++) {
+		long db = -(long)step * USB_CTL_PROBE_STEP_DB;
+		long value = top;
+		if (snd_tlv_convert_from_dB(volume_tlv, volume_min, volume_max, db, &value, 1) < 0) {
+			break;
+		}
+		if (value < volume_min) {
+			value = volume_min;
+		}
+		if (value > volume_max) {
+			value = volume_max;
+		}
+		if (value == top) {
+			continue; // this control has no step here yet
+		}
+		for (unsigned int c = 0; c < volume_count; c++) {
+			snd_ctl_elem_value_set_integer(elem, c, value);
+		}
+		if (snd_ctl_elem_write(ctl, elem) < 0) {
+			break;
+		}
+
+		long back = value;
+		if (snd_ctl_elem_read(ctl, check) >= 0) {
+			back = snd_ctl_elem_value_get_integer(check, 0);
+		}
+		// A read that does not follow, or one that has fallen all the way to
+		// the bottom while far from it: both are the control giving up.
+		bool followed = back == value;
+		if (!followed) {
+			if (++misses >= USB_CTL_PROBE_MISSES) {
+				floor_db = last_followed_db;
+				break;
+			}
+		} else {
+			misses = 0;
+			last_followed_db = db;
+		}
+		// The bottom of the range is the end of the walk whether or not an edge
+		// was found: past it there is nothing left to ask for, and a control
+		// that followed all the way down has no floor to speak of.
+		if (value <= volume_min) {
+			if (misses == 0) {
+				floor_db = LONG_MIN;
+			}
+			break;
+		}
+	}
+
+	// Put it back before anything is played through it.
+	for (unsigned int c = 0; c < volume_count; c++) {
+		snd_ctl_elem_value_set_integer(elem, c, top);
+	}
+	snd_ctl_elem_write(ctl, elem);
+	snd_ctl_close(ctl);
+
+	usb_ctl_floor_db = floor_db;
+	if (floor_db != LONG_MIN) {
+		fprintf(stderr, "usbaudio: '%s' stops following below %.1f dB; past that the samples do the work\n",
+				volume_control, floor_db / 100.0);
+	} else {
+		fprintf(stderr, "usbaudio: '%s' still follows its whole range; the top third of it is used\n",
+				volume_control);
+	}
+}
+
+// How much attenuation the control may be trusted with, as a negative number of
+// hundredths of a dB, never positive and never zero.
+//
+// The measured floor when there is one, because every decibel the control takes
+// is a decibel the amplifier's own noise floor comes down with -- that is what
+// the whole split is for. The decibel of margin is so that rounding inside the
+// driver can never land the request on the step that stopped following.
+//
+// Without a measurement -- a control with no dB scale, or a probe that could not
+// open the card -- it falls back to the top third of the declared range, capped
+// at USB_CTL_SHARE_MAX_DB. That is a guess, and a deliberately shallow one: too
+// much on the samples costs hiss, too much on an unmeasurable control costs a
+// dead stretch at the bottom of the knob, and the second is the worse of the
+// two.
+static long control_share_db(void) {
+	if (usb_ctl_floor_db != LONG_MIN) {
+		long share = usb_ctl_floor_db + 100;
+		return share > -100 ? -100 : share;
+	}
+
+	long span = volume_max - volume_min;
+	long share = 0;
+	if (span > 0 && volume_has_db) {
+		long db_span = 0;
+		if (snd_tlv_convert_to_dB(volume_tlv, volume_min, volume_max, volume_min, &db_span) == 0 &&
+			db_span < 0 && db_span > -60000) {
+			share = db_span / USB_CTL_SHARE_DIV;
+			if (share > -USB_CTL_SHARE_MAX_DB) {
+				share = -USB_CTL_SHARE_MAX_DB;
+			}
+		}
+	}
+	return share > -100 ? -100 : share;
+}
+
 void usbaudio_apply_volume(int percent) {
 	if (active_card < 0) {
 		swvolume_clear_usb_gain();
@@ -610,13 +880,24 @@ void usbaudio_apply_volume(int percent) {
 		return;
 	}
 
-	bool hardware = volume_has_db && config_get_int("usb", "hardware_volume", 0);
+	// The device's own control by default -- see the note above about hiss --
+	// and the samples instead when somebody asks for the older behaviour. Only
+	// ever with a dB scale, because without one "the nearest step at or above
+	// the target" has no meaning and the control can only go to its top.
+	bool hardware = volume_has_db && config_get_int("usb", "hardware_volume", 1);
 	long value = volume_max;
 	long hw_db = 0;
 	if (mute) {
 		value = volume_min;
 	} else if (volume_has_db) {
-		long want = hardware ? target : 0;
+		// What the control is asked for, never past the share it is trusted
+		// with: past that the samples take it smoothly instead of the level
+		// stopping dead at the control's own mute point.
+		long share = hardware ? control_share_db() : 0;
+		long want = target > share ? target : share;
+		if (!hardware) {
+			want = 0;
+		}
 		if (snd_tlv_convert_from_dB(volume_tlv, volume_min, volume_max, want, &value, hardware ? 1 : -1) < 0) {
 			value = volume_max;
 		}
@@ -678,11 +959,31 @@ void usbaudio_apply_volume(int percent) {
 	// Asked for something below the top and still sitting at the top. The slack
 	// is never zero: on a control with only a few steps, max - 0 would read as
 	// "stuck" the moment the level really is the maximum.
+	//
+	// And it is a fraction of the range rather than a fixed number of steps,
+	// because the size of a step is the device's business. A 0..50 control's
+	// slack of two is 2 dB and cannot be reached by a write that was honoured
+	// -- the driver rounds to a step, not by a fifth of the range. A 0..10
+	// control's two is 20 dB, and a write asking for index 9 of 10 lands on 9,
+	// which is inside the dead band: the control would be judged to have done
+	// nothing at the exact moment it did what it was told, and a device with a
+	// short scale -- a headset's, usually -- would be dropped back to the
+	// samples and start hissing again. So the slack is capped well below one
+	// step and the rounding case is left to the check below.
 	long slack = (volume_max - volume_min) / 20;
 	if (slack < 1) {
 		slack = 1;
 	}
-	bool stuck = value <= volume_max - slack && back >= volume_max - slack;
+	if (slack > (volume_max - volume_min) / 4) {
+		slack = (volume_max - volume_min) / 4;
+	}
+	if (slack < 1) {
+		slack = 1;
+	}
+	// Still at the top after being asked for something well below *and* not the
+	// value that was asked for: a driver may round, and a rounded answer is an
+	// answer. `value` is what was requested, `back` what the control reads now.
+	bool stuck = value <= volume_max - slack && back >= volume_max - slack && back != value && value < back;
 	if (wrote < 0 || stuck) {
 		fprintf(stderr,
 				"usbaudio: '%s' did not take %d%% (asked %ld, reads %ld); the level goes to the samples "
@@ -935,18 +1236,43 @@ void usbaudio_poll(void) {
 	// Who owns the port comes first, and is asked whatever playback is doing:
 	// the arbitration is about the socket, not about where the sound goes.
 	static int empty_polls;
-	int card = find_usb_card();
+
+	// The external USB DAC setting before anything else on the port: it decides
+	// whether the controller is a host at all, which everything below reads.
+	// Two of its four outcomes are impossible to reach from here without it --
+	// a setting switched off while the role is held, and a reservation taken
+	// away by ADB, DAC mode or a storage export.
+	usbhostmode_tick();
+
+	bool audio_present;
+	int card = find_usb_output(&audio_present);
 	if (usbhostprobe_active()) {
-		usbhost_probe_event_t event = usbhostprobe_poll(card >= 0, bus_has_audio_device());
-		if (event == USBHOST_EVENT_CARD) {
+		usbhost_probe_event_t event = usbhostprobe_poll(audio_present, bus_has_audio_device());
+		// The held role is quiet by design: a DAC that is plugged in, unplugged
+		// and plugged in again is the same setting doing its job, and a popup
+		// for each of those would be reading the log out loud. Only the two
+		// answers that leave the port in a state somebody has to know about are
+		// said out loud -- a role that would not go back, and the one-off note
+		// that the first card was found.
+		if (usbhostprobe_held()) {
+			if (event == USBHOST_EVENT_CARD) {
+				log_port_state("external USB DAC: audio card appeared");
+			} else if (event == USBHOST_EVENT_RESTORE_FAILED) {
+				log_port_state("external USB DAC: role restore failed");
+				gui_notify_popup_long("usbhost_restore_failed");
+			}
+			usbhostmode_event(event);
+		} else if (event == USBHOST_EVENT_CARD) {
 			log_port_state("external host trial: audio card appeared");
 			gui_notify_popup("usbhost_card_found");
 		} else if (event == USBHOST_EVENT_TIMEOUT) {
 			log_port_state("external host trial timed out");
 			gui_notify_popup("usbhost_not_found");
 		} else if (event == USBHOST_EVENT_RESTORE_FAILED) {
+			// The one the setting cares about too: the port is still forced.
 			log_port_state("external host trial: role restore failed");
 			gui_notify_popup_long("usbhost_restore_failed");
+			usbhostmode_event(event);
 		} else if (event == USBHOST_EVENT_RESTORED) {
 			gui_notify_popup("usbhost_restored");
 		}
@@ -960,7 +1286,27 @@ void usbaudio_poll(void) {
 		empty_polls++;
 		card = active_card;
 	}
-	arbitrate_port(card >= 0);
+	arbitrate_port(audio_present || card >= 0);
+
+	// A different device on the same card number is a different output: one
+	// dongle out, another in. The number is the lowest free one either way, so
+	// it stays put across a swap, and everything below is keyed on it. Read
+	// the bus name the card hangs off and route again when that has moved --
+	// otherwise the second dongle is driven through the first one's device
+	// name, level and control, which is a stream that opens and plays to
+	// something that is no longer there.
+	char bus[32];
+	if (card >= 0) {
+		read_card_bus(card, bus, sizeof(bus));
+		if (usb_bus[0] && bus[0] && strcmp(bus, usb_bus) != 0) {
+			fprintf(stderr, "usbaudio: card%d now hangs off %s, not %s; the device was replaced\n", card, bus,
+					usb_bus);
+			active_card = -1; // route it again, and take its own name and level
+		}
+		if (bus[0]) {
+			snprintf(usb_bus, sizeof(usb_bus), "%s", bus);
+		}
+	}
 
 	// Bluetooth wins outright over where playback goes. Both would be pointing
 	// it somewhere, and the one the listener is wearing is the one that was
@@ -992,13 +1338,23 @@ void usbaudio_poll(void) {
 		// the top of its range. The other order puts a full-scale burst into a
 		// pair of headphones somebody is wearing.
 		find_volume_control(card);
+		// And where that control gives up, before anything is asked of it:
+		// its declared range is the descriptor's opinion, and a dongle's
+		// analogue output commonly goes mute well above the bottom of it. Done
+		// here, on the way in, so the answer is in hand for every volume change
+		// afterwards.
+		probe_control_floor(card);
 		usbaudio_apply_volume(get_volume_percent());
 		audio_set_output_device(pcm);
 	} else {
 		active_name[0] = '\0';
+		usb_bus[0] = '\0';
 		volume_control[0] = '\0';
+		// The next dongle is a different device with a different scale: measure
+		// it rather than inheriting this one's.
+		usb_ctl_floor_db = LONG_MIN;
 		swvolume_clear_usb_gain();
-		fprintf(stderr, "usbaudio: the port is empty again; playback goes back to the jacks\n");
+		fprintf(stderr, "usbaudio: no USB playback device; playback goes back to the jacks\n");
 		audio_set_output_device(NULL);
 	}
 }

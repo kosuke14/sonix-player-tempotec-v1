@@ -57,9 +57,14 @@ ICONS = [
     ("folder.svg", "folder_corner", 34),
     ("folder-root.svg", "folder_root", 34), # browser corner: back to the card root
     ("file.svg", "file", 32),
+    ("system-info.svg", "system_info", 32),
     ("music-settings.svg", "music_settings", 34),
+    ("download.svg", "download", 34),
     ("book-finished.svg", "book_finished", 34),  # the Audiobooks page's corner: the finished books
     ("audio-waveform.svg", "audio_waveform", 34),
+    # NOS holds each sample until the next one: a stepped waveform, not the
+    # smooth waveform beside Filters.
+    ("nos.svg", "nos", 34),
     # AutoEq search corner: download the headphone index again.
     ("autoeq-update.svg", "autoeq_update", 34),
     ("repeat.svg", "repeat_all", 30),
@@ -411,6 +416,11 @@ ICONS = [
     ("most-played.svg", "most_played", 32),
     # The corner button on the lyrics sheet that looks up words on LRCLIB.
     ("lyrics-search.svg", "lyrics_search", 32),
+    # Settings sections that used to share the vertical ellipsis. A plug says
+    # optional modules; a grid of tiles says everything else behind More. White
+    # outlines, so every appearance tints them with its own semantic colour.
+    ("settings-plugins.svg", "settings_plugins", 30),
+    ("settings-more.svg", "settings_more", 30),
 ]
 
 # Main menu and section tiles, which keep their own colours and are therefore
@@ -419,6 +429,13 @@ ICONS = [
 # weight in the binary and nothing else.
 MAIN_MENU_ICON_SIZE = 128
 SECTION_ICON_SIZE = 112
+# The SoundCloud, Subsonic, Radio and Qobuz home cards are the same size and
+# draw their picture at this size, so both their artwork and the flat themes'
+# glyphs are rendered at it rather than scaled at run time. The glyphs are a
+# little smaller than the artwork: a white line drawing of the same box reads
+# heavier than the shaded card behind it.
+HOME_TILE_SIZE = 48
+HOME_TILE_GLYPH_SIZE = 40
 
 COLOR_ICONS = [
     # The quality badges under a track's title. Here rather than above because
@@ -460,6 +477,57 @@ COLOR_ICONS = [
     ("qobuz.png", "menu_qobuz", SECTION_ICON_SIZE),
     ("radio.png", "menu_radio", SECTION_ICON_SIZE),
     ("podcast.png", "menu_podcast", SECTION_ICON_SIZE),
+    # SoundCloud joins the Streaming grid at the same size as its neighbours.
+    ("soundcloud.png", "menu_soundcloud", SECTION_ICON_SIZE),
+    # The same four glyphs the SoundCloud home cards draw, rendered at the size
+    # those cards use so the flat themes show them unscaled instead of blowing
+    # a 32 px icon up by half again.
+    ("heart.svg", "sc_likes_glyph", HOME_TILE_GLYPH_SIZE),
+    ("repeat.svg", "sc_reposts_glyph", HOME_TILE_GLYPH_SIZE),
+    ("files-playlist.svg", "sc_playlists_glyph", HOME_TILE_GLYPH_SIZE),
+    ("music-settings.svg", "sc_account_glyph", HOME_TILE_GLYPH_SIZE),
+    # The same four Subsonic tiles in the flat themes, whose cards put the
+    # glyph on its own rather than inside an illustration.
+    ("music-settings.svg", "sub_server_glyph", HOME_TILE_GLYPH_SIZE),
+    ("wifi-high.svg", "sub_test_glyph", HOME_TILE_GLYPH_SIZE),
+    ("folder.svg", "sub_folders_glyph", HOME_TILE_GLYPH_SIZE),
+    ("artist.svg", "sub_artists_glyph", HOME_TILE_GLYPH_SIZE),
+    # The Radio home page's four tiles, same treatment: the flat themes draw the
+    # glyph itself, at the size the card gives it.
+    ("globe.svg", "radio_language_glyph", HOME_TILE_GLYPH_SIZE),
+    ("flag.svg", "radio_country_glyph", HOME_TILE_GLYPH_SIZE),
+    ("music-note.svg", "radio_genre_glyph", HOME_TILE_GLYPH_SIZE),
+    ("heart-outline.svg", "radio_flylo_glyph", HOME_TILE_GLYPH_SIZE),
+    # The Qobuz home page's four cards: the same treatment the pages above
+    # give theirs, one glyph per destination.
+    ("heart-outline.svg", "qobuz_favourites_glyph", HOME_TILE_GLYPH_SIZE),
+    ("album.svg", "qobuz_albums_glyph", HOME_TILE_GLYPH_SIZE),
+    ("files-playlist.svg", "qobuz_playlists_glyph", HOME_TILE_GLYPH_SIZE),
+    ("music-note.svg", "qobuz_genres_glyph", HOME_TILE_GLYPH_SIZE),
+    # The four tiles on the SoundCloud home page. Emitted at the size those
+    # cards draw them, so the player never has to resample the artwork.
+    ("sc-likes.png", "menu_sc_likes", HOME_TILE_SIZE),
+    ("sc-reposts.png", "menu_sc_reposts", HOME_TILE_SIZE),
+    ("sc-playlists.png", "menu_sc_playlists", HOME_TILE_SIZE),
+    ("sc-account.png", "menu_sc_account", HOME_TILE_SIZE),
+    # The four tiles on the Subsonic home page, drawn by the same card recipe
+    # and rendered at the size those cards draw them.
+    ("sub-server.png", "menu_sub_server", HOME_TILE_SIZE),
+    ("sub-test.png", "menu_sub_test", HOME_TILE_SIZE),
+    ("sub-folders.png", "menu_sub_folders", HOME_TILE_SIZE),
+    ("sub-artists.png", "menu_sub_artists", HOME_TILE_SIZE),
+    # The four tiles on the Radio home page: Language, Country, Genre and
+    # Flylo's favs, drawn by the same card recipe.
+    ("radio-language.png", "menu_radio_language", HOME_TILE_SIZE),
+    ("radio-country.png", "menu_radio_country", HOME_TILE_SIZE),
+    ("radio-genre.png", "menu_radio_genre", HOME_TILE_SIZE),
+    ("radio-flylo.png", "menu_radio_flylo", HOME_TILE_SIZE),
+    # The four tiles on the Qobuz home page: the favourites, the account's own
+    # playlists, and the genre picker that leads to the new releases.
+    ("qobuz-favourites.png", "menu_qobuz_favourites", HOME_TILE_SIZE),
+    ("qobuz-albums.png", "menu_qobuz_albums", HOME_TILE_SIZE),
+    ("qobuz-playlists.png", "menu_qobuz_playlists", HOME_TILE_SIZE),
+    ("qobuz-genres.png", "menu_qobuz_genres", HOME_TILE_SIZE),
     ("audiobooks.png", "menu_audiobooks", MAIN_MENU_ICON_SIZE),
     ("audiobook-library.png", "menu_audiobook_library", SECTION_ICON_SIZE),
     ("audiobook-series.png", "menu_audiobook_series", SECTION_ICON_SIZE),
@@ -492,6 +560,12 @@ COLOR_ICONS = [
     ("qobuz-badge.png", "qobuz_badge", 52),
     ("tidal-badge.png", "tidal_badge", 52),
     ("podcast-badge.png", "podcast_badge", 52),
+
+    # The official Hi-Res Audio artwork supplied for the optional badge design.
+    # Keep its gold/black colours; 34 px stays close to the text badge and
+    # clear of the source marks. It is embedded like the other colour artwork,
+    # so the player does not depend on a PNG decoder or a resource file.
+    ("hi-res-audio.png", "hires_audio", (34, 34)),
 ]
 
 
@@ -514,14 +588,19 @@ def render(svg_path, size):
 
 
 def render_color(path, size):
-    """PNG or SVG -> list of BGRA bytes with the original colours kept."""
+    """PNG or SVG -> BGRA bytes with the original colours kept.
+
+    A side gives a square; an explicit (width, height) also supports artwork
+    whose proportions are not square.
+    """
+    target = size if isinstance(size, tuple) else (size, size)
     if path.lower().endswith(".svg"):
-        png = cairosvg.svg2png(url=path, output_width=size, output_height=size)
+        png = cairosvg.svg2png(url=path, output_width=target[0], output_height=target[1])
         img = Image.open(io.BytesIO(png)).convert("RGBA")
     else:
         img = Image.open(path).convert("RGBA")
-    if img.size != (size, size):
-        img = img.resize((size, size), Image.LANCZOS)
+    if img.size != target:
+        img = img.resize(target, Image.LANCZOS)
 
     raw = img.tobytes()  # RGBA, 4 bytes per pixel
     out = bytearray()

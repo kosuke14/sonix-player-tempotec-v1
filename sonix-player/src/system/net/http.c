@@ -407,15 +407,46 @@ static bool conn_open(conn_t *c, const url_t *u, int timeout_secs, char *err, si
 // body and is handed back in `body`/`body_len` -- with a stream there is no
 // way to put it back on the socket.
 //
+// `deadline_secs` bounds the whole header phase, not just each recv: a server
+// that accepts the connection and then trickles headers forever, or never
+// finishes them at all, must not be able to hold the read thread past it.
+// Each recv is trimmed to what remains of the deadline, and the socket's
+// receive timeout is restored to the full value before a successful return so
+// the body read keeps its own timeout.
+//
 // Returns the status code, or -1.
-static int read_headers(conn_t *c, char *headers, size_t headers_size, char *body, size_t body_size,
-						int *body_len) {
-	size_t used = 0;
-	bool found = false;
-	*body_len = 0;
+//
+// How much of the header-reading deadline is left, measured from `started`,
+// trimmed onto the socket's receive timeout so no single recv can outlast the
+// overall deadline. Returns <= 0 once the deadline has passed.
+static long header_time_left_ms(const struct timespec *started, int deadline_secs, int fd) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long left_ms = (long)deadline_secs * 1000 -
+                   (long)(now.tv_sec - started->tv_sec) * 1000 -
+                   (now.tv_nsec - started->tv_nsec) / 1000000;
+    if (left_ms > 0) {
+        struct timeval tv = { .tv_sec = left_ms / 1000, .tv_usec = (left_ms % 1000) * 1000 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    return left_ms;
+}
 
-	while (used + 1 < headers_size) {
-		int n = conn_read(c, headers + used, headers_size - used - 1);
+static int read_headers(conn_t *c, char *headers, size_t headers_size, char *body, size_t body_size,
+                        int *body_len, int deadline_secs) {
+    size_t used = 0;
+    bool found = false;
+    *body_len = 0;
+
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+    while (used + 1 < headers_size) {
+        if (header_time_left_ms(&started, deadline_secs, c->fd) <= 0) {
+            return -1; // the headers never arrived: give up instead of waiting for ever
+        }
+
+        int n = conn_read(c, headers + used, headers_size - used - 1);
 		if (n <= 0) {
 			return -1;
 		}
@@ -459,6 +490,9 @@ static int read_headers(conn_t *c, char *headers, size_t headers_size, char *bod
 		char drain[4096];
 
 		while (!found && drained < 64 * 1024) {
+			if (header_time_left_ms(&started, deadline_secs, c->fd) <= 0) {
+				return -1;
+			}
 			int n = conn_read(c, drain, sizeof(drain));
 			if (n <= 0) {
 				return -1;
@@ -494,6 +528,11 @@ static int read_headers(conn_t *c, char *headers, size_t headers_size, char *bod
 	if (!space) {
 		return -1;
 	}
+
+	// The body read reuses this socket: give it back the full receive timeout
+	// rather than what was left of the header deadline.
+	struct timeval tv = { .tv_sec = deadline_secs, .tv_usec = 0 };
+	setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	return atoi(space + 1);
 }
 
@@ -942,8 +981,9 @@ static bool get_once(const url_t *u, const http_req_t *req, char **out, size_t *
 				 body_len);
 	}
 
+	const char *ua = req->user_agent && req->user_agent[0] ? req->user_agent : HTTP_USER_AGENT;
 	size_t extra_len = extra_headers ? strlen(extra_headers) : 0;
-	size_t req_cap = strlen(u->path) + extra_len + 1024;
+	size_t req_cap = strlen(u->path) + strlen(ua) + extra_len + 1024;
 	char *request = malloc(req_cap);
 	if (!request) {
 		conn_close(&conn);
@@ -952,14 +992,14 @@ static bool get_once(const url_t *u, const http_req_t *req, char **out, size_t *
 	int n = snprintf(request, req_cap,
 					 "%s %s HTTP/1.0\r\n"
 					 "Host: %s\r\n"
-					 "User-Agent: " HTTP_USER_AGENT "\r\n"
+					 "User-Agent: %s\r\n"
 					 "Accept: */*\r\n"
 					 "Accept-Encoding: %s\r\n"
 					 "Connection: close\r\n"
 					 "%s"
 					 "%s"
 					 "\r\n",
-					 method, u->path, host_header, req->accept_gzip ? "gzip, deflate" : "identity", body_headers,
+					 method, u->path, host_header, ua, req->accept_gzip ? "gzip, deflate" : "identity", body_headers,
 					 extra_headers ? extra_headers : "");
 	// Compare the length against the buffer, not just against zero: snprintf
 	// truncates but returns what it would have written, so an over-long
@@ -982,7 +1022,8 @@ static bool get_once(const url_t *u, const http_req_t *req, char **out, size_t *
 	char headers[HTTP_HEADER_BUFFER];
 	char lead[HTTP_HEADER_BUFFER];
 	int lead_len = 0;
-	int status = read_headers(&conn, headers, sizeof(headers), lead, sizeof(lead), &lead_len);
+	int status = read_headers(&conn, headers, sizeof(headers), lead, sizeof(lead), &lead_len,
+	                          timeout_secs);
 	*status_out = status;
 
 	if (status >= 300 && status < 400) {
@@ -1218,38 +1259,64 @@ static bool stream_open_once(http_stream_t *st, const char *url, int timeout_sec
 	char host_header[300];
 	host_header_value(&u, host_header, sizeof(host_header));
 
-	char request[2600];
-	int n = snprintf(request, sizeof(request),
+	const char *ua = options && options->user_agent && options->user_agent[0] ? options->user_agent : HTTP_USER_AGENT;
+	const char *extra = options && options->extra_headers ? options->extra_headers : "";
+	size_t req_cap = strlen(u.path) + strlen(ua) + strlen(extra) + 1024;
+	char *request = malloc(req_cap);
+	if (!request) {
+		conn_close(&conn);
+		return false;
+	}
+	int n = snprintf(request, req_cap,
 					 "GET %s HTTP/1.0\r\n" // 1.0: no chunking, no keep-alive to argue about
 					 "Host: %s\r\n"
-					 "User-Agent: " HTTP_USER_AGENT "\r\n"
+					 "User-Agent: %s\r\n"
+					 "%s"
 					 "%s"
 					 "Accept: */*\r\n"
 					 "\r\n",
-					 u.path, host_header, options && options->no_icy ? "" : "Icy-MetaData: 1\r\n");
+					 u.path, host_header, ua, options && options->no_icy ? "" : "Icy-MetaData: 1\r\n", extra);
 	// As above: snprintf returns what it would have written, not what it did.
-	if (n <= 0 || (size_t)n >= sizeof(request) || !conn_write_all(&conn, request, (size_t)n)) {
+	bool wrote = n > 0 && (size_t)n < req_cap && conn_write_all(&conn, request, (size_t)n);
+	free(request);
+	if (!wrote) {
 		conn_close(&conn);
 		return false;
 	}
 
-	char headers[HTTP_HEADER_BUFFER];
-	int status = read_headers(&conn, headers, sizeof(headers), st->lead, sizeof(st->lead), &st->lead_len);
-	*status_out = status;
-
-	if (status >= 300 && status < 400) {
-		location[0] = '\0';
-		header_value(headers, "Location", location, location_size);
-		conn_close(&conn);
-		return false;
-	}
-	if (status != 200) {
-		conn_close(&conn);
-		return false;
-	}
-
+	// Publish the socket on the stream before reading the headers: read_headers()
+	// above has no cancellation point other than the socket itself, so
+	// http_stream_wake() from transport_stop() must be able to shut this fd
+	// down while we are still waiting for the header block. From here on the
+	// socket belongs to st: failure paths close it themselves and conn_close()
+	// is not used again (it would also free the TLS session st references).
 	st->fd = conn.fd;
 	st->tls = conn.tls;
+
+	char headers[HTTP_HEADER_BUFFER];
+	int status = read_headers(&conn, headers, sizeof(headers), st->lead, sizeof(st->lead), &st->lead_len,
+	                          timeout_secs);
+	*status_out = status;
+
+	if (status < 0 || status >= 300) {
+		// Give up on this connection: close the socket that now belongs to st.
+		// tls_free() first -- its shutdown writes to the socket that close()
+		// is about to drop.
+		if (st->tls) {
+			tls_free(st->tls);
+			st->tls = NULL;
+		}
+		if (st->fd >= 0) {
+			close(st->fd);
+			st->fd = -1;
+		}
+		if (status >= 300 && status < 400) {
+			location[0] = '\0';
+			header_value(headers, "Location", location, location_size);
+		}
+		return false;
+	}
+
 	st->lead_pos = 0;
 
 	header_value(headers, "Content-Type", st->content_type, sizeof(st->content_type));
@@ -1296,36 +1363,67 @@ bool http_stream_open_ex(http_stream_t *st, const char *url, int timeout_secs, c
 	memset(st, 0, sizeof(*st));
 	st->fd = -1;
 	clear_last_error();
+	if (options && options->status_out) {
+		*options->status_out = 0;
+	}
 
-	char current[2600];
-	snprintf(current, sizeof(current), "%s", url);
+	char *current = malloc(HTTP_URL_MAX);
+	char *location = malloc(HTTP_URL_PATH_MAX);
+	if (!current || !location) {
+		free(current);
+		free(location);
+		return false;
+	}
+	if (snprintf(current, HTTP_URL_MAX, "%s", url) >= HTTP_URL_MAX) {
+		free(current);
+		free(location);
+		set_last_error(tr("http_bad_address"), url);
+		return false;
+	}
 
 	for (int hop = 0; hop <= HTTP_MAX_REDIRECTS; hop++) {
 		int status = 0;
-		char location[2048] = "";
-		if (stream_open_once(st, current, timeout_secs, &status, location, sizeof(location), options)) {
+		location[0] = '\0';
+		if (stream_open_once(st, current, timeout_secs, &status, location, HTTP_URL_PATH_MAX, options)) {
+			if (options && options->status_out) {
+				*options->status_out = status;
+			}
+			snprintf(last_final_url, sizeof(last_final_url), "%s", current);
+			free(current);
+			free(location);
 			return true;
 		}
+		if (options && options->status_out) {
+			*options->status_out = status;
+		}
 		if (status < 300 || status >= 400 || !location[0]) {
+			free(current);
+			free(location);
 			return false;
 		}
 
 		url_t u;
 		if (!url_parse(current, &u)) {
+			free(current);
+			free(location);
 			return false;
 		}
 		if (options && options->no_https_downgrade && u.secure && strncasecmp(location, "http://", 7) == 0) {
 			set_last_error("subsonic_https_downgrade");
+			free(current);
+			free(location);
 			return false;
 		}
 		if (location[0] == '/') {
 			char base[512];
 			snprintf(base, sizeof(base), "%s://%s:%d", u.secure ? "https" : "http", u.host, u.port);
-			snprintf(current, sizeof(current), "%s%s", base, location);
+			snprintf(current, HTTP_URL_MAX, "%s%s", base, location);
 		} else {
-			snprintf(current, sizeof(current), "%s", location);
+			snprintf(current, HTTP_URL_MAX, "%s", location);
 		}
 	}
+	free(current);
+	free(location);
 	return false;
 }
 

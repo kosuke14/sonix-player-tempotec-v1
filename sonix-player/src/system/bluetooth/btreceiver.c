@@ -3,6 +3,7 @@
 #include "btreceiver.h"
 
 #include "src/system/audio/audio.h"
+#include "src/system/audio/eq.h"
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
@@ -68,6 +69,62 @@ static int capture_ms(void) {
 static int output_ms(void) {
 	int ms = (int)config_get_int("bluetooth", "receiver_output_ms", OUTPUT_MS_DEFAULT);
 	return ms < BUFFER_MS_MIN ? BUFFER_MS_MIN : (ms > BUFFER_MS_MAX ? BUFFER_MS_MAX : ms);
+}
+
+// aptX at 44.1 kHz is the codec that ran dry, so aptX is given deeper buffers (at
+// any rate: the logs hold too little aptX at 48 kHz to exempt it).
+//
+// What the logs show (the figures and how they were counted are in PATCHES.md):
+// on the Fold 8 aptX at 44.1 kHz ran dry 64 times in 299 s across the log, and
+// on another phone 25 times in 96 s; the Fold 8's LDAC ran dry 0.19 times a
+// minute over three and a half hours, and its AAC not once in 189 s. In the
+// Bluetooth trace of both phones a nine-byte packet on the media channel comes
+// every 120 ms (mean 120.0, standard deviation 18 to 21 ms, longest interval
+// 228 ms), each with eight or nine packets the trace does not show before it:
+// the audio in blocks of about 120 ms. On the other phone ten of fourteen
+// logged underruns fall in an interval of 165 ms or more, which are 4% of its
+// intervals; on the Fold 8 one of five does. The trace cannot say when the
+// hidden packets arrived, so that is a fit and not a measurement, and what the
+// other codecs' packets look like is not known at all.
+//
+// What follows from it is reasoning, not something shown. The output starts only
+// on a full buffer (the start threshold in audio.c), so a 120 ms output starts
+// with one block queued, has no margin against the next one coming late, and
+// every late block is a gap. aptX is therefore given room: a deeper output (the
+// DAC's buffer, which also decides how much is queued before the sound starts;
+// 360 ms is three blocks, a margin of 240 ms against a longest interval seen of
+// 228 ms, which is 108 ms later than usual) and a deeper capture side. They add
+// delay only for aptX, and they are settings:
+//
+//   [bluetooth]
+//   receiver_aptx_capture_ms = 160   0 = no extra room for aptX
+//   receiver_aptx_output_ms  = 360   0 = no extra room for aptX
+//
+// The value is a floor: a larger receiver_capture_ms or receiver_output_ms
+// still wins.
+#define APTX_CAPTURE_MS_DEFAULT 160
+#define APTX_OUTPUT_MS_DEFAULT 360
+
+static bool gets_deeper_buffers(const char *codec) { return codec && strcasecmp(codec, "aptX") == 0; }
+
+static int widened_ms(int plain, const char *key, long fallback) {
+	long ms = config_get_int("bluetooth", key, fallback);
+	if (ms <= 0) {
+		return plain;
+	}
+	if (ms < BUFFER_MS_MIN) ms = BUFFER_MS_MIN;
+	if (ms > BUFFER_MS_MAX) ms = BUFFER_MS_MAX;
+	return (int)ms > plain ? (int)ms : plain;
+}
+
+static int capture_ms_for(const char *codec) {
+	int plain = capture_ms();
+	return gets_deeper_buffers(codec) ? widened_ms(plain, "receiver_aptx_capture_ms", APTX_CAPTURE_MS_DEFAULT) : plain;
+}
+
+static int output_ms_for(const char *codec) {
+	int plain = output_ms();
+	return gets_deeper_buffers(codec) ? widened_ms(plain, "receiver_aptx_output_ms", APTX_OUTPUT_MS_DEFAULT) : plain;
 }
 
 // How long after the last frame the stream still counts as live. A sender that
@@ -202,7 +259,7 @@ static void publish_format(unsigned session, const char *device, const bt_stream
 // the capture loop
 // ---------------------------------------------------------------------------
 
-static snd_pcm_t *open_capture(const char *mac, unsigned rate, unsigned channels, unsigned bits) {
+static snd_pcm_t *open_capture(const char *mac, unsigned rate, unsigned channels, unsigned bits, int latency_ms) {
 	char device[96];
 	snprintf(device, sizeof(device), "bluealsa:DEV=%s,PROFILE=a2dp", mac);
 
@@ -227,7 +284,7 @@ static snd_pcm_t *open_capture(const char *mac, unsigned rate, unsigned channels
 	snd_pcm_format_t format = (bits == 32) ? SND_PCM_FORMAT_S32_LE : SND_PCM_FORMAT_S16_LE;
 	err = snd_pcm_set_params(pcm, format, SND_PCM_ACCESS_RW_INTERLEAVED, (unsigned)channels, (unsigned)rate,
 							 0, // no resampling: the rate is the sender's and has to stay it
-							 (unsigned)capture_ms() * 1000u);
+							 (unsigned)latency_ms * 1000u);
 	if (err < 0) {
 		fprintf(stderr, "btreceiver: %u Hz %u ch %u bit refused: %s\n", rate, channels, bits, snd_strerror(err));
 		snd_pcm_close(pcm);
@@ -287,7 +344,11 @@ static int wait_capture(snd_pcm_t *pcm) {
 // sender says it is playing. Past that it is not a quiet stream, it is a handle
 // on something that is not there: an open on the wrong transport does not fail,
 // it goes silent.
+// Overridable so a host test does not have to sit out three real seconds per
+// silent session to reach the branch below it.
+#ifndef FIRST_FRAME_MS
 #define FIRST_FRAME_MS 3000
+#endif
 
 typedef enum {
 	SESSION_OVER,	// nothing more to try: the mode ends
@@ -328,7 +389,15 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	unsigned capture_bits = in_bits == 24 ? 32 : in_bits;
 	publish_format(session, name, &info);
 
-	snd_pcm_t *pcm = open_capture(mac, rate, channels, capture_bits);
+	int capture_buffer_ms = capture_ms_for(info.codec);
+	int output_buffer_ms = output_ms_for(info.codec);
+	if (capture_buffer_ms != capture_ms() || output_buffer_ms != output_ms()) {
+		fprintf(stderr, "btreceiver: %s gets deeper buffers than the other codecs: %d ms in and %d ms out (set "
+						"\"receiver_aptx_*_ms\" to change it)\n",
+				info.codec, capture_buffer_ms, output_buffer_ms);
+	}
+
+	snd_pcm_t *pcm = open_capture(mac, rate, channels, capture_bits, capture_buffer_ms);
 	if (!pcm) {
 		return SESSION_NO_PCM;
 	}
@@ -343,7 +412,7 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	// 32 is the path the hardware is known to take.
 	bool widen = false;
 	bool opened = false;
-	int buffer_ms = output_ms();
+	int buffer_ms = output_buffer_ms;
 	if (capture_bits == 16) {
 		opened = audio_external_begin_latency((int)rate, (int)channels, 32, buffer_ms);
 		widen = opened;
@@ -387,6 +456,15 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	int empty = 0;
 	uint32_t began = now_ms();
 	uint32_t watched = now_ms();
+	// When the sender was first seen saying it is playing on this PCM, for the
+	// first-frame check below; 0 while it has not said so.
+	uint32_t playing_since = 0;
+	// Overruns of the capture side, for the log: a ring that is full is dropped
+	// and recovered without a word, and a stutter can come from there as well as
+	// from the output running dry.
+	unsigned overruns = 0;
+	bool overrun_said = false;
+	uint32_t overrun_said_at = 0;
 
 	for (;;) {
 		pthread_mutex_lock(&lock);
@@ -414,6 +492,18 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 			if (answered != info_serial && bluetooth_receiver_stream(&now) && now.rate > 0 &&
 				(now.rate != rate || now.channels != channels || now.bits != in_bits ||
 				 strcmp(now.codec, info.codec) != 0)) {
+				// Published before the reopen, not after it. The codec line on
+				// the page and the tick in its codec menu are two reads of this
+				// one answer, and leaving this one until the new session opened
+				// is what made them disagree for a moment after every change:
+				// the menu said AAC because bluealsa had already said so, while
+				// the line above still said the codec the old session opened
+				// with. Both now follow bluealsa as soon as it has moved on.
+				bt_stream_t seen = now;
+				if (!seen.codec[0]) {
+					snprintf(seen.codec, sizeof(seen.codec), "%s", info.codec);
+				}
+				publish_format(session, name, &seen);
 				fprintf(stderr, "btreceiver: the sender moved to %s %u Hz %u bit; opening it again\n",
 						now.codec[0] ? now.codec : "?", now.rate, now.bits);
 				again = true;
@@ -424,12 +514,32 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 		// A PCM that opened on a transport that is no longer there does not fail
 		// and does not error: it simply never delivers. The sender's own AVRCP
 		// status is what separates that from a sender that is paused.
-		if (watchdog && !heard && now_ms() - began >= FIRST_FRAME_MS && bluetooth_receiver_playing()) {
-			fprintf(stderr, "btreceiver: %s says it is playing and nothing has arrived in %d ms; "
-							"this PCM is not the live one\n",
-					mac, FIRST_FRAME_MS);
-			again = true;
-			break;
+		//
+		// The time allowed is counted from when the sender says it is playing, not
+		// from when the PCM opened. The PCM is opened while the phone is still
+		// paused -- the page opens it on the link coming up -- and a phone that is
+		// left paused for more than three seconds and then played has simply not
+		// started yet: counted from the open, the very first poll after "playing"
+		// found the time already up and took a live PCM away. In the log this was
+		// worked from that happened three times in twelve minutes, each one
+		// 21 to 70 ms after the phone said "playing", each one closing and opening
+		// the DAC again for nothing; the last of the three is the final line of a
+		// log that then stops.
+		if (watchdog && !heard) {
+			if (bluetooth_receiver_playing()) {
+				if (!playing_since) {
+					playing_since = now_ms() ? now_ms() : 1;
+				}
+			} else {
+				playing_since = 0; // paused again: the count starts over
+			}
+			if (playing_since && now_ms() - playing_since >= FIRST_FRAME_MS) {
+				fprintf(stderr, "btreceiver: %s says it is playing and nothing has arrived in %d ms; "
+								"this PCM is not the live one\n",
+						mac, FIRST_FRAME_MS);
+				again = true;
+				break;
+			}
 		}
 
 		snd_pcm_sframes_t got = snd_pcm_readi(pcm, chunk, CHUNK_FRAMES);
@@ -440,6 +550,20 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 			got = ready;
 		}
 		if (got < 0) {
+			// An overrun is the capture ring filling up faster than this thread
+			// emptied it -- which is what happens when the output has no room and
+			// a lump of audio arrives -- and recovering from it throws the ring's
+			// contents away. Said in the log, at most every two seconds.
+			if (got == -EPIPE) {
+				overruns++;
+				if (!overrun_said || now_ms() - overrun_said_at >= 2000) {
+					overrun_said = true;
+					overrun_said_at = now_ms();
+					fprintf(stderr, "btreceiver: the capture ring overran (%u since it opened); the output was not "
+									"taking frames as fast as they arrived\n",
+							overruns);
+				}
+			}
 			// An overrun or a suspend is recoverable and common: the sender
 			// pauses between tracks and nothing arrives for a moment.
 			if (snd_pcm_recover(pcm, (int)got, 1) == 0 && ++empty < EMPTY_RECOVERIES) {
@@ -460,7 +584,12 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 		}
 		if (!session_live(session)) break;
 		empty = 0;
-		heard = true;
+		if (!heard) {
+			heard = true;
+			// How long the sound took to come, and the last thing a log says if
+			// the device stops right after: whether it got as far as audio.
+			fprintf(stderr, "btreceiver: first audio %u ms after the output opened\n", (unsigned)(now_ms() - began));
+		}
 
 		pthread_mutex_lock(&lock);
 		if (!running || session != session_id) {
@@ -475,13 +604,23 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 		}
 		pthread_mutex_unlock(&lock);
 
+		// The equaliser, the same one a decoded track and the USB DAC go through
+		// (graphic, MSEB and parametric): what comes from the phone is PCM like any
+		// other, and without this the control centre's EQ and PEQ switches did
+		// nothing to it. It returns at once when all three are off.
 		if (widen) {
 			const int16_t *src = chunk;
 			for (snd_pcm_sframes_t i = 0; i < got * (snd_pcm_sframes_t)channels; i++) {
 				wide[i] = (int32_t)((uint32_t)(uint16_t)src[i] << 16);
 			}
+			eq_process_s32(wide, (int)got, (int)channels, (int)rate);
 			audio_external_write(wide, (int)got);
 		} else {
+			if (capture_bits == 32) {
+				eq_process_s32((int32_t *)chunk, (int)got, (int)channels, (int)rate);
+			} else {
+				eq_process((short *)chunk, (int)got, (int)channels, (int)rate);
+			}
 			audio_external_write(chunk, (int)got);
 		}
 	}
@@ -568,17 +707,25 @@ static bool wait_while_idle(unsigned session) {
 	return false;
 }
 
-// After a sender that is sending could not be opened: waits for its stream to
-// change -- stop and start again, a codec change -- or for it to go. True when
-// either happened, false when the mode ended.
-static bool wait_for_stream_change(unsigned session) {
-	unsigned at = 0;
-	bluetooth_receiver_sending(&at);
-	while (session_live(session)) {
-		unsigned now = 0;
-		int sending = bluetooth_receiver_sending(&now);
-		if (!btreceiver_available() || (now != at && sending == 1)) {
+// After the sender's PCM has gone: waits for it to come back. True when it is
+// there again, false when there is nothing left to wait for.
+//
+// A codec change is a teardown and a rebuild, and in between bluealsa publishes
+// no PCM for the sender at all while the sender itself is connected and playing
+// throughout. Treating that gap as "the sender has gone" is what used to end the
+// mode -- and once it had ended, only switching the receiver off and on again
+// brought the sound back. What separates the two is the device, not the PCM:
+// bluez still says the phone or computer is connected.
+static bool wait_for_pcm(unsigned session, char *mac, size_t mac_size, char *name, size_t name_size) {
+	for (int waited = 0; session_live(session); waited += SENDER_POLL_MS) {
+		if (still_there(mac, mac_size, name, name_size)) {
 			return true;
+		}
+		if (!bluetooth_receiver_peer_connected()) {
+			return false; // the sender really has gone
+		}
+		if (waited == 0) {
+			fprintf(stderr, "btreceiver: the sender is between transports; waiting for its PCM\n");
 		}
 		usleep(SENDER_POLL_MS * 1000);
 	}
@@ -619,8 +766,11 @@ static void *capture_worker(void *arg) {
 
 	char mac[BT_MAC_MAX];
 	char name[BT_NAME_MAX];
-	if (!still_there(mac, sizeof(mac), name, sizeof(name))) {
-		set_error(session, tr("btreceiver_nothing_streaming"));
+	if (!still_there(mac, sizeof(mac), name, sizeof(name)) &&
+		!wait_for_pcm(session, mac, sizeof(mac), name, sizeof(name))) {
+		if (session_live(session)) {
+			set_error(session, tr("btreceiver_nothing_streaming"));
+		}
 		goto done;
 	}
 
@@ -636,28 +786,42 @@ static void *capture_worker(void *arg) {
 	//
 	// Two things do not use up the window. A sender whose stream is idle has
 	// nothing to open yet, and is waited for. And a sender still connected when
-	// the window runs out keeps the mode on: the error is shown, and the next
-	// change of its stream is the next attempt. Only a sender that has gone ends
-	// the mode.
+	// the window runs out keeps the mode on: the error is shown, and it is tried
+	// again -- a few seconds apart, for as long as the device is linked. Only a
+	// sender that has gone ends the mode.
+	//
+	// The retry is a timer and not an event on purpose. Waiting for the stream
+	// to change was the earlier arrangement, and the change that matters -- a
+	// sender that moved from one codec to another and rebuilt its transport --
+	// does not always produce one this side can see: bluealsa publishes no PCM
+	// while it is between the two, so there is often no transport state to move
+	// at all. A phone left in that state stayed silent until the mode was
+	// switched off and on again, which is exactly what the report described.
 	bool blind = false;
 	bool guessed = false;
+	bool logged = false;
 	uint32_t blind_since = 0;
 	int silent_runs = 0;
 	for (;;) {
 		reopen_t what = reopen_decision(blind, blind ? now_ms() - blind_since : 0, guessed);
 		if (what == REOPEN_GIVE_UP) {
-			set_error(session, tr("btreceiver_stream_failed"));
-			if (!still_there(mac, sizeof(mac), name, sizeof(name))) {
-				fprintf(stderr, "btreceiver: nothing to open in %d ms; the mode is over\n", REOPEN_WAIT_MS);
+			if (!bluetooth_receiver_peer_connected()) {
+				set_error(session, tr("btreceiver_stream_failed"));
+				fprintf(stderr, "btreceiver: nothing to open in %d ms and the sender has gone; the mode is over\n",
+						REOPEN_WAIT_MS);
 				break;
 			}
-			fprintf(stderr, "btreceiver: nothing to open in %d ms; trying again when %s's stream changes\n",
-					REOPEN_WAIT_MS, mac);
-			if (!wait_for_stream_change(session)) {
-				break;
+			if (!logged) {
+				// Said once per episode: this loop is a few seconds apart and
+				// every turn of it redraws the page otherwise.
+				fprintf(stderr, "btreceiver: nothing to open in %d ms; %s is still linked, so trying again\n",
+						REOPEN_WAIT_MS, mac);
+				set_error(session, tr("btreceiver_stream_failed"));
+				logged = true;
 			}
 			blind = false;
 			guessed = false;
+			usleep(REOPEN_POLL_MS * 1000);
 			continue;
 		}
 		guessed = guessed || what == REOPEN_GUESS;
@@ -670,11 +834,21 @@ static void *capture_worker(void *arg) {
 		session_t result = capture_session(mac, name, what == REOPEN_GUESS, watchdog, session, &heard);
 		if (heard) {
 			silent_runs = 0;
+			logged = false;
 		} else if (watchdog && result != SESSION_NO_PCM) {
 			silent_runs++;
 			if (silent_runs >= SILENT_RUNS_MAX) {
 				fprintf(stderr, "btreceiver: %d sessions in a row with no audio; leaving the next one alone\n",
 						SILENT_RUNS_MAX);
+				// Three PCMs opened and none of them delivered while the
+				// sender said it was playing: this is not a handle on the
+				// wrong transport, it is a sender whose stream died with the
+				// link and never came back. Reopening will keep finding the
+				// same dead object -- the log from the report has fourteen of
+				// these in a row, ending with the mode switched off by hand.
+				// Ask the sender for a stream instead; that is what the one
+				// recovery in that log did.
+				bluetooth_receiver_ask_to_stream();
 			}
 		}
 		if (result == SESSION_OVER) {
@@ -697,6 +871,7 @@ static void *capture_worker(void *arg) {
 		if (!nothing_there) {
 			blind = false;
 			guessed = false;
+			logged = false;
 		} else if (bluetooth_receiver_sending(NULL) == 0) {
 			fprintf(stderr, "btreceiver: %s is connected and sending nothing; waiting for it to start\n", mac);
 			if (!wait_while_idle(session)) {

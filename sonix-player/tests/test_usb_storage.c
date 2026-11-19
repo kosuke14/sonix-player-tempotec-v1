@@ -11,7 +11,7 @@
 
 static char fake_udcs[256], fake_mounts[256], fake_lun[256], fake_card[256];
 static bool claim_succeeds, claim_unmounts, fail_lun_write, switch_adb_during_claim;
-static bool adb_wanted, adb_running, handover;
+static bool adb_wanted, adb_running, handover, recorder_finished, samples_released;
 static int stop_calls, closes, opens, mount_calls, begin_calls, end_calls, claim_fd = -1;
 
 static void set_mount(bool mounted) {
@@ -42,6 +42,7 @@ bool usbaudio_handover_pending(void) { return handover; }
 bool storage_usb_begin(void) { begin_calls++; return true; }
 void storage_usb_end(void) { end_calls++; }
 int usbexport_detach_and_claim(const char *device, const char *mountpoint, bool *unmounted) {
+	assert(recorder_finished && samples_released); // no Tape Deck descriptors at unmount
 	assert(strcmp(device, "/dev/test-card") == 0 && strcmp(mountpoint, fake_card) == 0);
 	*unmounted = claim_unmounts;
 	if (claim_unmounts) set_mount(false);
@@ -57,7 +58,16 @@ int sysserver_mount(const char *device, const char *mountpoint) {
 	mount_calls++; set_mount(true); return 0;
 }
 void device_state_note_storage_gone(void) {}
+void taperecorder_finish(void) { assert(storage_active); recorder_finished = true; }
+void tapepads_release_card(void) { assert(storage_active); samples_released = true; }
+void wifitransfer_release_card(void) { closes++; }
+void networkmusic_release_card(void) { assert(storage_active); closes++; }
 void audio_stop(void) { stop_calls++; }
+void audio_stop_and_wait(int timeout_ms) { assert(timeout_ms > 0); stop_calls++; }
+void waveform_set_cache_dir(const char *path) { if (path) opens++; else closes++; }
+void sonixlink_set_thumbs_path(const char *path) { if (path) opens++; else closes++; }
+void sonixlink_set_db_path(const char *path) { assert(path && path[0]); opens++; }
+void sonixlink_set_card_root(const char *path) { assert(path && path[0]); opens++; }
 void library_close(void) { closes++; }
 void audiobookdb_close(void) { closes++; }
 void geniusdb_close(void) { closes++; }
@@ -93,7 +103,7 @@ static void expect(const char *path, const char *text) {
 static void reset(void) {
 	assert(!storage_active && export_mode == EXPORT_NONE && export_claim_fd == -1);
 	claim_succeeds = claim_unmounts = fail_lun_write = switch_adb_during_claim = false;
-	adb_wanted = adb_running = handover = false;
+	adb_wanted = adb_running = handover = recorder_finished = samples_released = false;
 	stop_calls = closes = opens = mount_calls = begin_calls = end_calls = 0;
 	claim_fd = -1;
 	put(fake_lun, "\n"); set_mount(true);
@@ -118,7 +128,7 @@ int main(void) {
 	reset();
 	assert(!storage_export());
 	assert(!storage_active && export_mode == EXPORT_NONE && export_claim_fd == -1);
-	assert(stop_calls == 1 && closes == 7 && opens == 7 && mount_calls == 0);
+	assert(stop_calls == 1 && closes == 11 && opens == 11 && mount_calls == 0);
 	assert(begin_calls == end_calls);
 	expect(fake_lun, "\n");
 
@@ -126,7 +136,7 @@ int main(void) {
 	// reopen rather than exporting an unclaimed or still-open device.
 	reset(); claim_unmounts = true;
 	assert(!storage_export());
-	assert(!storage_active && mount_calls == 1 && opens == 7);
+	assert(!storage_active && mount_calls == 1 && opens == 11);
 	expect(fake_lun, "\n");
 
 	// ADB requested while unmounting wins before the LUN write.
@@ -143,7 +153,7 @@ int main(void) {
 	assert(mount_calls == 0 && opens == 0);
 	fail_lun_write = false;
 	assert(storage_restore());
-	assert(!storage_active && export_claim_fd == -1 && mount_calls == 1 && opens == 7);
+	assert(!storage_active && export_claim_fd == -1 && mount_calls == 1 && opens == 11);
 	expect(fake_lun, "\n");
 
 	// A successful export holds the claim until the verified LUN removal.
@@ -156,7 +166,7 @@ int main(void) {
 	assert(storage_active && export_claim_fd >= 0 && mount_calls == 0);
 	fail_lun_write = false;
 	assert(storage_restore());
-	assert(!storage_active && export_claim_fd == -1 && mount_calls == 1 && opens == 7);
+	assert(!storage_active && export_claim_fd == -1 && mount_calls == 1 && opens == 11);
 	assert(begin_calls == end_calls);
 	expect(fake_lun, "\n");
 

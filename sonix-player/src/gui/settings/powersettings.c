@@ -20,8 +20,8 @@ lv_obj_t *powersettings_screen;
 #define CHARGE_LIMIT_STEP 5
 #define CHARGE_LIMIT_COUNT 5 // 80, 85, 90, 95, 100
 
-// The two LED effect controls, shown only where the SGM31324 can be driven
-// directly (the V1 and the R3 Pro II; the R1's plain LEDs have no such knobs).
+// The RGB LED's brightness and fade controls, shown only where the SGM31324
+// can be driven directly (no such knobs for the plain LEDs on the R1).
 #define LED_BRIGHTNESS_MIN 1
 #define LED_BRIGHTNESS_MAX 5
 #define LED_BRIGHTNESS_STEPS (LED_BRIGHTNESS_MAX - LED_BRIGHTNESS_MIN + 1)
@@ -37,9 +37,21 @@ static const struct {
 };
 #define AUTO_OFF_COUNT ((int)(sizeof(AUTO_OFF) / sizeof(AUTO_OFF[0])))
 
+static const struct {
+	led_visualizer_style_t style;
+	const char *label;
+} LED_STYLES[] = {
+	{LED_VISUALIZER_BASS_PULSE, "power_led_bass_pulse"},
+	{LED_VISUALIZER_ENERGY_GLOW, "power_led_energy_glow"},
+	{LED_VISUALIZER_RAINBOW_BREATH, "power_led_rainbow_breath"},
+};
+#define LED_STYLE_COUNT (sizeof(LED_STYLES) / sizeof(LED_STYLES[0]))
+
 static lv_obj_t *charge_value, *charge_slider;
 static lv_obj_t *auto_off_switch, *auto_off_value, *auto_off_slider, *auto_off_card;
 static lv_obj_t *led_on_switch, *led_off_switch, *led_off_card;
+static lv_obj_t *led_stealth_switch, *led_visualizer_switch, *led_visualizer_card;
+static lv_obj_t *led_style_pills, *led_style_button[LED_STYLE_COUNT];
 static lv_obj_t *led_bright_value, *led_bright_slider;
 static lv_obj_t *led_trans_value, *led_trans_slider;
 static lv_obj_t *key_lock_switch;
@@ -107,9 +119,9 @@ static void set_checked(lv_obj_t *sw, bool on) {
 
 void powersettings_apply(void) {
 	if (axpcharge_applies()) {
-		power_set_charge_limit(100);
-		axpcharge_set(config_get_bool("power", "charge_limit_80", false),
-					  config_get_bool("power", "charge_500ma", false));
+		bool limit_80 = config_get_bool("power", "charge_limit_80", false);
+		power_set_charge_limit(limit_80 ? 80 : 100);
+		axpcharge_set(limit_80, config_get_bool("power", "charge_500ma", false));
 	} else {
 		power_set_charge_limit(CHARGE_LIMIT_MIN + (charge_index() * CHARGE_LIMIT_STEP));
 	}
@@ -120,19 +132,23 @@ void powersettings_apply(void) {
 	// player shortly after the screen goes off.
 	power_set_standby_enabled(config_get_bool("power", "standby_mem", true));
 
-	// The LED master switch comes first: with it off there is nothing for the
-	// standby option to turn off, and led.c keeps the charge indicator alive
-	// on its own regardless.
+	led_set_stealth(config_get_bool("power", "led_stealth", false));
 	led_set_enabled(config_get_bool("power", "led_on", true));
 	led_set_idle_off(config_get_bool("power", "led_off_standby", true));
 	led_set_brightness(LED_BRIGHTNESS_MIN + led_brightness_index());
 	led_set_transition_ms(LED_TRANSITION_MIN_MS + (led_transition_index() * LED_TRANSITION_STEP_MS));
+	led_set_visualizer(config_get_bool("power", "led_visualizer", false));
 
 	input_set_key_lock(config_get_bool("power", "lock_keys_screen_off", false));
 
 	// What a held power key does: the menu with Power off and Reboot, or the
 	// power-off itself with nothing to confirm.
 	input_set_power_hold_menu(config_get_bool("power", "hold_power_menu", true));
+}
+
+static void set_toggle_available(lv_obj_t *card, lv_obj_t *toggle, bool available) {
+	lv_obj_set_state(toggle, LV_STATE_DISABLED, !available);
+	lv_obj_set_style_opa(card, available ? LV_OPA_COVER : LV_OPA_40, 0);
 }
 
 static void refresh_labels(void) {
@@ -145,20 +161,22 @@ static void refresh_labels(void) {
 	}
 	lv_label_set_text(auto_off_value, tr(AUTO_OFF[auto_off_index()].label));
 
-	// The LED master switch, and the standby option that hangs off it: with the
-	// LED switched off entirely there is nothing left for the standby option to
-	// do, so it greys out.
 	bool led_on = config_get_bool("power", "led_on", true);
-	if (led_on) {
-		lv_obj_add_state(led_on_switch, LV_STATE_CHECKED);
-	} else {
-		lv_obj_remove_state(led_on_switch, LV_STATE_CHECKED);
-	}
-
-	if (config_get_bool("power", "led_off_standby", true)) {
-		lv_obj_add_state(led_off_switch, LV_STATE_CHECKED);
-	} else {
-		lv_obj_remove_state(led_off_switch, LV_STATE_CHECKED);
+	bool stealth = config_get_bool("power", "led_stealth", false);
+	set_checked(led_on_switch, led_on);
+	set_checked(led_stealth_switch, stealth);
+	set_checked(led_off_switch, config_get_bool("power", "led_off_standby", true));
+	set_toggle_available(led_off_card, led_off_switch, led_on && !stealth);
+	if (led_visualizer_switch) {
+		bool smart = config_get_bool("power", "led_visualizer", false);
+		bool available = led_on && !stealth;
+		set_checked(led_visualizer_switch, smart);
+		set_toggle_available(led_visualizer_card, led_visualizer_switch, available);
+		lv_obj_set_hidden(led_style_pills, !smart || !available);
+		led_visualizer_style_t style = led_visualizer_style();
+		for (size_t i = 0; i < LED_STYLE_COUNT; i++) {
+			settingsrow_pill_active(led_style_button[i], style == LED_STYLES[i].style);
+		}
 	}
 
 	if (led_bright_value) {
@@ -166,14 +184,6 @@ static void refresh_labels(void) {
 	}
 	if (led_trans_value) {
 		lv_label_set_text_fmt(led_trans_value, "%d ms", LED_TRANSITION_MIN_MS + (led_transition_index() * LED_TRANSITION_STEP_MS));
-	}
-
-	if (led_on) {
-		lv_obj_remove_state(led_off_switch, LV_STATE_DISABLED);
-		lv_obj_set_style_opa(led_off_card, LV_OPA_COVER, 0);
-	} else {
-		lv_obj_add_state(led_off_switch, LV_STATE_DISABLED);
-		lv_obj_set_style_opa(led_off_card, LV_OPA_40, 0);
 	}
 
 	set_checked(key_lock_switch, config_get_bool("power", "lock_keys_screen_off", false));
@@ -247,6 +257,32 @@ static void led_transition_cb(lv_event_t *e) {
 	refresh_labels();
 }
 
+static void led_stealth_cb(lv_event_t *e) {
+	(void)e;
+	bool enabled = lv_obj_has_state(led_stealth_switch, LV_STATE_CHECKED);
+	led_set_stealth(enabled);
+	config_set_bool("power", "led_stealth", enabled);
+	config_save();
+	refresh_labels();
+}
+
+static void led_visualizer_cb(lv_event_t *e) {
+	(void)e;
+	bool enabled = lv_obj_has_state(led_visualizer_switch, LV_STATE_CHECKED);
+	led_set_visualizer(enabled);
+	config_set_bool("power", "led_visualizer", enabled);
+	config_save();
+	refresh_labels();
+}
+
+static void led_visualizer_style_cb(lv_event_t *e) {
+	led_visualizer_style_t style = (led_visualizer_style_t)(intptr_t)lv_event_get_user_data(e);
+	led_set_visualizer_style(style);
+	config_set_int("power", "led_visualizer_style", style);
+	config_save();
+	refresh_labels();
+}
+
 static void led_off_toggled_cb(lv_event_t *e) {
 	(void)e;
 	config_set_bool("power", "led_off_standby", lv_obj_has_state(led_off_switch, LV_STATE_CHECKED));
@@ -307,6 +343,15 @@ static void power_loaded_cb(lv_event_t *e) {
 	refresh_labels();
 }
 
+static void led_note(lv_obj_t *container, const char *key) {
+	lv_obj_t *label = lv_label_create(container);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(label, lv_pct(100));
+	lv_obj_add_style(label, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(label, &font_ui_14, 0);
+	lv_label_set_text(label, tr(key));
+}
+
 void powersettings_init(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(powersettings_screen, cfg, "power");
 
@@ -322,9 +367,8 @@ void powersettings_init(gui_config_t *cfg) {
 	lv_obj_set_style_text_font(standby_note, &font_ui_22, 0);
 	lv_label_set_text(standby_note, tr("power_standby_mem_note"));
 
-	// The R1 charges through its PMIC, which takes a lower target voltage and a
-	// lower current rather than a percentage: two switches there, the slider
-	// everywhere else.
+	// The V1's AXP2101 offers voltage/current controls in addition to the
+	// percentage cutoff: two switches here, the configurable slider elsewhere.
 	bool pmic = axpcharge_applies();
 	if (pmic) {
 		settingsrow_toggle(container, "power_charge_limit_80", &axp_limit_switch, axp_limit_toggled_cb);
@@ -341,12 +385,22 @@ void powersettings_init(gui_config_t *cfg) {
 		lv_slider_set_value(charge_slider, charge_index(), LV_ANIM_OFF);
 	}
 
-	// The LED master switch, and the standby option that depends on it.
 	settingsrow_toggle(container, "power_led_on", &led_on_switch, led_on_toggled_cb);
+	settingsrow_toggle(container, "power_led_stealth", &led_stealth_switch, led_stealth_cb);
+	led_note(container, "power_led_stealth_note");
 
-	// The two effect controls, only where the controller can be driven directly.
-	// On the R1 the LED is a plain on/off light and neither means anything.
+	// The visualizer, brightness and fades need the direct RGB controller.
 	if (led_effects_available()) {
+		led_visualizer_card = settingsrow_toggle_pills(container, "power_led_visualizer", led_visualizer_cb,
+													 &led_visualizer_switch, &led_style_pills);
+		for (size_t i = 0; i < LED_STYLE_COUNT; i++) {
+			led_style_button[i] = settingsrow_pill(led_style_pills, LED_STYLES[i].label, LED_STYLES[i].style,
+														 led_visualizer_style_cb);
+			// Keep the normal font and let long labels wrap on the V1.
+			lv_obj_set_style_pad_hor(led_style_button[i], 6, 0);
+		}
+		led_note(container, "power_led_visualizer_note");
+
 		settingsrow_slider(container, "power_led_brightness", LED_BRIGHTNESS_STEPS, &led_bright_value, &led_bright_slider,
 						   led_brightness_cb);
 		lv_slider_set_value(led_bright_slider, led_brightness_index(), LV_ANIM_OFF);
