@@ -89,4 +89,14 @@ extern int printf(const char *format, ...) __attribute__((format(printf, 1, 2)))
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// C17 removed ATOMIC_VAR_INIT from the language, and glibc 2.42 followed its
+// header by dropping the macro. The sources still spell the C11 way, which is
+// correct on the device's glibc 2.22. Plain initialization is the C17 form of
+// the same thing, so the spelling survives unchanged on the newer hosts.
+// ---------------------------------------------------------------------------
+#ifndef ATOMIC_VAR_INIT
+#define ATOMIC_VAR_INIT(value) (value)
+#endif
+
 #endif /* GLIBC_COMPAT_H */
