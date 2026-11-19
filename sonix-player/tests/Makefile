@@ -83,6 +83,7 @@ $(ROOT)/build_gen/streamkeys_key.h:
 STOCKKEYS_SRC = test_stockkeys.c \
                 $(ROOT)/src/system/streaming/stockkeys.c \
                 $(ROOT)/src/system/streaming/streamkeys.c \
+                $(ROOT)/src/system/image/tinfl.c \
                 $(ROOT)/src/system/image/png_scaled.c \
                 $(ROOT)/src/system/net/http.c \
                 $(ROOT)/src/system/net/tls.c \
@@ -99,6 +100,7 @@ $(BUILD)/test_stockkeys: $(STOCKKEYS_SRC) $(ROOT)/build_gen/streamkeys_key.h \
 QOBUZ_SRC = test_qobuz.c \
             $(ROOT)/src/system/streaming/qobuz.c \
             $(ROOT)/src/system/streaming/streamkeys.c \
+            $(ROOT)/src/system/image/tinfl.c \
             $(ROOT)/src/system/image/png_scaled.c \
             $(ROOT)/src/system/net/http.c \
             $(ROOT)/src/system/net/tls.c \
@@ -414,6 +416,7 @@ $(BUILD)/test_anisette: $(ANISETTE_SRC) $(ROOT)/src/system/streaming/anisette.h
 # preview fetch, against a local socket that serves the answers. The card is
 # a directory in /tmp; nothing here touches the network.
 ITUNES_SRC = test_ampitunes.c support.c $(ROOT)/src/system/streaming/ampitunes.c \
+             $(ROOT)/src/system/image/tinfl.c \
              $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
              $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c
 .PHONY: ampitunes
@@ -433,6 +436,7 @@ AMPS_SRC = test_ampstream.c support.c $(ROOT)/src/system/streaming/ampstream.c \
            $(ROOT)/src/system/streaming/ampwrapper.c $(ROOT)/src/system/streaming/ampapi.c \
            $(ROOT)/src/system/streaming/amphls.c $(ROOT)/src/system/streaming/ampfp4.c \
            $(ROOT)/src/system/streaming/streambridge.c \
+           $(ROOT)/src/system/image/tinfl.c \
            $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
            $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/config.c
 .PHONY: ampstream
