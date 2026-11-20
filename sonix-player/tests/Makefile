@@ -247,6 +247,18 @@ $(BUILD)/test_bootpic: $(BOOTPIC_SRC) $(ROOT)/src/system/device/bootpic.h \
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(BOOTPIC_SRC) $(LDFLAGS) $(LDLIBS)
 
+# The flash marker that carries the boot picture and splash brightness into
+# the boot script: the stock seven-byte field, the picture at byte eight and
+# the light field the packer's block applies after it draws.
+.PHONY: bootlogo
+bootlogo: $(BUILD)/test_bootlogo
+	$(BUILD)/test_bootlogo
+
+$(BUILD)/test_bootlogo: test_bootlogo.c $(ROOT)/src/system/device/bootlogo.c \
+                        $(ROOT)/src/system/device/bootlogo.h $(ROOT)/src/system/core/config.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_bootlogo.c $(ROOT)/src/system/core/config.c $(LDFLAGS) $(LDLIBS)
+
 # The software volume's arithmetic -- the whole level law for a USB DAC with
 # no control of its own. Plain C, no ALSA: the three routing answers
 # (Bluetooth, a card on the port, that card's control) are stubbed.
@@ -479,6 +491,22 @@ $(BUILD)/test_wifitransfer_server: $(WIFITRANSFER_SRC) $(ROOT)/src/system/net/we
                                  $(ROOT)/src/system/net/wifitransfer.h $(ROOT)/src/system/net/transferhttp.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DWT_PORT=0 -o $@ $(WIFITRANSFER_SRC) $(LDFLAGS) $(LDLIBS)
+
+# Casting to a renderer, against a real one: the Python side answers SSDP,
+# describes itself, takes the DIDL and then fetches the track the way a
+# television does -- ranges, DLNA headers, and a second connection while the
+# first is still reading. Only Wi-Fi's interface address is substituted.
+DLNACAST_SRC = test_dlna_cast.c $(ROOT)/src/system/remote/dlna_cast.c \
+               $(ROOT)/src/system/net/http.c $(ROOT)/src/system/net/tls.c \
+               $(ROOT)/src/system/core/config.c $(ROOT)/src/system/image/png_scaled.c
+.PHONY: dlnacast
+dlnacast: $(BUILD)/test_dlna_cast
+	python3 run_dlna_cast_tests.py $(BUILD)/test_dlna_cast
+
+$(BUILD)/test_dlna_cast: $(DLNACAST_SRC) $(ROOT)/src/system/remote/dlna_cast.h \
+                         $(ROOT)/src/system/net/http.h $(ROOT)/src/system/net/wifi.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(DLNACAST_SRC) $(LDFLAGS) $(LDLIBS)
 
 # Bluetooth's real A2DP-direction decision, startup wait policy and D-Bus
 # signal cache, with fake controller/process state. No radio or ALSA required.
@@ -1365,7 +1393,7 @@ $(BUILD)/test_stockkeys_ui: $(ROOT)/build_gen/streamkeys_key.h $(STOCKKEYS_UI_OB
 
 .PHONY: ui
 ui: wifitransfer-ui batteryprofile-ui
-ui: $(BUILD)/test_qobuzgenregrid $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages $(BUILD)/test_wifi_pages $(BUILD)/test_chargescreen $(BUILD)/test_power_display $(BUILD)/test_touch_wake $(BUILD)/test_lyricsearch $(BUILD)/test_games $(BUILD)/test_peq_profiles $(BUILD)/test_quickpanel_layout $(BUILD)/test_btreceiversession $(BUILD)/test_home_swipe $(BUILD)/test_corners $(BUILD)/test_playbutton $(BUILD)/test_musicsettings_rows $(BUILD)/test_volume_overlay $(BUILD)/test_playerdeck $(BUILD)/test_vinylayout $(BUILD)/test_stickerlayout $(BUILD)/test_waveform_overlay $(BUILD)/test_hiresbadge_ui $(BUILD)/test_statusbar_ui $(BUILD)/test_stockkeys_ui $(BUILD)/test_tidal_pages $(BUILD)/test_soundcloud_pages $(BUILD)/test_qobuz_pages $(BUILD)/test_jellyfin_pages $(BUILD)/test_fwupdate
+ui: $(BUILD)/test_qobuzgenregrid $(BUILD)/test_main_menu $(BUILD)/test_screensaver $(BUILD)/test_tools_pages $(BUILD)/test_wifi_pages $(BUILD)/test_chargescreen $(BUILD)/test_power_display $(BUILD)/test_touch_wake $(BUILD)/test_lyricsearch $(BUILD)/test_games $(BUILD)/test_peq_profiles $(BUILD)/test_quickpanel_layout $(BUILD)/test_bootlogo $(BUILD)/test_btreceiversession $(BUILD)/test_home_swipe $(BUILD)/test_corners $(BUILD)/test_playbutton $(BUILD)/test_musicsettings_rows $(BUILD)/test_volume_overlay $(BUILD)/test_playerdeck $(BUILD)/test_vinylayout $(BUILD)/test_stickerlayout $(BUILD)/test_waveform_overlay $(BUILD)/test_hiresbadge_ui $(BUILD)/test_statusbar_ui $(BUILD)/test_stockkeys_ui $(BUILD)/test_tidal_pages $(BUILD)/test_soundcloud_pages $(BUILD)/test_qobuz_pages $(BUILD)/test_jellyfin_pages $(BUILD)/test_fwupdate
 	$(BUILD)/test_qobuzgenregrid
 	$(BUILD)/test_main_menu ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_main_menu ../../sonix-packer/assets/V1/usr/resource/sonix/language saved
@@ -1380,6 +1408,7 @@ ui: $(BUILD)/test_qobuzgenregrid $(BUILD)/test_main_menu $(BUILD)/test_screensav
 	$(BUILD)/test_games ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_peq_profiles ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_quickpanel_layout
+	$(BUILD)/test_bootlogo
 	$(BUILD)/test_btreceiversession
 	$(BUILD)/test_home_swipe
 	$(BUILD)/test_corners

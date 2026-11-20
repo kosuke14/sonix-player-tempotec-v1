@@ -5139,3 +5139,53 @@ drawing its letters it had no glyphs for.
 MiSans instead of logging a choice the build can no longer honour. Fonts from
 the card's `Fonts` folder are untouched, so anyone who wants Roboto back can
 drop a `.ttf` there and pick it like any other family.
+
+## The status bar over the lyrics (issue #372)
+
+Music → Display options has a status bar above the player, off by default and
+off for the reporter of this issue, so the artwork on the now-playing page ran
+to the top edge. Swiping left for the words brought the bar back: a 24 px band
+of clock, volume and battery across the top of a page that had asked for none,
+pushing the first lines down and putting the chevron under it.
+
+The words were being treated as a reason to keep the bar rather than as part of
+the same player. Three places in `player.c` OR-ed `lyrics_progress > 0` into the
+expression that hides it -- `lyrics_progress_apply()`, the sheet-open block in
+`apply_layout()` and `player_sheet_open()` -- so the bar appeared the moment the
+overlay slid in and went away again when it slid out, whatever the setting said.
+The chevron's inset followed the same term, lifting it to the bar's height over
+the words alone.
+
+The overlay now follows the same setting as the sleeve it covers: with the bar
+off the words run to the top edge exactly as the artwork does, with it on the
+bar stands above them as it does above the player, and the chevron keeps the
+inset `player_content_top()` gives it either way. Album Art Max still keeps the
+bar whatever the setting, on both pages, and the bar's backdrop and tint were
+already reading the setting alone, so nothing else moved.
+
+The device suite's player, lyrics, status bar, layout and settings pages all
+still pass, and `FEATURES.md` now says which of the two arrangements the words
+follow.
+
+## The web emulator build, and a missing include (issue #374)
+
+The TempoTec V1 web emulator stopped building the day after the DLNA casting
+controls landed: the `Compile sonix-player to WebAssembly` step failed on every
+branch, `main` included, while the cross-compiled `.v1.upt` went on passing.
+
+`dlna_cast.c` sets `SO_RCVTIMEO` and `SO_SNDTIMEO` on the socket a renderer
+fetches from, and both take a `struct timeval`. The file included
+`<sys/socket.h>` and `<sys/stat.h>`, and glibc pulls `<sys/time.h>` in
+transitively through those, so the host and target builds never asked the
+question. Emscripten's musl headers do not: `timeval` is a forward declaration
+there, and the build stopped at
+
+    dlna_cast.c:610:17: error: variable has incomplete type 'struct timeval'
+
+on both timeouts. `<sys/time.h>` is now included where it is used, which is all
+the file was assuming. The bundle compiles, packs and boots in Chrome again, and
+nothing changes on the device: the include was already reaching the compiler
+there.
+
+The cast feature itself needed no change, and the rest of the file compiles
+under emcc as it stands.

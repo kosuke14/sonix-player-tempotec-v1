@@ -23,6 +23,7 @@
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/nowplaying/cover.h"
+#include "src/gui/wireless/dlna.h"
 #include "src/system/audio/audio.h"
 #include "src/system/audio/replaygain.h"
 #include "src/system/decode/decode.h"
@@ -33,6 +34,8 @@
 #include "src/gui/streaming/podcastpage.h"
 #include "src/system/remote/airplay.h"
 #include "src/system/remote/dlna.h"
+#include "src/system/remote/dlna_cast.h"
+#include "src/system/net/wifi.h"
 #include "src/system/streaming/ampkeep.h"
 #include "src/system/streaming/ampstream.h"
 #include "src/system/streaming/jellyfincache.h"
@@ -1243,9 +1246,9 @@ static void trackmenu_delete_track_cb(void *user) {
 
 static void trackmenu_back_cb(void *user) {
 	(void)user;
-	// Equivalent to the player's floating chevron, available from inside the
-	// overflow menu as well: close the now-playing sheet to its previous page.
-	player_sheet_close(true);
+	// The popover closes itself before its action runs (see item_clicked_cb),
+	// which is all "Back" has to do: the listener stays on the playback view.
+	// Leaving the sheet is the chevron's job, not this row's.
 }
 
 static void open_queue_cb(void *user) {
@@ -1291,6 +1294,39 @@ static void start_genius_cb(void *user) {
 	device_state_get(&state);
 	if (state.current_file[0] && !podcastcache_is_episode(state.current_file)) {
 		geniusui_start(state.current_file);
+	}
+}
+
+// Cast the track that is playing to the DLNA renderer chosen on the
+// Wireless > DLNA page: one tap when a renderer is already chosen. Without
+// one, the DLNA page opens so a renderer can be picked -- its "Cast current
+// track" row does exactly the same thing from there.
+static void cast_current_cb(void *user) {
+	(void)user;
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.current_file[0]) {
+		gui_notify_popup("Nothing is playing");
+		return;
+	}
+	wifi_status_t wifi;
+	wifi_get_status(&wifi);
+	if (wifi.state != WIFI_STATE_CONNECTED || !wifi.ip[0]) {
+		gui_notify_popup("enable_wi_fi_first");
+		return;
+	}
+	if (dlna_cast_selected() < 0) {
+		// Picking a renderer needs the DLNA page, so this one case leaves the
+		// playback view; with a renderer chosen the track is sent from here.
+		player_sheet_close(false);
+		gui_notify_popup("trackmenu_cast_no_renderer");
+		switch_screen(dlna_screen);
+		return;
+	}
+	if (!dlna_cast_play(state.current_file)) {
+		char status[160];
+		dlna_cast_status(status, sizeof(status));
+		gui_notify_popup(status[0] ? status : "Could not cast the track");
 	}
 }
 
@@ -1628,6 +1664,7 @@ void trackmenu_open(lv_obj_t *anchor) {
 	// borrowed term to make a menu line up.
 	static const popover_item_t ITEMS[] = {
 		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_cast", cast_current_cb, NULL},
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"ab_loop", trackmenu_ab_loop_open, NULL},
 		{"smartmix_start", start_genius_cb, NULL},
@@ -1639,6 +1676,7 @@ void trackmenu_open(lv_obj_t *anchor) {
 	};
 	static const popover_item_t ITEMS_DELETE[] = {
 		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_cast", cast_current_cb, NULL},
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"ab_loop", trackmenu_ab_loop_open, NULL},
 		{"smartmix_start", start_genius_cb, NULL},
@@ -1651,6 +1689,7 @@ void trackmenu_open(lv_obj_t *anchor) {
 	};
 	static const popover_item_t ITEMS_TIDAL[] = {
 		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_cast", cast_current_cb, NULL},
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"ab_loop", trackmenu_ab_loop_open, NULL},
 		{"smartmix_start", start_genius_cb, NULL},
@@ -1662,6 +1701,7 @@ void trackmenu_open(lv_obj_t *anchor) {
 	};
 	static const popover_item_t ITEMS_PODCAST[] = {
 		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_cast", cast_current_cb, NULL},
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"ab_loop", trackmenu_ab_loop_open, NULL},
 		{"add_to_playlist", add_to_playlist_cb, NULL},
@@ -1675,6 +1715,7 @@ void trackmenu_open(lv_obj_t *anchor) {
 	// string-extraction tool only reads these initialisers.
 	static const popover_item_t ITEMS_KEEP[] = {
 		{"trackmenu_back", trackmenu_back_cb, NULL},
+		{"trackmenu_cast", cast_current_cb, NULL},
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"ab_loop", trackmenu_ab_loop_open, NULL},
 		{"smartmix_start", start_genius_cb, NULL},
