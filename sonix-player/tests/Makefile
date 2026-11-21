@@ -2006,6 +2006,7 @@ $(BUILD)/test_lyrics_size: $(LYRICS_UI_OBJ)
 # unit, with the page the hold opens a page of the test's own and two entries in
 # the queue. The shell, the artwork and the faces are fixtures.
 SLEEVEHOLD_SRC = $(ROOT)/tests/ui/test_sleeve_hold.c $(ROOT)/src/system/playback/playlist.c \
+                 $(ROOT)/src/gui/shell/popover.c \
                  $(ROOT)/src/gui/board_profile.c \
                  $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
 SLEEVEHOLD_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(SLEEVEHOLD_SRC)) $(UI_LVGL_OBJ)
