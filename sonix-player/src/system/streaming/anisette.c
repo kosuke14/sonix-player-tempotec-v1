@@ -28,8 +28,21 @@
 // middle is plain framing over the same TLS the rest of the player uses.
 
 #define ANISETTE_DIR ".local/amp-anisette"
-#define ANISETTE_DEFAULT_SERVER "https://ani.iloader.app"
+// The first choice is the SideStore community server: its edge takes every
+// client. The iloader one sits behind a Cloudflare front that bans some TLS
+// client signatures outright (error 1010 -- the player's own among them), so
+// it is a fallback for the installs that already work through it, and the
+// second SideStore name rides along for its DNS alone.
+#define ANISETTE_DEFAULT_SERVER "https://ani.sidestore.io"
 #define ANISETTE_TIMEOUT 25
+
+// The servers a failing one hands over to, tried in this order after the
+// user's own choice and the one the current ADI blob was provisioned on.
+static const char *const ANISETTE_FALLBACKS[] = {
+	"https://ani.sidestore.io",
+	"https://anisette-v3.sidestore.io",
+	"https://ani.iloader.app",
+};
 
 // The cross toolchain carries no openssl headers: the entropy comes from
 // the kernel, the way everything else on the device takes it.
@@ -84,6 +97,8 @@ typedef struct {
 	uint8_t identifier[16];
 	char serial[32];
 	char adi_pb[4096]; // base64, empty until provisioned
+	char server[192];  // the server the blob was provisioned on; the blob is
+					   // bound to that server's ADI relay, so the OTP asks there
 } anisette_state_t;
 
 static bool state_valid(const anisette_state_t *st) {
@@ -128,6 +143,8 @@ static bool state_load(anisette_state_t *st) {
 			snprintf(st->serial, sizeof(st->serial), "%.24s", value);
 		} else if (strcmp(line, "adi_pb") == 0) {
 			snprintf(st->adi_pb, sizeof(st->adi_pb), "%s", value);
+		} else if (strcmp(line, "server") == 0) {
+			snprintf(st->server, sizeof(st->server), "%s", value);
 		}
 	}
 	fclose(f);
@@ -167,6 +184,9 @@ static bool state_save(const anisette_state_t *st) {
 	fprintf(f, "\nserial=%s\n", st->serial);
 	if (st->adi_pb[0]) {
 		fprintf(f, "adi_pb=%s\n", st->adi_pb);
+	}
+	if (st->server[0]) {
+		fprintf(f, "server=%s\n", st->server);
 	}
 	bool ok = fclose(f) == 0;
 	if (ok) {
@@ -657,6 +677,81 @@ static void ws_close(ws_t *ws) {
 // provisioning: the v3 session, relay by relay
 // ---------------------------------------------------------------------------
 
+// The candidate servers for one conversation, most preferred first: the one
+// the current ADI blob was provisioned on (its OTP questions only answer
+// there), the user's choice, then the known list. Duplicates drop out.
+static size_t server_candidates(const anisette_state_t *st, char list[][192], size_t cap) {
+	size_t n = 0;
+	if (st && st->server[0] && n < cap) {
+		snprintf(list[n++], 192, "%s", st->server);
+	}
+	if (anisette_server[0] && n < cap) {
+		bool dup = false;
+		for (size_t i = 0; i < n; i++) {
+			if (strcasecmp(list[i], anisette_server) == 0) {
+				dup = true;
+			}
+		}
+		if (!dup) {
+			snprintf(list[n++], 192, "%.191s", anisette_server);
+		}
+	}
+	for (size_t i = 0; i < sizeof(ANISETTE_FALLBACKS) / sizeof(*ANISETTE_FALLBACKS) && n < cap; i++) {
+		bool dup = false;
+		for (size_t j = 0; j < n; j++) {
+			if (strcasecmp(list[j], ANISETTE_FALLBACKS[i]) == 0) {
+				dup = true;
+			}
+		}
+		if (!dup) {
+			snprintf(list[n++], 192, "%s", ANISETTE_FALLBACKS[i]);
+		}
+	}
+	return n;
+}
+
+// One GET of the server's /v3/client_info, relaxed TLS and all. Fails on a
+// transport refusal or a non-200, which is how a fingerprint-gating edge
+// (Cloudflare's 1010) or a down server shows up. The community servers'
+// backends hiccup in short bursts (a 502 mid-conversation), so one answer
+// buys a second try a beat later before the server is called refused.
+static bool fetch_client_info(const char *server, char *client_info, size_t ci_size,
+							  char *user_agent, size_t ua_size, char *error, size_t error_size) {
+	relax_guard_t relax;
+	relax_begin(&relax);
+	char info_url[512];
+	snprintf(info_url, sizeof(info_url), "%s/v3/client_info", server);
+	bool ok = false;
+	for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+		if (attempt > 0) {
+			sleep(1);
+		}
+		char *body = NULL;
+		size_t len = 0;
+		int status = 0;
+		ok = https_raw(info_url, NULL, NULL, &body, &len, &status, error, error_size) &&
+			 status == 200;
+		if (!ok) {
+			free(body);
+			continue;
+		}
+		json_doc_t doc;
+		if (!json_parse(body, &doc)) {
+			free(body);
+			ok = false;
+			continue;
+		}
+		int root = json_root(&doc);
+		json_obj_str(&doc, root, "client_info", client_info, ci_size);
+		json_obj_str(&doc, root, "user_agent", user_agent, ua_size);
+		json_free(&doc);
+		free(body);
+		ok = client_info[0] != '\0';
+	}
+	relax_end(&relax);
+	return ok;
+}
+
 bool anisette_provision(char *error, size_t error_size) {
 	if (error && error_size) {
 		error[0] = '\0';
@@ -674,37 +769,37 @@ bool anisette_provision(char *error, size_t error_size) {
 	relax_begin(&relax);
 
 	// 1. The client info: the description and user agent this server vouches
-	//    for. The rest of the calls quote them back.
-	char info_url[512];
-	snprintf(info_url, sizeof(info_url), "%s/v3/client_info", anisette_server);
-	char *body = NULL;
-	size_t len = 0;
-	int status = 0;
-	if (!https_raw(info_url, NULL, NULL, &body, &len, &status, error, error_size) ||
-		status != 200) {
+	//    for. The rest of the calls quote them back. The first server whose
+	//    answer comes back becomes this conversation's server: a refused one
+	//    (an edge that bans the client's TLS signature, a down server) hands
+	//    over to the next, and the winner is remembered with the blob.
+	char client_info[256] = "", user_agent[128] = "";
+	char servers[8][192];
+	size_t servers_n = server_candidates(&st, servers, 8);
+	for (size_t i = 0; i < servers_n; i++) {
+		if (fetch_client_info(servers[i], client_info, sizeof(client_info), user_agent,
+							  sizeof(user_agent), error, error_size)) {
+			snprintf(st.server, sizeof(st.server), "%.191s", servers[i]);
+			anisette_set_server(servers[i]);
+			break;
+		}
+		client_info[0] = user_agent[0] = '\0';
+	}
+	if (!client_info[0]) {
+		relax_end(&relax);
 		snprintf(error, error_size, "anisette_server");
 		return false;
 	}
-	json_doc_t doc;
-	if (!json_parse(body, &doc)) {
-		free(body);
-		snprintf(error, error_size, "anisette_server");
-		return false;
-	}
-	// The parser keeps the body's pointers: everything is read first, and
-	// only then does the body go.
-	int root = json_root(&doc);
-	char client_info[256], user_agent[128];
-	json_obj_str(&doc, root, "client_info", client_info, sizeof(client_info));
-	json_obj_str(&doc, root, "user_agent", user_agent, sizeof(user_agent));
-	json_free(&doc);
-	free(body);
+	fprintf(stderr, "anisette: provisioning through %s\n", st.server);
 
 	// 2. The lookup: Apple says where the two provisioning hops live.
 	char headers[1024];
 	apple_headers(headers, sizeof(headers), &st, client_info, user_agent);
 	char lookup_ct[1200];
 	snprintf(lookup_ct, sizeof(lookup_ct), "Content-Type: text/x-xml-plist\r\n%s", headers);
+	char *body = NULL;
+	size_t len = 0;
+	int status = 0;
 	if (!https_raw("https://gsa.apple.com/grandslam/GsService2/lookup", lookup_ct, NULL, &body,
 				   &len, &status, error, error_size) ||
 		status != 200) {
@@ -883,69 +978,99 @@ bool anisette_headers(gsa_anisette_t *out, char *error, size_t error_size) {
 		return false;
 	}
 
-	// The client info once per call: the description the server vouches for.
-	char info_url[512];
-	snprintf(info_url, sizeof(info_url), "%s/v3/client_info", anisette_server);
-	char *body = NULL;
-	size_t len = 0;
-	int status = 0;
-	if (!https_raw(info_url, NULL, NULL, &body, &len, &status, error, error_size) ||
-		status != 200) {
-		snprintf(error, error_size, "anisette_server");
-		return false;
-	}
-	json_doc_t doc;
-	if (!json_parse(body, &doc)) {
-		free(body);
-		snprintf(error, error_size, "anisette_server");
-		return false;
-	}
-	char client_info[256], user_agent[128];
-	json_obj_str(&doc, json_root(&doc), "client_info", client_info, sizeof(client_info));
-	json_obj_str(&doc, json_root(&doc), "user_agent", user_agent, sizeof(user_agent));
-	json_free(&doc);
-	free(body);
+	relax_guard_t relax;
+	relax_begin(&relax);
 
-	// The one-time password and the machine id, fresh each time.
-	char ident_b64[32];
-	b64_encode(st.identifier, 16, ident_b64, sizeof(ident_b64));
-	char get_url[512];
-	snprintf(get_url, sizeof(get_url), "%s/v3/get_headers", anisette_server);
-	char post[4600];
-	snprintf(post, sizeof(post), "{\"identifier\":\"%s\",\"adi_pb\":\"%s\"}", ident_b64,
-			 st.adi_pb);
-	char ct[8192];
-	snprintf(ct, sizeof(ct), "Content-Type: application/json\r\n");
-	if (!https_raw(get_url, ct, post, &body, &len, &status, error, error_size) ||
-		status != 200) {
-		snprintf(error, error_size, "anisette_server");
-		return false;
-	}
-	if (!json_parse(body, &doc)) {
-		free(body);
-		snprintf(error, error_size, "anisette_server");
-		return false;
-	}
-	int r = json_root(&doc);
-	char kind[32], md[256], mdm[256], rinfo[32];
-	json_obj_str(&doc, r, "result", kind, sizeof(kind));
-	json_obj_str(&doc, r, "X-Apple-I-MD", md, sizeof(md));
-	json_obj_str(&doc, r, "X-Apple-I-MD-M", mdm, sizeof(mdm));
-	json_obj_str(&doc, r, "X-Apple-I-MD-RINFO", rinfo, sizeof(rinfo));
-	json_free(&doc);
-	free(body);
-	if (strcmp(kind, "Headers") != 0 || !md[0] || !mdm[0]) {
-		snprintf(error, error_size, "anisette_server");
-		return false;
-	}
+	// One server at a time, the blob's own first: a refusal to talk (an edge
+	// banning the client's TLS signature, a down server) hands over to the
+	// next, and a server that answers but will not mint an OTP for this blob
+	// -- an ADI blob is bound to the server that provisioned it -- asks that
+	// server to re-provision and tries its question again.
+	char servers[8][192];
+	size_t servers_n = server_candidates(&st, servers, 8);
+	bool reprovisioned = false;
+	for (size_t i = 0; i < servers_n; i++) {
+		char client_info[256] = "", user_agent[128] = "";
+		if (!fetch_client_info(servers[i], client_info, sizeof(client_info), user_agent,
+							   sizeof(user_agent), error, error_size)) {
+			continue;
+		}
+		anisette_set_server(servers[i]);
 
-	// The ten headers, in the order the reference sends them. The machine
-	// data is the server's answer; the rest is derived from the state.
-	char now[40];
-	time_t t = time(NULL);
-	struct tm tm;
-	gmtime_r(&t, &tm);
-	strftime(now, sizeof(now), "%Y-%m-%dT%H:%M:%SZ", &tm);
+		// The one-time password and the machine id, fresh each time.
+		char ident_b64[32];
+		b64_encode(st.identifier, 16, ident_b64, sizeof(ident_b64));
+		char get_url[512];
+		snprintf(get_url, sizeof(get_url), "%s/v3/get_headers", servers[i]);
+		char post[4600];
+		snprintf(post, sizeof(post), "{\"identifier\":\"%s\",\"adi_pb\":\"%s\"}", ident_b64,
+				 st.adi_pb);
+		char ct[8192];
+		snprintf(ct, sizeof(ct), "Content-Type: application/json\r\n");
+		char *body = NULL;
+		size_t len = 0;
+		int status = 0;
+		bool otp_ok = false;
+		for (int attempt = 0; attempt < 2 && !otp_ok; attempt++) {
+			if (attempt > 0) {
+				sleep(1); // the same hiccup-burst retry the client info gets
+			}
+			if (!https_raw(get_url, ct, post, &body, &len, &status, error, error_size) ||
+				status != 200) {
+				free(body);
+				body = NULL;
+				continue;
+			}
+			otp_ok = true;
+		}
+		if (!otp_ok) {
+			continue;
+		}
+		json_doc_t doc;
+		if (!json_parse(body, &doc)) {
+			free(body);
+			continue;
+		}
+		int r = json_root(&doc);
+		char kind[32], md[256], mdm[256], rinfo[32];
+		json_obj_str(&doc, r, "result", kind, sizeof(kind));
+		json_obj_str(&doc, r, "X-Apple-I-MD", md, sizeof(md));
+		json_obj_str(&doc, r, "X-Apple-I-MD-M", mdm, sizeof(mdm));
+		json_obj_str(&doc, r, "X-Apple-I-MD-RINFO", rinfo, sizeof(rinfo));
+		json_free(&doc);
+		free(body);
+		if (strcmp(kind, "Headers") != 0 || !md[0] || !mdm[0]) {
+			// A GetHeadersError here is the server saying this blob means
+			// nothing to it: provision against this server, then ask once
+			// more. One retry, so a persistently refusing server hands over.
+			if (reprovisioned) {
+				continue;
+			}
+			reprovisioned = true;
+			relax_end(&relax);
+			if (!anisette_provision(error, error_size)) {
+				return false;
+			}
+			relax_begin(&relax);
+			pthread_mutex_lock(&state_lock);
+			have = state_load(&st) && st.adi_pb[0];
+			pthread_mutex_unlock(&state_lock);
+			if (!have) {
+				relax_end(&relax);
+				snprintf(error, error_size, "anisette_not_provisioned");
+				return false;
+			}
+			i--; // the same server, the fresh blob
+			continue;
+		}
+
+		// The ten headers, in the order the reference sends them. The machine
+		// data is the server's answer; the rest is derived from the state.
+		char now[40];
+		time_t t = time(NULL);
+		struct tm tm;
+		gmtime_r(&t, &tm);
+		strftime(now, sizeof(now), "%Y-%m-%dT%H:%M:%SZ", &tm);
 	sha256_ctx lu_ctx;
 	sha256_init(&lu_ctx);
 	sha256_update(&lu_ctx, st.identifier, sizeof(st.identifier));
@@ -977,5 +1102,10 @@ bool anisette_headers(gsa_anisette_t *out, char *error, size_t error_size) {
 		snprintf(out->kv[i].key, sizeof(out->kv[i].key), "%s", keys[i]);
 		snprintf(out->kv[i].value, sizeof(out->kv[i].value), "%s", values[i]);
 	}
+	relax_end(&relax);
 	return true;
+	}
+	relax_end(&relax);
+	snprintf(error, error_size, "anisette_server");
+	return false;
 }
