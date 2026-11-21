@@ -52,6 +52,7 @@
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/library/library.h"
+#include "src/system/library/listeningstats.h"
 #include "src/system/library/lrclib.h"
 #include "src/system/library/lyrics.h"
 #include "src/system/playback/playlist.h"
@@ -2043,12 +2044,18 @@ static bool lyrics_now;		// on screen: allowed, and the file has words
 static lv_obj_t *lyrics_pane; // full-player overlay: the column and the note
 static lv_obj_t *lyrics_overlay_bg;
 static lv_obj_t *lyrics_head; // the title and artist at the top while the words are up
-static lv_obj_t *lyrics_head_col;
 static lv_obj_t *lyrics_head_title;
 static lv_obj_t *lyrics_head_artist;
 static lv_obj_t *lyrics_find_btn;
 static lv_obj_t *lyrics_find_icon;
-static lv_obj_t *lyrics_find_narrowed; // the names' column, made room in
+static lv_obj_t *lyrics_size_btn;
+static lv_obj_t *lyrics_size_icon;
+static lv_obj_t *lyrics_offset_btn;
+static lv_obj_t *lyrics_offset_icon;
+static int lyrics_offset_ms; // added to playback time, like a positive LRC offset
+static int lyrics_offset_saved_ms;
+static bool lyrics_offset_editing;
+static int lyrics_text_size;
 static cover_image_t lyrics_screen_pic; // the blurred sleeve at the shape of the screen
 static unsigned lyrics_bg_generation;
 static int32_t lyrics_progress; // 0 the sleeve, LYRICS_FULL the words
@@ -2074,7 +2081,8 @@ static int lyrics_view_h;
 // Timed lines have room above the first and below the last, so either can be
 // brought to the middle; untimed ones read from the top.
 static void lyrics_pad(void) {
-	int around = lyrics_cur.synced ? LV_MAX(0, lyrics_view_h / 2 - 20) : LYRICS_FADE_PX / 2;
+	int line_h = fonts_lyrics(lyrics_text_size)->line_height;
+	int around = lyrics_cur.synced ? LV_MAX(0, (lyrics_view_h - line_h) / 2) : LYRICS_FADE_PX / 2;
 	lv_obj_set_style_pad_top(lyrics_view, around, 0);
 	lv_obj_set_style_pad_bottom(lyrics_view, lyrics_cur.synced ? around : LYRICS_FADE_PX, 0);
 }
@@ -2151,13 +2159,14 @@ static void lyrics_fill(void) {
 	}
 	lyrics_note_show(NULL);
 
+	const lv_font_t *font = fonts_lyrics(lyrics_text_size);
 	for (int i = 0; i < lyrics_cur.count; i++) {
 		lv_obj_t *line = lv_label_create(lyrics_view);
 		lv_label_set_text(line, lyrics_cur.lines[i].text[0] ? lyrics_cur.lines[i].text : " ");
 		lv_label_set_long_mode(line, LV_LABEL_LONG_WRAP);
 		lv_obj_set_width(line, lv_pct(100));
 		lv_obj_set_style_text_align(line, LV_TEXT_ALIGN_CENTER, 0);
-		lv_obj_set_style_text_font(line, &font_ui_26, 0);
+		lv_obj_set_style_text_font(line, font, 0);
 		lv_obj_set_style_text_opa(line, lyrics_cur.synced ? LYRICS_DIM_OPA : LV_OPA_COVER, 0);
 		lv_obj_set_event_bubble(line, true);
 		lv_obj_set_clickable(line, false);
@@ -2173,10 +2182,11 @@ typedef struct {
 	int duration; // seconds, for the LRCLIB search of a streaming track
 	bool from_stream; // no file behind the path: LRCLIB answers in memory only
 	lyrics_t lyrics;
-	bool found;
+	int offset_ms;
 } lyrics_job_t;
 
 static void lyrics_settle(void);
+static void lyrics_header_sync(bool full);
 
 static void lyrics_arrived(void *user) {
 	lyrics_job_t *job = user;
@@ -2184,6 +2194,8 @@ static void lyrics_arrived(void *user) {
 		lyrics_free(&lyrics_cur);
 		lyrics_cur = job->lyrics; // handed over, found or empty
 		lyrics_loaded = true;
+		lyrics_offset_ms = lyrics_offset_saved_ms = job->offset_ms;
+		lyrics_header_sync(lyrics_progress == LYRICS_FULL);
 		lyrics_fill();
 		lyrics_settle();
 	} else {
@@ -2200,15 +2212,14 @@ static void *lyrics_worker(void *arg) {
 		// in memory for this play only.
 		lrclib_record_t *records = NULL;
 		int count = 0;
-		job->found = false;
 		lrclib_result_t r = lrclib_search(job->title, job->artist, job->album, job->duration,
 										  &records, &count);
 		if (r == LRCLIB_OK && count > 0 && records[0].text) {
-			job->found = lyrics_from_text(records[0].text, &job->lyrics);
+			lyrics_from_text(records[0].text, &job->lyrics);
 		}
 		lrclib_free(records, count);
-	} else {
-		job->found = lyrics_load(job->path, job->title, &job->lyrics);
+	} else if (lyrics_load(job->path, job->title, &job->lyrics) && job->lyrics.synced) {
+		job->offset_ms = library_lyrics_offset(job->path);
 	}
 	if (!gui_post(lyrics_arrived, job)) {
 		lyrics_free(&job->lyrics);
@@ -2245,18 +2256,20 @@ static bool lyrics_has_words(void) { return lyrics_loaded && lyrics_cur.count > 
 // not the interface's to wait for. Asked again only when the file changes.
 static void lyrics_request(const device_state_t *state) {
 	bool from_stream = !playing_local_file(state) && amp_lyrics_wanted(state);
-	if (!from_stream && !state->current_file[0]) {
-		return;
-	}
-	if (!from_stream && !playing_local_file(state)) {
+	if (!from_stream && (!state->current_file[0] || !playing_local_file(state))) {
+		if (lyrics_offset_editing) popover_close();
 		return;
 	}
 	if (strcmp(state->current_file, lyrics_path) == 0) {
 		return;
 	}
+	if (lyrics_offset_editing) popover_close(); // commit before replacing the path and its offset
 	snprintf(lyrics_path, sizeof(lyrics_path), "%s", state->current_file);
 	lyrics_free(&lyrics_cur);
 	lyrics_loaded = false;
+	lyrics_offset_ms = 0;
+	lyrics_tap_ms = -1;
+	lyrics_header_sync(lyrics_progress == LYRICS_FULL);
 	lyrics_generation++;
 	lyrics_fill();
 
@@ -2283,7 +2296,7 @@ static void lyrics_request(const device_state_t *state) {
 
 // Brings `label` to the middle of the column, always in the same short time
 // whatever the distance, so the words step up like a typewriter's paper.
-static void lyrics_centre(lv_obj_t *label) {
+static void lyrics_centre(lv_obj_t *label, bool animate) {
 	lv_obj_update_layout(lyrics_view);
 	lv_area_t line_area;
 	lv_area_t view_area;
@@ -2296,6 +2309,10 @@ static void lyrics_centre(lv_obj_t *label) {
 	}
 
 	lv_anim_delete(lyrics_view, lyrics_scroll_exec);
+	if (!animate) {
+		lv_obj_scroll_to_y(lyrics_view, to, LV_ANIM_OFF);
+		return;
+	}
 	if (to == from) {
 		return;
 	}
@@ -2333,7 +2350,7 @@ static void lyrics_follow(double seconds) {
 	if (!lyrics_on_screen() || !lyrics_view || !lyrics_cur.synced || lyrics_cur.count == 0) {
 		return;
 	}
-	int32_t ms = (int32_t)(seconds * 1000.0);
+	int64_t ms = (int64_t)(seconds * 1000.0 + 0.5);
 	if (lyrics_tap_ms >= 0) {
 		// Until the player reports a position near the tapped line, the one
 		// it reports is from before the jump: following it would send the
@@ -2343,7 +2360,7 @@ static void lyrics_follow(double seconds) {
 		}
 		lyrics_tap_ms = -1;
 	}
-	int line = lyrics_line_at(&lyrics_cur, ms);
+	int line = lyrics_line_at(&lyrics_cur, ms + lyrics_offset_ms);
 	if (line != lyrics_lit) {
 		lyrics_paint_line(lyrics_lit, false);
 		lyrics_lit = line;
@@ -2361,16 +2378,17 @@ static void lyrics_follow(double seconds) {
 	lyrics_user_until = 0;
 	lyrics_centred = true;
 	if (line >= 0 && line < (int)lv_obj_get_child_count(lyrics_view)) {
-		lyrics_centre(lv_obj_get_child(lyrics_view, line));
+		lyrics_centre(lv_obj_get_child(lyrics_view, line), true);
 	} else {
-		lyrics_centre(lv_obj_get_child(lyrics_view, 0));
+		lyrics_centre(lv_obj_get_child(lyrics_view, 0), true);
 	}
 }
 
 static void lyrics_scroll_cb(lv_event_t *e) {
 	(void)e;
 	// A finger, not the column following the music: that scrolls from a timer.
-	if (lv_indev_active()) {
+	lv_indev_t *indev = lv_indev_active();
+	if (indev && lv_indev_get_scroll_obj(indev) == lyrics_view) {
 		lv_anim_delete(lyrics_view, lyrics_scroll_exec);
 		lyrics_user_until = lv_tick_get() + LYRICS_USER_HOLD_MS;
 		lyrics_centred = false;
@@ -2416,6 +2434,8 @@ static void lyrics_look(bool on) {
 	lv_obj_set_style_text_color(lyrics_view, ink, 0);
 	lv_obj_set_style_text_color(lyrics_note, ink, 0);
 	if (lyrics_find_icon) lv_obj_set_style_image_recolor(lyrics_find_icon, ink, 0);
+	if (lyrics_size_icon) lv_obj_set_style_image_recolor(lyrics_size_icon, ink, 0);
+	if (lyrics_offset_icon) lv_obj_set_style_image_recolor(lyrics_offset_icon, ink, 0);
 }
 
 // What travels with the sleeve: it goes out to the left as the words come in.
@@ -2430,10 +2450,9 @@ static void lyrics_shift(lv_obj_t *obj, int32_t x) {
 	}
 }
 
-// The button at the top right while the words are all the way in: it looks them
-// up on LRCLIB again, to pick others in their place. Beside the star or the
-// ellipsis where an arrangement keeps one up there, in the corner otherwise.
-#define LYRICS_FIND_BTN bp_pick(COMPACT_CORNER_BTN, 56)
+// Lyrics header controls are visible only once the page is all the way in.
+#define LYRICS_HEADER_BTN bp_pick(COMPACT_CORNER_BTN, 56)
+#define LYRICS_HEADER_HIT_SLOP bp_pick(COMPACT_CORNER_BTN_EXT_CLICK, 10)
 
 // Alternative (Studio) already has an ellipsis in the right-hand slot. Move
 // it inboard of whichever mark takes that corner. Limit the names to the room
@@ -2473,43 +2492,28 @@ static void hires_present(bool show, bool back_right) {
 	studio_hires_fit();
 }
 
-// The names at the top give up the button's width on both sides, so a long
-// title stays centred and stops short of it.
-static void lyrics_find_make_room(lv_obj_t *col) {
-	if (col == lyrics_find_narrowed) {
-		return;
-	}
-	if (lyrics_find_narrowed) {
-		int32_t w = lv_obj_get_style_width(lyrics_find_narrowed, 0);
-		lv_obj_set_width(lyrics_find_narrowed, w + 2 * LYRICS_FIND_BTN);
-	}
-	if (col) {
-		int32_t w = lv_obj_get_style_width(col, 0);
-		lv_obj_set_width(col, w - 2 * LYRICS_FIND_BTN);
-	}
-	lyrics_find_narrowed = col;
-}
-
-static void lyrics_find_sync(bool full) {
+static void lyrics_header_sync(bool full) {
 	if (!lyrics_find_btn) {
 		return;
 	}
 	bool show = full && lyrics_now;
+	lv_obj_set_hidden(lyrics_find_btn, !show);
+	lv_obj_set_hidden(lyrics_size_btn, !show);
+	lv_obj_set_hidden(lyrics_offset_btn, !show || !lyrics_cur.synced);
 	if (!show) {
-		lv_obj_set_hidden(lyrics_find_btn, true);
-		lyrics_find_make_room(NULL);
 		return;
 	}
 	// The chevron is on the right in Sticker (unless a hi-res badge moved it
-	// back to the left). The search button takes the opposite corner.
+	// back to the left). The search button takes the opposite corner, with
+	// the size and timing buttons inboard. Keep their hit areas disjoint.
 	bool back_right = layout_sticker_now && hires_header_pos == PLAYER_HIRES_OFF;
-	int btn_x = back_right ? STUDIO_INFO_MARGIN : lv_obj_get_width(player_screen) - STUDIO_INFO_MARGIN - LYRICS_FIND_BTN;
-	int btn_y = back_btn_centre_y() - lv_obj_get_y(player_screen) - LYRICS_FIND_BTN / 2;
-	lv_obj_set_pos(lyrics_find_btn, btn_x, btn_y);
-	lyrics_find_make_room(NULL);
-	lv_obj_set_style_image_recolor(lyrics_find_icon, lyrics_backdrop() ? lv_color_white() : theme()->text_primary, 0);
-	lv_obj_set_hidden(lyrics_find_btn, false);
-	lv_obj_move_foreground(lyrics_find_btn);
+	int size = LYRICS_HEADER_BTN;
+	int x = back_right ? STUDIO_INFO_MARGIN : lv_obj_get_width(player_screen) - STUDIO_INFO_MARGIN - size;
+	int y = back_btn_centre_y() - lv_obj_get_y(player_screen) - size / 2;
+	int step = (size + 2 * LYRICS_HEADER_HIT_SLOP) * (back_right ? 1 : -1);
+	lv_obj_set_pos(lyrics_find_btn, x, y);
+	lv_obj_set_pos(lyrics_size_btn, x + step, y);
+	lv_obj_set_pos(lyrics_offset_btn, x + 2 * step, y);
 }
 
 static int aam_chevron_inset(void);
@@ -2546,7 +2550,7 @@ static void lyrics_progress_apply(int32_t progress) {
 	if (sleeve_changed && hires_header_pos != PLAYER_HIRES_OFF) {
 		hires_present(rest, rest && hires_header_pos == PLAYER_HIRES_LEFT);
 	}
-	lyrics_find_sync(progress == LYRICS_FULL);
+	lyrics_header_sync(progress == LYRICS_FULL);
 	int32_t travel = lv_obj_get_width(player_screen);
 	if (rest) {
 		lv_obj_set_hidden(lyrics_pane, true);
@@ -2556,9 +2560,6 @@ static void lyrics_progress_apply(int32_t progress) {
 	}
 	lv_obj_set_x(lyrics_pane, lyrics_pane_x + travel * (LYRICS_FULL - progress) / LYRICS_FULL);
 	if (sleeve_changed) lyrics_look(!rest);
-	// Search is a sibling so it can occupy the header above the column.
-	if (progress == LYRICS_FULL && lyrics_find_btn && !lv_obj_is_hidden(lyrics_find_btn))
-		lv_obj_move_foreground(lyrics_find_btn);
 }
 
 // While the page moves, the fade at its edges is left off: it is drawn by
@@ -2650,6 +2651,10 @@ static void lyrics_commit(bool on) {
 
 // The shared player chevron returns to the layout before closing the player.
 bool player_lyrics_back(void) {
+	if (lyrics_offset_editing) {
+		popover_close();
+		return true;
+	}
 	if (!lyrics_now && lyrics_progress == 0) return false;
 	lyrics_commit(false);
 	return true;
@@ -2720,6 +2725,7 @@ void player_lyrics_reload(const char *path) {
 	// and change in place; otherwise the page is wanted, and comes in when the
 	// words arrive (lyrics_settle()).
 	bool up = lyrics_now;
+	if (lyrics_offset_editing) popover_close();
 	lyrics_path[0] = '\0';
 	lyrics_request(&state);
 	if (!up) {
@@ -2936,6 +2942,110 @@ static void lyrics_find_cb(lv_event_t *e) {
 	}
 }
 
+static void lyrics_offset_closed(void) {
+	lyrics_offset_editing = false;
+	if (lyrics_offset_ms == lyrics_offset_saved_ms) return;
+	if (library_set_lyrics_offset(lyrics_path, lyrics_offset_ms)) {
+		lyrics_offset_saved_ms = lyrics_offset_ms;
+	} else {
+		toast_error(tr("addon_save_failed")); // still usable for this playback
+	}
+}
+
+static void lyrics_offset_label(void) {
+	char reset[128];
+	snprintf(reset, sizeof(reset), "%s (%+.1f s)", tr("reset"), lyrics_offset_ms / 1000.0);
+	popover_set_item_text(2, reset);
+}
+
+static void lyrics_offset_pick(void *user) {
+	device_state_t state;
+	device_state_get(&state);
+	if (!lyrics_now || !lyrics_cur.synced || strcmp(state.current_file, lyrics_path) != 0) {
+		popover_close(); // playback has moved on; finish the old track's edit
+		return;
+	}
+
+	int step = (int)(intptr_t)user;
+	int64_t ms = step ? (int64_t)lyrics_offset_ms + step : 0;
+	if (ms < INT32_MIN || ms > INT32_MAX) return;
+	lyrics_offset_ms = (int)ms;
+	lyrics_tap_ms = -1;
+	lyrics_follow(state.progress_current_secs);
+	if (step) lyrics_offset_label();
+	else popover_close(); // Reset ends the edit
+}
+
+static void lyrics_offset_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || !lyrics_cur.synced || lyrics_offset_editing) return;
+	popover_item_t items[] = {
+		{.label = "-0.1s", .verbatim = true, .action = lyrics_offset_pick, .user = (void *)(intptr_t)-100},
+		{.label = "+0.1s", .verbatim = true, .action = lyrics_offset_pick, .user = (void *)(intptr_t)100},
+		{.label = "reset", .action = lyrics_offset_pick},
+	};
+	popover_show_editor(lyrics_offset_btn, items, 3, lyrics_offset_closed);
+	lyrics_offset_editing = true;
+	lyrics_offset_label();
+}
+
+// Reflow the labels in place: the highlight, timestamps and any manual
+// scroll hold belong to the same lines before and after the change.
+static void lyrics_size_pick(void *user) {
+	int size = (int)(intptr_t)user;
+	if (size == lyrics_text_size) {
+		return;
+	}
+	lyrics_text_size = size;
+	config_set_int("ui", "lyrics_text_size", size);
+	config_save();
+
+	lv_anim_delete(lyrics_view, lyrics_scroll_exec);
+	lv_obj_update_layout(lyrics_view);
+	uint32_t count = lv_obj_get_child_count(lyrics_view);
+	bool following = lyrics_cur.synced && !lyrics_user_until;
+	lv_obj_t *anchor = NULL;
+	lv_area_t view_area, line_area;
+	int32_t anchor_y = 0;
+	const lv_font_t *font = fonts_lyrics(size);
+	lv_obj_get_coords(lyrics_view, &view_area);
+	for (uint32_t i = 0; i < count; i++) {
+		lv_obj_t *line = lv_obj_get_child(lyrics_view, i);
+		if (!following && !anchor) {
+			lv_obj_get_coords(line, &line_area);
+			if (line_area.y2 >= view_area.y1) {
+				anchor = line;
+				anchor_y = line_area.y1;
+			}
+		}
+		lv_obj_set_style_text_font(line, font, 0);
+	}
+	lyrics_pad();
+	lv_obj_update_layout(lyrics_view);
+	if (following && count > 0) {
+		lyrics_centre(lv_obj_get_child(lyrics_view, LV_MAX(0, lyrics_lit)), false);
+	} else if (anchor) {
+		lv_obj_get_coords(anchor, &line_area);
+		int32_t scroll_y = lv_obj_get_scroll_y(lyrics_view) + line_area.y1 - anchor_y;
+		lv_obj_scroll_to_y(lyrics_view, scroll_y, LV_ANIM_OFF);
+	}
+}
+
+static void lyrics_size_cb(lv_event_t *e) {
+	if (player_sheet_drag_active()) {
+		return;
+	}
+	popover_item_t items[] = {
+		{.label = "appearance_text_small", .action = lyrics_size_pick,
+		 .user = (void *)(intptr_t)FONTS_TEXT_SMALL, .checked = lyrics_text_size == FONTS_TEXT_SMALL},
+		{.label = "appearance_text_normal", .action = lyrics_size_pick,
+		 .user = (void *)(intptr_t)FONTS_TEXT_NORMAL, .checked = lyrics_text_size == FONTS_TEXT_NORMAL},
+		{.label = "appearance_text_large", .action = lyrics_size_pick,
+		 .user = (void *)(intptr_t)FONTS_TEXT_LARGE, .checked = lyrics_text_size == FONTS_TEXT_LARGE},
+	};
+	popover_show(lv_event_get_current_target(e), items, sizeof(items) / sizeof(items[0]));
+}
+
 // The swipe that pulls the page in (on the sleeve, right to left) or pushes it
 // out (on the words, left to right). `opening` is the user data. Sideways
 // only: a movement that reads as vertical is the column being scrolled, and
@@ -3035,6 +3145,11 @@ static void lyrics_drag_cb(lv_event_t *e) {
 	}
 }
 
+static int32_t lyrics_seek_ms(int32_t line_ms) {
+	int64_t target = (int64_t)line_ms - lyrics_offset_ms;
+	return (int32_t)LV_CLAMP(0, target, INT32_MAX);
+}
+
 // A tap on a timed line plays from where it is sung.
 static void lyrics_tap_cb(lv_event_t *e) {
 	(void)e;
@@ -3053,10 +3168,8 @@ static void lyrics_tap_cb(lv_event_t *e) {
 		lv_obj_get_coords(lv_obj_get_child(lyrics_view, i), &area);
 		// The gap between two lines belongs to the one above it.
 		if (p.y >= area.y1 && p.y <= area.y2 + LYRICS_LINE_GAP) {
-			int32_t ms = lyrics_cur.lines[i].ms;
-			if (ms < 0) {
-				return;
-			}
+			int32_t ms = lyrics_seek_ms(lyrics_cur.lines[i].ms);
+			lyrics_tap_ms = -1;
 			device_state_seek((double)ms / 1000.0);
 			// Back to following at once: the finger chose this line.
 			lyrics_user_until = 0;
@@ -3069,7 +3182,31 @@ static void lyrics_tap_cb(lv_event_t *e) {
 	}
 }
 
+static lv_obj_t *lyrics_header_button(const lv_image_dsc_t *src, int scale, lv_event_cb_t cb, lv_obj_t **icon) {
+	lv_obj_t *btn = lv_btn_create(lyrics_pane);
+	lv_obj_set_size(btn, LYRICS_HEADER_BTN, LYRICS_HEADER_BTN);
+	lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_shadow_width(btn, 0, 0);
+	lv_obj_set_style_border_width(btn, 0, 0);
+	lv_obj_set_ext_click_area(btn, LYRICS_HEADER_HIT_SLOP);
+	lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_set_hidden(btn, true);
+	*icon = lv_image_create(btn);
+	lv_image_set_src(*icon, src);
+	lv_image_set_scale(*icon, scale);
+	lv_obj_add_style(*icon, &theme_style_icon, 0);
+	lv_obj_set_style_image_recolor_opa(*icon, LV_OPA_COVER, 0);
+	lv_obj_center(*icon);
+	return btn;
+}
+
+static void lyrics_size_load(void) {
+	long size = config_get_int("ui", "lyrics_text_size", FONTS_TEXT_NORMAL);
+	lyrics_text_size = size >= 0 && size < FONTS_TEXT_COUNT ? (int)size : FONTS_TEXT_NORMAL;
+}
+
 static void lyrics_build(void) {
+	lyrics_size_load();
 	lyrics_pane = lv_obj_create(player_screen);
 	lv_obj_remove_style_all(lyrics_pane);
 	lv_obj_set_ignore_layout(lyrics_pane, true);
@@ -3119,7 +3256,6 @@ static void lyrics_build(void) {
 	lv_obj_set_hidden(lyrics_head, true);
 
 	lv_obj_t *col = lv_obj_create(lyrics_head);
-	lyrics_head_col = col;
 	lv_obj_remove_style_all(col);
 	lv_obj_set_size(col, cover_box_w - 2 * STUDIO_INFO_MARGIN - 2 * STUDIO_HEAD_SIDE_ROOM, LV_SIZE_CONTENT);
 	lv_obj_align(col, LV_ALIGN_CENTER, 0, 0);
@@ -3143,21 +3279,9 @@ static void lyrics_build(void) {
 	lv_obj_set_style_text_color(lyrics_head_artist, lv_color_make(200, 200, 200), 0);
 	scrolltext_apply(lyrics_head_artist);
 
-	lyrics_find_btn = lv_btn_create(player_screen);
-	lv_obj_set_ignore_layout(lyrics_find_btn, true);
-	lv_obj_set_size(lyrics_find_btn, LYRICS_FIND_BTN, LYRICS_FIND_BTN);
-	lv_obj_set_style_bg_opa(lyrics_find_btn, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_shadow_width(lyrics_find_btn, 0, 0);
-	lv_obj_set_style_border_width(lyrics_find_btn, 0, 0);
-	lv_obj_set_ext_click_area(lyrics_find_btn, bp_pick(COMPACT_CORNER_BTN_EXT_CLICK, CORNER_BTN_EXT_CLICK));
-	lv_obj_add_event_cb(lyrics_find_btn, lyrics_find_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_set_hidden(lyrics_find_btn, true);
-	lyrics_find_icon = lv_image_create(lyrics_find_btn);
-	lv_image_set_src(lyrics_find_icon, &icon_lyrics_search);
-	lv_image_set_scale(lyrics_find_icon, bp_pick(192, 256));
-	lv_obj_add_style(lyrics_find_icon, &theme_style_icon, 0);
-	lv_obj_set_style_image_recolor_opa(lyrics_find_icon, LV_OPA_COVER, 0);
-	lv_obj_center(lyrics_find_icon);
+	lyrics_find_btn = lyrics_header_button(&icon_lyrics_search, bp_pick(192, 256), lyrics_find_cb, &lyrics_find_icon);
+	lyrics_size_btn = lyrics_header_button(&icon_ebook_font, bp_pick(140, 186), lyrics_size_cb, &lyrics_size_icon);
+	lyrics_offset_btn = lyrics_header_button(&icon_radio_recent, bp_pick(180, 240), lyrics_offset_cb, &lyrics_offset_icon);
 
 	// The sleeve is where the page is pulled in from.
 	lv_obj_add_event_cb(cover_panel, lyrics_drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t) true);
@@ -4737,7 +4861,7 @@ static void apply_layout(void) {
 		// the star's own stroke keeps from the edge, and the way back mirrors it.
 		back_btn_player_ink_inset(layout_aam_now ? AAM_HEAD_END_PAD : 0);
 		back_btn_player_mode(true);
-		if (lyrics_progress > 0) { lyrics_overlay_geometry(); lyrics_find_sync(lyrics_progress == LYRICS_FULL); }
+		if (lyrics_progress > 0) { lyrics_overlay_geometry(); lyrics_header_sync(lyrics_progress == LYRICS_FULL); }
 	}
 }
 
@@ -6377,6 +6501,29 @@ static void update_progress(void) {
 	// the power menu and the automatic shutdown have to do the same thing on
 	// their way out, and neither of them comes through here.
 	device_state_remember_note();
+
+	// The Stats page's own clock. Handed the position from this poll rather
+	// than one of its own: how far the track moved between two polls is the
+	// listening, and this is the only place that already asks for it. The
+	// poll runs twice a second while something plays, so the module works
+	// from the distance and not the call count. Only files: a station, a
+	// podcast episode or a streamed cache file has no card record to file a
+	// day against, and this is the same test the rest of the page uses for
+	// "is what plays a file in the library".
+	if (playing_local_file(&state)) {
+		stats_note_playback(state.current_file, state.progress_current_secs, state.progress_total_secs,
+							lv_tick_get());
+	} else {
+		// Nothing local playing: told so the module forgets the position it was
+		// comparing against. A pause of ten minutes must not come back as ten
+		// minutes of listening when the track resumes, and a seek made while
+		// paused must not read as one when it does. This holds whether the
+		// stream has stopped or is still going: a podcast episode or a radio
+		// station that is playing is not a library file, and leaving the last
+		// file's position behind would turn the next local track's first poll
+		// into a jump of however long the station had been on.
+		stats_note_idle();
+	}
 }
 
 static void play_btn_event_cb(lv_event_t *e) {
@@ -6535,6 +6682,200 @@ static void aam_sleeve_tap_cb(lv_event_t *e) {
 	} else if (x >= span * 2) {
 		player_screen_next();
 	}
+}
+
+// --- a held sleeve opens the queue (issue #379) ---
+//
+// The queue is behind the ellipsis: the menu, then the row. A finger already
+// resting on the artwork is a better way in, so a press held still on the
+// sleeve for HOLD_SLEEVE_MS opens the queue directly and the lift that ends it
+// does nothing more -- no tap on a row, no drag, no seek.
+//
+// It is a hold of our own rather than LV_EVENT_LONG_PRESSED. That event needs
+// the object it lands on to be the pressed one at the moment it comes due, and
+// the sleeve frame is deliberately not clickable: it is part of the panel the
+// sheet is dragged by, and the lyric swipe and the Album Art Max double tap
+// both start there too. So the press is watched where it lands (on the panel,
+// as every gesture on the artwork already is), and the sleeve's own rectangle
+// is asked whether it was on the picture. Movement past HOLD_SLOP_PX drops it:
+// a finger that wanders is a drag, and every sideways drag that starts here
+// belongs to the lyric swipe or to pushing the player away.
+//
+// Nothing follows the press sideways -- there is no preview and no animation
+// while the finger is down -- so the only thing this can take away from those
+// gestures is a press held still for most of a second, which none of them use.
+#define HOLD_SLEEVE_MS 500
+#define HOLD_SLOP_PX 12
+
+static lv_timer_t *sleeve_hold_timer;
+static lv_point_t sleeve_hold_from;
+
+// The device the finger went down on. A timer callback runs outside LVGL's
+// input processing, where lv_indev_active() is NULL, so the device that has to
+// be told the gesture is over is remembered here instead.
+static lv_indev_t *sleeve_hold_indev;
+
+// Set while a held sleeve is taking the sheet down to open the queue. The
+// panel's drag handler listens to the same press, and the end of that press
+// reads to it as a finished swipe, which puts the player straight back over the
+// queue that has just opened. It stands down while this is set, and is the one
+// that clears it: an end of press is exactly what it is waiting for.
+static bool sheet_leaving_for_queue;
+
+// Whether the queue is worth opening at all. It is the ellipsis's own question
+// asked a step earlier: a row the menu does not carry is a page the hold must
+// not open either. A book has chapters instead of a queue, a phone casting to
+// the player keeps the queue on the phone, and a queue of one is the track
+// playing and nothing after it. What is left -- a podcast's episodes, a
+// station's list, anything a library list lined up -- is a real queue.
+static bool sleeve_hold_queue_there(void) {
+	if (audiobook_mode || dlna_owns_playback()) {
+		return false;
+	}
+	if (live_mode) {
+		return live_custom_nav;
+	}
+	return playlist_count() > 1;
+}
+
+static bool point_in_box(lv_obj_t *obj, const lv_point_t *at) {
+	lv_area_t box;
+	lv_obj_get_coords(obj, &box);
+	return at->x >= box.x1 && at->x <= box.x2 && at->y >= box.y1 && at->y <= box.y2;
+}
+
+// Is the finger on the picture, in whichever arrangement is up?
+//
+// The frame's own rectangle answers for most of them. Studio draws a square of
+// its own instead, and Poster's picture reaches past the foot of the panel,
+// where a press belongs to the scrub bar and not to the sleeve: what can be
+// seen of that one is the part the deck is not standing in front of, which is
+// the panel.
+//
+// The rounded corners are not subtracted: a press that lands in one of the four
+// little arcs over the sleeve is on the picture as far as this gesture is
+// concerned.
+static bool sleeve_hold_on_art(const lv_point_t *at) {
+	if (layout_studio_now) {
+		lv_obj_t *shown = studio_cover && !lv_obj_is_hidden(studio_cover) ? studio_cover : studio_empty;
+		return shown && point_in_box(shown, at);
+	}
+	if (layout_poster_now) {
+		return cover_panel && point_in_box(cover_panel, at);
+	}
+	return cover_art_group && point_in_box(cover_art_group, at);
+}
+
+static void sleeve_hold_done(void) {
+	if (sleeve_hold_timer) {
+		lv_timer_delete(sleeve_hold_timer); // a timer may delete itself here
+		sleeve_hold_timer = NULL;
+	}
+	sleeve_hold_indev = NULL;
+}
+
+// The hold fired: the gesture is over, and the finger is still down.
+//
+// Left alone, that finger is two problems. LVGL looks for a pressed object
+// again on every frame a finger is held, so the lift would land on one of the
+// queue's own rows -- the single tap the hold was there to replace. And the
+// panel's drag handler has been listening to this same press all along, so the
+// end of it reads as a finished swipe, which is the gesture that puts the
+// player away: the queue opens and the player slides straight back over it.
+//
+// lv_indev_active() is no help here: a timer callback runs outside the input
+// processing, where it is NULL, so the device is the one remembered at press
+// time. Telling it to wait for a release drops the rest of this gesture on the
+// spot -- and it is what ends the press for the drag handler too, which is told
+// in so many words not to read that end as a swipe (see sheet_drag_cb).
+static void sleeve_hold_fire_cb(lv_timer_t *timer) {
+	(void)timer;
+	sleeve_hold_done(); // one shot: held once is asked once
+	sheet_leaving_for_queue = true;
+	if (sleeve_hold_indev) {
+		lv_indev_wait_release(sleeve_hold_indev);
+	}
+	trackmenu_open_queue();
+}
+
+static void sleeve_hold_end(void) {
+	if (!sleeve_hold_timer) {
+		return;
+	}
+	sleeve_hold_done();
+}
+
+// LV_EVENT_PRESSED, PRESSING, RELEASED and PRESS_LOST, on the panel.
+static void sleeve_hold_cb(lv_event_t *e) {
+	lv_event_code_t code = lv_event_get_code(e);
+
+	if (code == LV_EVENT_PRESSED) {
+		sheet_leaving_for_queue = false; // a new gesture, whatever the last one did
+		sleeve_hold_done(); // a gesture that never reported its end
+		lv_indev_t *indev = lv_indev_active();
+		if (!indev || !sheet_open || lyrics_progress > 0 || layout_aam_now || !sleeve_hold_queue_there()) {
+			return;
+		}
+		lv_indev_get_point(indev, &sleeve_hold_from);
+		if (!sleeve_hold_on_art(&sleeve_hold_from)) {
+			return;
+		}
+		sleeve_hold_indev = indev;
+		sleeve_hold_timer = lv_timer_create(sleeve_hold_fire_cb, HOLD_SLEEVE_MS, NULL);
+		if (sleeve_hold_timer) {
+			lv_timer_set_repeat_count(sleeve_hold_timer, 1);
+		}
+		return;
+	}
+
+	if (!sleeve_hold_timer) {
+		return;
+	}
+
+	if (code == LV_EVENT_PRESSING) {
+		lv_indev_t *indev = lv_indev_active();
+		if (!indev) {
+			return;
+		}
+		lv_point_t at;
+		lv_indev_get_point(indev, &at);
+		int dx = at.x - sleeve_hold_from.x;
+		int dy = at.y - sleeve_hold_from.y;
+		// Sideways is a swipe, and so is a scroll the panel handed to
+		// something else: either way the finger is doing something that is not
+		// holding still.
+		if (LV_ABS(dx) >= HOLD_SLOP_PX || LV_ABS(dy) >= HOLD_SLOP_PX ||
+			lv_indev_get_scroll_obj(indev) || player_sheet_drag_active()) {
+			sleeve_hold_done();
+		}
+		return;
+	}
+
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		sleeve_hold_end();
+	}
+}
+
+// A press that is never reported as over leaves the timer armed, and one that
+// fires then is a hold nobody made: after the player was put away, after the
+// words were pulled up, after the screen went dark. The indev says so with
+// LV_EVENT_INDEV_RESET, which is where every other gesture on this page is told
+// the same thing.
+static void sleeve_hold_forget_cb(lv_event_t *e) {
+	(void)e;
+	sleeve_hold_done();
+}
+
+// Puts the gesture on the panel the artwork is dragged by.
+static void sleeve_hold_attach(lv_obj_t *panel) {
+	if (!panel) {
+		return;
+	}
+	lv_obj_add_event_cb(panel, sleeve_hold_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(panel, sleeve_hold_cb, LV_EVENT_PRESSING, NULL);
+	lv_obj_add_event_cb(panel, sleeve_hold_cb, LV_EVENT_RELEASED, NULL);
+	lv_obj_add_event_cb(panel, sleeve_hold_cb, LV_EVENT_PRESS_LOST, NULL);
+	lv_obj_add_event_cb(panel, sleeve_hold_forget_cb, LV_EVENT_INDEV_RESET, NULL);
 }
 
 // --- hardware transport keys ---
@@ -7085,6 +7426,7 @@ static bool dragging;
 // does not also select it.
 static bool drag_committed;
 
+
 static void sheet_anim_x_cb(void *obj, int32_t value) {
 	lv_obj_set_x((lv_obj_t *)obj, (int)value);
 	// The chevron belongs to the sheet while it moves: ride its edge, and
@@ -7167,7 +7509,7 @@ void player_sheet_open(bool animate) {
 	back_btn_player_top_inset(layout_aam_now ? aam_chevron_inset() : player_content_top());
 	back_btn_player_ink_inset(layout_aam_now ? AAM_HEAD_END_PAD : 0);
 	back_btn_player_mode(true);
-	if (lyrics_progress > 0) { lyrics_overlay_geometry(); lyrics_find_sync(lyrics_progress == LYRICS_FULL); }
+	if (lyrics_progress > 0) { lyrics_overlay_geometry(); lyrics_header_sync(lyrics_progress == LYRICS_FULL); }
 
 	sheet_move_to(0, animate);
 }
@@ -7184,6 +7526,7 @@ static void sheet_hidden_anim_ready_cb(lv_anim_t *a) {
 }
 
 void player_sheet_close(bool animate) {
+	if (lyrics_offset_editing) popover_close();
 	bool was_open = sheet_open;
 	sheet_open = false;
 	player_status_background_apply();
@@ -7243,6 +7586,8 @@ static void sheet_drag_cb(lv_event_t *e) {
 	}
 
 	if (code == LV_EVENT_PRESSED) {
+		// A new press: whatever the last one turned into, it is over.
+		sheet_leaving_for_queue = false;
 		if (opening == sheet_open) {
 			return; // dragging the wrong way for the current state
 		}
@@ -7297,6 +7642,16 @@ static void sheet_drag_cb(lv_event_t *e) {
 
 	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
 		dragging = false;
+		if (sheet_leaving_for_queue) {
+			// This press was a held sleeve, and the queue is what it opened. The
+			// end of it is not a swipe: the player stays down and the page the
+			// hold asked for stays up. The flag goes with the gesture, and the
+			// drag flag must not outlive it either -- the queue's rows are what
+			// the finger is over now, not the artwork.
+			sheet_leaving_for_queue = false;
+			lv_async_call(drag_committed_clear_cb, NULL);
+			return;
+		}
 
 		int travelled = opening ? -dx : dx;
 		bool commit = travelled > (sheet_width / SHEET_COMMIT_FRACTION);
@@ -8611,6 +8966,9 @@ void player_init(gui_config_t *cfg) {
 	// presses; the callback decides for itself whether the pair landed on the
 	// picture.
 	lv_obj_add_event_cb(cover_panel, aam_sleeve_tap_cb, LV_EVENT_DOUBLE_CLICKED, NULL);
+	// A press held still on the picture opens the queue (issue #379), on the
+	// panel for the same reason and with the same question asked of the sleeve.
+	sleeve_hold_attach(cover_panel);
 	// Studio stretches the panel down over the top of the controls, where the
 	// taller shape of the track can reach: presses there go to the slider.
 	lv_obj_set_adv_hittest(cover_panel, true);

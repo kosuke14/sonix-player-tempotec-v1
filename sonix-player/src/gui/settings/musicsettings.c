@@ -1382,6 +1382,9 @@ static lv_obj_t *detect_changes_switch;
 static lv_obj_t *display_screen;
 static lv_obj_t *library_screen;
 static lv_obj_t *album_view_switch;
+static lv_obj_t *album_grid_switch;
+static lv_obj_t *browse_covers_switch;
+static lv_obj_t *browse_grid_switch;
 static lv_obj_t *quality_badges_switch;
 static lv_obj_t *allow_delete_switch;
 static lv_obj_t *go_to_current_switch;
@@ -1616,6 +1619,20 @@ static void build_scan_page(gui_config_t *cfg) {
 
 static void album_view_cb(lv_event_t *e) {
 	medialist_set_album_view(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+static void album_grid_cb(lv_event_t *e) {
+	medialist_set_album_grid(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+static void browse_covers_cb(lv_event_t *e) {
+	config_set_bool("library", "browse_covers", lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+	config_save();
+}
+
+static void browse_grid_cb(lv_event_t *e) {
+	config_set_bool("library", "browse_grid", lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+	config_save();
 }
 
 // Which of Browse and Playlists the Music page puts on its sixth tile. Kept
@@ -2510,6 +2527,22 @@ static void build_library_page(gui_config_t *cfg) {
 	if (medialist_album_view()) {
 		lv_obj_add_state(album_view_switch, LV_STATE_CHECKED);
 	}
+
+	// Four covers to a screen instead of rows of names, on the album list and
+	// nowhere else. Off by default: the list is how the rest of the player
+	// reads, and a grid is a thing to choose.
+	settingsrow_toggle(container, "musicsettings_album_grid", &album_grid_switch, album_grid_cb);
+	option_note(container, "musicsettings_album_grid_note");
+	if (medialist_album_grid()) {
+		lv_obj_add_state(album_grid_switch, LV_STATE_CHECKED);
+	}
+
+	settingsrow_toggle(container, "musicsettings_browse_covers", &browse_covers_switch, browse_covers_cb);
+	option_note(container, "musicsettings_browse_covers_note");
+	if (config_get_bool("library", "browse_covers", false)) lv_obj_add_state(browse_covers_switch, LV_STATE_CHECKED);
+	settingsrow_toggle(container, "musicsettings_browse_grid", &browse_grid_switch, browse_grid_cb);
+	option_note(container, "musicsettings_browse_grid_note");
+	if (config_get_bool("library", "browse_grid", false)) lv_obj_add_state(browse_grid_switch, LV_STATE_CHECKED);
 
 	// Who a row is by, under its title, on the lists picked here.
 	settingsrow_toggle_pills(container, "musicsettings_show_artist", artist_toggle_cb, &artist_switch, &artist_pills);

@@ -7,6 +7,7 @@
 #include "lvgl/lvgl.h"
 
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/settings/ota_auto.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/board_profile.h"
 #include "src/gui/shell/theme.h"
@@ -670,7 +671,7 @@ static void show_downloading(void) {
 	hide_buttons(1);
 }
 
-static void download_clicked(void) {
+static void start_download(void) {
 	if (!ota_download_start()) {
 		show_notice(tr("system_update_busy"));
 		return;
@@ -678,6 +679,10 @@ static void download_clicked(void) {
 	phase = PHASE_DOWNLOAD;
 	show_downloading();
 	start_polling();
+}
+
+static void download_clicked(void) {
+	start_download();
 }
 
 // The box as tall as the notes, up to notes_max_h; longer notes scroll.
@@ -724,6 +729,9 @@ static void install_cb(lv_timer_t *timer) {
 static void show_installing(void) {
 	layout(PRODUCT_NAME, tr("system_update_installing"), false, false);
 	hide_buttons(0);
+	// The update is being made: the standing notice must not come back for
+	// this release afterwards.
+	ota_auto_release_taken();
 	lv_timer_t *t = lv_timer_create(install_cb, INSTALL_DELAY_MS, NULL);
 	lv_timer_set_repeat_count(t, 1);
 }
@@ -822,6 +830,9 @@ static void sd_run(void *unused) {
 		gui_notify_popup_long("usbhost_restore_failed");
 		return;
 	}
+	// The update is being made: the standing notice must not come back for
+	// this release afterwards.
+	ota_auto_release_taken();
 	firmware_update_start();
 }
 
@@ -849,4 +860,19 @@ void fwupdate_show(void) {
 		holding_screen = true;
 		power_hold_screen_on(true);
 	}
+}
+
+void fwupdate_start_download(void) {
+	if (!veil) {
+		build();
+	}
+	if (!holding_screen) {
+		holding_screen = true;
+		power_hold_screen_on(true);
+	}
+	start_download();
+	// Whether the download started or the busy notice came up, the card is
+	// what the user should see.
+	lv_obj_set_hidden(veil, false);
+	lv_obj_move_foreground(veil);
 }

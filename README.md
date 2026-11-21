@@ -1,10 +1,10 @@
 ![Sonix Player for TempoTec Variations V1 cycling through the Tokyo Night, Amber on Black and OLED main menus](screenshots/readme-banner.gif)
 
-This repository is a community port (well, much more than just a simple port) of the original **[Sonix Player](https://github.com/Jepl4r/sonix-player)** project by **[Jepl4r](https://github.com/Jepl4r)** for the Tempotec Variations V1. 
+This repository is originally a **TempoTec Variations V1** community port of the original **[Sonix Player](https://github.com/Jepl4r/sonix-player)** project by **[Jepl4r](https://github.com/Jepl4r)** (now **[Tartarus](https://github.com/Tartarus6)**) made for the Hiby R1 & the HiBy R3 Pro II, before it became much more than just a simple *port*, it's almost a brand new firmware and is basically Sonix but on *steroids*,perfectly optimized for v1's small little screen,with tons of features, you wouldn't have suspected your DAP could have!
 
 The firmware builder starts with an official V1 1.3 update package, replaces the stock music player and its interface with Sonix, then repackages the update as `v1.upt`.
 
-You can now try Sonix in the [Tempotec V1](https://mr-f0xx.github.io/sonix-player-tempotec-v1/) browser emulator I made (also compatible with mobile devices)
+You can now try Sonix in the **[Tempotec V1](https://mr-f0xx.github.io/sonix-player-tempotec-v1/)** browser emulator I made (PC & Mobile compatible)
 
 ## Previews
 
@@ -220,6 +220,7 @@ Showcase of **OLED** appearance: true black backgrounds with white as the accent
 - [Jellyfin](#jellyfin)
 - [Build from source](#build-from-source)
 - [Project files and documentation](#project-files-and-documentation)
+- [Collecting logs for a bug report](docs/collecting-logs.md)
 - [Credits](#credits)
 
 ## Target device
@@ -246,6 +247,8 @@ This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-
 
 ### 🌟 New in this fork
 
+- 📊 **Listening statistics** - open **Music → Stats** to see how long you listened and which tracks, albums and artists you played most. Switch between week, month, year and all time.
+- 🖼️ **2×2 album grid** - browse albums by cover art, four at a time.
 - 🎧 **Listen Together** - open **Streaming → Listen Together** on two V1s on the same Wi-Fi. Tap **Start Hosting** on the one playing music and **Join Stream** on the other to listen in sync.
 - 📼 **Tape Deck** - the optional [More → Tape Deck](docs/tape-deck.md) sampler has 16 pads for factory drums or your own WAVs. Overdub a one-bar loop, save the editable sequence or record the stereo mix to microSD with live filter, echo and drive. Add a compatible capture input to record WAV voice memos.
 - 🔁 **A-B loop and Now Playing actions** - mark two points in the track menu to repeat a passage on a seekable track; both marks appear on the progress bar. **Back** returns to the previous screen. With **Allow deleting tracks** enabled, **Delete track** removes a local file from microSD after confirmation.
@@ -277,7 +280,7 @@ This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-
 - 📥 **Control centre over Bluetooth in** - the swipe-down menu stays available while the player is a Bluetooth receiver: volume, brightness and the EQ / MSEB / PEQ switches, with the phone's track on the card, and a long press on EQ, MSEB or PEQ opens that page without ending the stream. See [FEATURES.md](FEATURES.md#wireless).
 - 🏅 **Hi-Res badge** - choose the top-left or top-right corner per layout and one of four designs: two-line text, one line, HR, or the official gold Hi-Res Audio logo. With the Vinyl art shape, Standard, Waveform, Alternative and Vinyl put the badge in the header instead of over the sleeve. Off by default.
 - 📊 **Dual Scrobbler Suite** (Last.fm & ListenBrainz) - native background scrobbling for both services with independent toggles, token-based setup, and offline queue caching when disconnected from Wi-Fi.
-- 🔄 **Over-The-Air (OTA) Updates** - check for and download new releases directly over Wi-Fi from GitHub Releases with one click in Settings → System → Firmware update. The release notes are shown there too, with the parts a screen like this cannot use or need removed: the banner image, the raw pull-request links, the `by @user` attribution and the "**Full Changelog**" compare line. The release page keeps them; the device shows the changelog itself.
+- 🔄 **Over-The-Air (OTA) Updates** - check for and download new releases directly over Wi-Fi from GitHub Releases with one click in Settings → System → Firmware update. The release notes are shown there too, with the parts a screen like this cannot use or need removed: the banner image, the raw pull-request links, the `by @user` attribution and the "**Full Changelog**" compare line. The release page keeps them; the device shows the changelog itself. A background check also runs when Wi-Fi connects and every six hours while it is connected, and — when a new release is found — blinks the LED, puts a dot in the top status bar (tap it) and asks whether to update now; the same check is governed by **Settings → System → Update notifications**, a transient toast reports a deferral, and a deferred release stays remembered per tag so it never nags twice; once the update is made, the release is remembered on disk and the notice — dot, LED blink and popup — does not come back for it, this boot or any later one, and a remembered deferral for that release is dropped.
 - 🎵 **Smart Mix playlists** - start from one track to build a playlist of similar songs from the tags on the card, with no network needed. [Smart Mix indexing](FEATURES.md#smart-mix) supports libraries of tens of thousands of tracks without loading the whole library into RAM.
 - 💿 **Multi-file CUE sheets** - a `.cue` can reference several audio files, and the referenced audio file is found by stem even when its extension differs from the `FILE` line. See [FEATURES.md](FEATURES.md#supported-audio-formats).
 - 📁 **Remembered file browser** - Browse reopens the last folder and scroll position after a restart, and can replace the Music tile on the home screen under Settings → Appearance.

@@ -27,7 +27,8 @@ make -C sonix-player/tests corners
 make -C sonix-player/tests playbutton
 make -C sonix-player/tests musicsettings-rows
 make -C sonix-player/tests volume-overlay
-make -C sonix-player/tests playerdeck
+make -C sonix-player/tests playerdeck lyrics-size-ui
+make -C sonix-player/tests sleeve-hold-ui
 make -C sonix-player/tests vinylayout
 make -C sonix-player/tests waveform-overlay
 make -C sonix-player/tests edge-lock
@@ -94,6 +95,10 @@ The `waveform-overlay` UI test checks that both scrolling text pills stay clear 
 The `vinylayout` UI test checks the Vinyl sleeve/record arithmetic at 240×320 across text sizes, the reference-slanted pressing mark in the exposed lower-right arc, the visible even-diameter 2 px grooves, the larger centre label peeking below the sleeve, the tiny-screen fallback, a no-overlap guarantee against the whole deck (including transparent info/seek rows), repeated apply/take-back and sleeve-over-record layering on the real LVGL renderer. It does not link the player's audio/network shell.
 
 The `playerdeck` UI test exercises the V1 deck's real LVGL flex layout while switching between Standard and Waveform, including large font metrics and the fallback when waveform allocation fails. It checks row spacing and that every playback button stays clear of the bottom edge.
+
+The `sleeve-hold-ui` test holds a finger still on the album artwork with the real `player.c` compiled in, driving LVGL's own pointer and timer dispatch rather than hand-sent events. It checks the 500 ms hold opening the queue, and that a hold is not armed on a queue of one, while the menu sheet is up, over the words, in a book, while casting, in Album Art Max or under Studio's square. It checks that a finger that wanders, or a press that never reports its end, drops the hold, and that the lift ending a fired hold is neither a tap on the row the queue puts under it nor a swipe that puts the player back over the queue: the real `player_sheet_attach_drag()` is attached alongside the hold, so the two share a press as they do on the device.
+
+The `lyrics-size-ui` test exercises the lyrics text-size and timing popovers on the 240×320 LVGL display. It checks that the three header buttons stay clear of each other, the active size is marked, synced lines stay centred, untimed lyrics retain their scroll position, and the saved lyrics size leaves the UI setting unchanged. It also checks live timing nudges with one save on dismissal (none for a net-zero edit), highlighting and seek targets, reset, and a track change with the menu open. The `mostplayed` database fixture verifies per-track offset persistence across a reopen.
 
 The `batteryprofile` test uses temporary sysfs files and a wrapped I²C adapter to check stock V1 units, missing or invalid readings, read-only charge-limit access, discharge estimates, and same-source deltas. `batteryprofile-ui` drives the production page at 240×320 with fake battery samples. It covers USB and screen-off behavior, charge history, baseline and resample actions, polling off-page, and translated metric layouts. To validate a real cell's load response, follow the [on-device A/B procedure](../../docs/battery-profiler.md).
 
@@ -260,13 +265,15 @@ opens no ALSA device.
 
 `make -C sonix-player/tests peq-ui` links the real PEQ page and DSP engine to
 LVGL's headless renderer. It checks the profile pills at 240×320 in all eleven
-languages and five themes, selection and back-drag guarding, refresh of an open
-band editor after a quick switch, and profile-scoped reset. It then types a
-band's frequency (in Hz and in kHz, switching unit both ways), gain and Q on the
-band editor's keypad: whole-Hz values between slider steps, rounding, clamping
-at both limits, the sign key, cancel, an emptied display and leaving the page,
-plus the fit of every key and of the tappable values over the sliders. The shell
-and network AutoEq browser are stubbed.
+languages and five themes, the translated Automatic Level switch and its
+independence from PEQ enable/profile state, list-offset retention when leaving
+and returning from a child screen, selection and back-drag guarding, refresh of
+an open band editor after a quick switch, and profile-scoped reset. It then
+types a band's frequency (in Hz and in kHz, switching unit both ways), gain and
+Q on the band editor's keypad: whole-Hz values between slider steps, rounding,
+clamping at both limits, the sign key, cancel, an emptied display and leaving
+the page, plus the fit of every key and of the tappable values over the sliders.
+The shell and network AutoEq browser are stubbed.
 
 `make -C sonix-player/tests quickpanel-layout` uses the production Control
 Centre list parser, accessors and move operations with headless LVGL. It checks
@@ -279,7 +286,8 @@ and PEQ open without ending the receiver and ask nothing, that every other page
 asks first and opens only on yes, and that a refused question leaves nothing
 behind; and that the PEQ profile control does not displace
 existing defaults, fills an empty place in a saved v4 layout, waits in Settings
-when the grid is full, and survives a move into the first eight and a reload.
+when the grid is full, and survives a move into the first eight and a reload;
+the profile glyph stays centered inside its circle in compact and normal layouts.
 Unrelated playback/radio handlers are removed by linker section GC; no sheet is
 built, and the radio, player and DAC answers are stand-ins. The full `ui` target
 includes both PEQ-related suites and the receiver session. (On GCC 12 the `ui`
