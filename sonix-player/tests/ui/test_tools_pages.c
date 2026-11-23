@@ -3047,7 +3047,7 @@ int main(int argc, char **argv) {
     assert(last_back_guard && !last_back_guard()); // cannot leave Music for card root
     lv_obj_t *nested=find_label(tagpage,"Nested"); assert(nested);
     lv_obj_send_event(lv_obj_get_parent(nested),LV_EVENT_CLICKED,NULL);
-    assert(find_label(tagpage,"No folders or FLAC / MP3 files")); assert(last_back_guard());
+    assert(find_label(tagpage,"No folders or editable audio files")); assert(last_back_guard());
     lv_obj_t *filelabel=find_label(tagpage,"test.flac"); assert(filelabel);
     lv_obj_send_event(lv_obj_get_parent(filelabel),LV_EVENT_CLICKED,NULL);
     lv_obj_update_layout(tagpage); assert(find_label(tagpage,"Title: Test title"));
