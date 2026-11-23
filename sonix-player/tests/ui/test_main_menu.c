@@ -293,8 +293,6 @@ bool podcastcache_tag(const char *path, const char *key, char *out, size_t size)
 	return false;
 }
 void player_sheet_open(bool animated) { (void)animated; }
-lv_obj_t *stats_screen;
-void stats_refresh(void) {}
 void medialist_open(const char *title, library_list_t kind, library_filter_t filter, const char *value) {
 	(void)title; (void)kind; (void)filter; (void)value;
 }
