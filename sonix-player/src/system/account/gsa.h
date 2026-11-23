@@ -26,6 +26,14 @@
 	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 #define GSA_CLIENT_INFO_MAC \
 	"<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+// The iTunes claim rides the October 2026 wave of sign-in refusals
+// (-80045, -22411, edge 503s): accounts the akd identities draw a fraud
+// verdict on go through as the desktop iTunes client. The user agent
+// pairs with it -- an old CFNetwork, the one iTunes 12.7 for Windows
+// shipped -- and the pair is what the edge cross-checks.
+#define GSA_CLIENT_INFO_ITUNES \
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>"
+#define GSA_USER_AGENT_ITUNES "akd/1.0 CFNetwork/808.1.4"
 
 typedef struct {
 	char key[64];

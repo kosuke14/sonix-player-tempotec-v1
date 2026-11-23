@@ -289,20 +289,31 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 			// 3 s, then 10 s; a 429 cools down longer
 			sleep(status == 429 ? 30 : attempt == 1 ? 3 : 10);
 		}
-		// The claim cycles Windows -> Mac -> Windows: the edge's verdict
+		// The claim cycles Windows -> Mac -> iTunes: the edge's verdict
 		// differs by client identity, and only the device knows which one
-		// its route accepts. The header and the cpd must say the same, so
-		// the whole request body is rebuilt per attempt.
-		const char *claim =
-			(attempt % 2 == 0) ? GSA_CLIENT_INFO : GSA_CLIENT_INFO_MAC;
+		// its route accepts -- since October the akd identities draw
+		// refusals the iTunes one answers (see the SideStore write-up and
+		// the macro above). The header and the cpd must say the same, so
+		// the whole request body is rebuilt per attempt, and the user
+		// agent follows the claim: the iTunes client speaks an older
+		// CFNetwork, and the pair is what gets checked.
+		static const char *const CLAIMS[] = {GSA_CLIENT_INFO, GSA_CLIENT_INFO_MAC,
+											 GSA_CLIENT_INFO_ITUNES};
+		static const char *const UAS[] = {GSA_USER_AGENT, GSA_USER_AGENT, GSA_USER_AGENT_ITUNES};
+		const char *claim = CLAIMS[attempt % 3];
+		const char *ua = UAS[attempt % 3];
 		{
 			char *rebuilt = malloc(strlen(body) + 256);
 			if (rebuilt) {
-				const char *mac_info = GSA_CLIENT_INFO_MAC;
-				const char *win_info = GSA_CLIENT_INFO;
-				const char *from = (claim == win_info) ? mac_info : win_info;
-				const char *at = strstr(body, from);
-				if (at) {
+				const char *from = NULL;
+				for (size_t c = 0; c < sizeof(CLAIMS) / sizeof(*CLAIMS); c++) {
+					if (CLAIMS[c] != claim && strstr(body, CLAIMS[c])) {
+						from = CLAIMS[c];
+						break;
+					}
+				}
+				if (from) {
+					const char *at = strstr(body, from);
 					size_t head = (size_t)(at - body);
 					snprintf(rebuilt, strlen(body) + 256, "%.*s%s%s", (int)head, body,
 							 claim, at + strlen(from));
@@ -317,6 +328,17 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 				size_t room = strlen(claim);
 				memset(ci_at, ' ', strlen(ci_at) > room ? strlen(ci_at) : room);
 				memcpy(ci_at, claim, room);
+			}
+			// and the user agent follows it too
+			char *ua_at = strstr(extra, "User-Agent: ");
+			if (ua_at) {
+				ua_at += strlen("User-Agent: ");
+				char *ua_end = strstr(ua_at, "\r\n");
+				size_t room = strlen(ua);
+				if (ua_end && (size_t)(ua_end - ua_at) >= room) {
+					memset(ua_at, ' ', (size_t)(ua_end - ua_at));
+					memcpy(ua_at, ua, room);
+				}
 			}
 			req.body = full;
 			req.body_len = strlen(full);
