@@ -260,10 +260,8 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 	}
 	char extra[2048];
 	snprintf(extra, sizeof(extra),
-			 "User-Agent: %s\r\n"
-			 "Accept: */*\r\n"
 			 "X-MMe-Client-Info: %s\r\n",
-			 GSA_USER_AGENT, client_info);
+			 client_info);
 	http_req_t req;
 	memset(&req, 0, sizeof(req));
 	req.method = "POST";
@@ -272,6 +270,11 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 	req.body_len = strlen(full);
 	req.content_type = "text/x-xml-plist";
 	req.want_error_body = true; // the Status/ec/em of a refusal is the useful part
+	// The request line and its headers are part of what Apple's edge reads:
+	// every client that signs accounts in today speaks HTTP/1.1 and carries
+	// its identity in one User-Agent, so the request does both.
+	req.http_11 = true;
+	req.user_agent = GSA_USER_AGENT;
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
@@ -297,9 +300,9 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 		// the whole request body is rebuilt per attempt, and the user
 		// agent follows the claim: the iTunes client speaks an older
 		// CFNetwork, and the pair is what gets checked.
-		static const char *const CLAIMS[] = {GSA_CLIENT_INFO, GSA_CLIENT_INFO_MAC,
-											 GSA_CLIENT_INFO_ITUNES};
-		static const char *const UAS[] = {GSA_USER_AGENT, GSA_USER_AGENT, GSA_USER_AGENT_ITUNES};
+		static const char *const CLAIMS[] = {GSA_CLIENT_INFO_ITUNES, GSA_CLIENT_INFO,
+											 GSA_CLIENT_INFO_MAC};
+		static const char *const UAS[] = {GSA_USER_AGENT_ITUNES, GSA_USER_AGENT, GSA_USER_AGENT};
 		const char *claim = CLAIMS[attempt % 3];
 		const char *ua = UAS[attempt % 3];
 		{
@@ -329,17 +332,9 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 				memset(ci_at, ' ', strlen(ci_at) > room ? strlen(ci_at) : room);
 				memcpy(ci_at, claim, room);
 			}
-			// and the user agent follows it too
-			char *ua_at = strstr(extra, "User-Agent: ");
-			if (ua_at) {
-				ua_at += strlen("User-Agent: ");
-				char *ua_end = strstr(ua_at, "\r\n");
-				size_t room = strlen(ua);
-				if (ua_end && (size_t)(ua_end - ua_at) >= room) {
-					memset(ua_at, ' ', (size_t)(ua_end - ua_at));
-					memcpy(ua_at, ua, room);
-				}
-			}
+			// and the single user agent rides on the template, which the
+			// claim swap points at the same identity
+			req.user_agent = ua;
 			req.body = full;
 			req.body_len = strlen(full);
 		}

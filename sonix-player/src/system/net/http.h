@@ -123,6 +123,14 @@ typedef struct {
 	// Optional User-Agent override; NULL sends HTTP_USER_AGENT.
 	const char *user_agent;
 
+	// Speak HTTP/1.1 on the wire instead of the 1.0 the template sends. The
+	// reply still ends by Content-Length or connection close, and chunked
+	// bodies are handled either way; a caller whose peer cares about the
+	// protocol version of the request line asks for this. The GrandSlam
+	// route's edge reads the shape of a client, and every client that
+	// signs accounts in today speaks 1.1.
+	bool http_11;
+
 } http_req_t;
 
 // Like http_get_ex(), but with the method and body chosen by the caller.

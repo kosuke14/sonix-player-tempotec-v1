@@ -990,7 +990,7 @@ static bool get_once(const url_t *u, const http_req_t *req, char **out, size_t *
 		return false;
 	}
 	int n = snprintf(request, req_cap,
-					 "%s %s HTTP/1.0\r\n"
+					 "%s %s HTTP/%s\r\n"
 					 "Host: %s\r\n"
 					 "User-Agent: %s\r\n"
 					 "Accept: */*\r\n"
@@ -999,7 +999,8 @@ static bool get_once(const url_t *u, const http_req_t *req, char **out, size_t *
 					 "%s"
 					 "%s"
 					 "\r\n",
-					 method, u->path, host_header, ua, req->accept_gzip ? "gzip, deflate" : "identity", body_headers,
+					 method, u->path, req->http_11 ? "1.1" : "1.0", host_header, ua,
+					 req->accept_gzip ? "gzip, deflate" : "identity", body_headers,
 					 extra_headers ? extra_headers : "");
 	// Compare the length against the buffer, not just against zero: snprintf
 	// truncates but returns what it would have written, so an over-long
