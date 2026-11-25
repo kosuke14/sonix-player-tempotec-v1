@@ -43,6 +43,11 @@ typedef struct {
 typedef struct {
 	gsa_anisette_kv_t kv[GSA_ANISETTE_MAX];
 	int count;
+	// The user agent of the server that minted the one-time password. The
+	// OTP and the identity are validated as a pair, and the pair includes
+	// the client self-description the server vouches for: the request's
+	// User-Agent says the same thing its /v3/client_info did.
+	char user_agent[128];
 } gsa_anisette_t;
 
 typedef enum {

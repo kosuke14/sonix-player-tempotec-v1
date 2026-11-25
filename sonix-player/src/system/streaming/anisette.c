@@ -1,3 +1,6 @@
+#define _XOPEN_SOURCE 700   // strptime: the Date header says Apple's own time
+#define _GNU_SOURCE 700     // strcasestr: the same header, case-insensitively
+
 #include "anisette.h"
 
 #include "src/system/account/plistxml.h"
@@ -17,6 +20,9 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+// strptime is _XOPEN_SOURCE's: the Date header of the anisette server's own
+// answer is what tells the device how far its clock has drifted.
+
 #include <time.h>
 #include <unistd.h>
 #include <netdb.h>
@@ -381,7 +387,8 @@ static bool url_split(const char *url, bool *tls, char *host, size_t host_size, 
 // One plain HTTPS GET/POST with a body, read to the end. Small enough to
 // want no more than the socket: the anisette answers are kilobytes.
 static bool https_raw(const char *url, const char *extra_headers, const char *body,
-					  char **out, size_t *out_len, int *status, char *error, size_t error_size) {
+					  char **out, size_t *out_len, int *status, char *error, size_t error_size,
+					  char *server_date, size_t date_size) {
 	bool use_tls = false;
 	char host[160], port[16], path[512];
 	if (!url_split(url, &use_tls, host, sizeof(host), port, sizeof(port), path, sizeof(path))) {
@@ -475,6 +482,23 @@ static bool https_raw(const char *url, const char *extra_headers, const char *bo
 		return false;
 	}
 	*head_end = '\0';
+	if (server_date && date_size > 0) {
+		server_date[0] = '\0';
+		char *date_line = strcasestr(buf, "\r\nDate: ");
+		if (!date_line) {
+			date_line = strcasestr(buf, "Date: ");
+		}
+		if (date_line) {
+			date_line += strlen("Date: ");
+			char *end = strstr(date_line, "\r\n");
+			size_t take = end ? (size_t)(end - date_line) : strlen(date_line);
+			if (take >= date_size) {
+				take = date_size - 1;
+			}
+			memcpy(server_date, date_line, take);
+			server_date[take] = '\0';
+		}
+	}
 	char *payload = head_end + 4;
 	size_t plen = got - (size_t)(payload - buf);
 	memmove(buf, payload, plen); // the caller frees the pointer it is given
@@ -729,7 +753,7 @@ static bool fetch_client_info(const char *server, char *client_info, size_t ci_s
 		char *body = NULL;
 		size_t len = 0;
 		int status = 0;
-		ok = https_raw(info_url, NULL, NULL, &body, &len, &status, error, error_size) &&
+		ok = https_raw(info_url, NULL, NULL, &body, &len, &status, error, error_size, NULL, 0) &&
 			 status == 200;
 		if (!ok) {
 			free(body);
@@ -801,7 +825,7 @@ bool anisette_provision(char *error, size_t error_size) {
 	size_t len = 0;
 	int status = 0;
 	if (!https_raw("https://gsa.apple.com/grandslam/GsService2/lookup", lookup_ct, NULL, &body,
-				   &len, &status, error, error_size) ||
+				   &len, &status, error, error_size, NULL, 0) ||
 		status != 200) {
 		snprintf(error, error_size, "anisette_lookup");
 		return false;
@@ -876,7 +900,7 @@ bool anisette_provision(char *error, size_t error_size) {
 			apple_headers(apple, sizeof(apple), &st, client_info, user_agent);
 			char ct[8192];
 			snprintf(ct, sizeof(ct), "Content-Type: text/x-xml-plist\r\n%s", apple);
-			if (!https_raw(start_url, ct, post, &body, &len, &status, error, error_size) ||
+			if (!https_raw(start_url, ct, post, &body, &len, &status, error, error_size, NULL, 0) ||
 				status != 200 || !plist_parse(body, len, &pl)) {
 				free(body);
 				break;
@@ -909,7 +933,7 @@ bool anisette_provision(char *error, size_t error_size) {
 			apple_headers(apple, sizeof(apple), &st, client_info, user_agent);
 			char ct[8192];
 			snprintf(ct, sizeof(ct), "Content-Type: text/x-xml-plist\r\n%s", apple);
-			if (!https_raw(end_url, ct, post, &body, &len, &status, error, error_size) ||
+			if (!https_raw(end_url, ct, post, &body, &len, &status, error, error_size, NULL, 0) ||
 				status != 200 || !plist_parse(body, len, &pl)) {
 				free(body);
 				break;
@@ -1010,12 +1034,14 @@ bool anisette_headers(gsa_anisette_t *out, char *error, size_t error_size) {
 		char *body = NULL;
 		size_t len = 0;
 		int status = 0;
+		char server_date[64] = "";
 		bool otp_ok = false;
 		for (int attempt = 0; attempt < 2 && !otp_ok; attempt++) {
 			if (attempt > 0) {
 				sleep(1); // the same hiccup-burst retry the client info gets
 			}
-			if (!https_raw(get_url, ct, post, &body, &len, &status, error, error_size) ||
+			if (!https_raw(get_url, ct, post, &body, &len, &status, error, error_size,
+						   server_date, sizeof(server_date)) ||
 				status != 200) {
 				free(body);
 				body = NULL;
@@ -1101,6 +1127,35 @@ bool anisette_headers(gsa_anisette_t *out, char *error, size_t error_size) {
 	for (int i = 0; i < 10; i++) {
 		snprintf(out->kv[i].key, sizeof(out->kv[i].key), "%s", keys[i]);
 		snprintf(out->kv[i].value, sizeof(out->kv[i].value), "%s", values[i]);
+	}
+	// The user agent of the server that minted the OTP: the request's own
+	// User-Agent is part of the pair Apple checks, and it must say the same
+	// client this server's ADI ran under.
+	snprintf(out->user_agent, sizeof(out->user_agent), "%s",
+			 user_agent[0] ? user_agent : "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0");
+
+	// The one-time password is only good within a window of Apple's own
+	// clock, and the client time rides beside it: a device that booted
+	// with no time, or whose NTP leg failed, sends a client-time Apple
+	// reads as nonsense and answers -22410 to. The server's own Date
+	// header says what Apple's clocks say, so the skew is known here.
+	if (server_date[0]) {
+		struct tm gmt;
+		memset(&gmt, 0, sizeof(gmt));
+		if (strptime(server_date, "%a, %d %b %Y %H:%M:%S GMT", &gmt)) {
+			time_t apple = timegm(&gmt);
+			int skew = (int)(apple - time(NULL));
+			if (skew < 0) {
+				skew = -skew;
+			}
+			if (skew > 300) {
+				relax_end(&relax);
+				fprintf(stderr, "anisette: device clock is %d s off the server (%s)\n",
+						skew, server_date);
+				snprintf(error, error_size, "clock_skew_%d_seconds", skew);
+				return false;
+			}
+		}
 	}
 	relax_end(&relax);
 	return true;

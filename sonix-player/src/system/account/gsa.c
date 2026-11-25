@@ -206,24 +206,15 @@ static void hmac_sha256(const uint8_t *key, size_t key_len, const char *msg, uin
 // the request plumbing
 // ---------------------------------------------------------------------------
 
-// The identity GrandSlam accepts: since October 2026 Apple's fraud detection
-// refuses anisette that was provisioned through the Android ADI when the
-// request claims a Mac, and GrandSlam answers -80045 to every such login.
-// The Windows claim is what the Windows Apple Music's own AuthKit sends, and
-// it is what the community's working clients send. The provisioning behind
-// the one-time password stays the anisette server's; only the
-// self-description of the request changes.
-// A copy of the anisette set with the client info the GSA route wants. The
-// header and the cpd must carry the same one, so every request builder runs
-// its anisette through this first.
+// The identity GrandSlam accepts is the one the anisette server's own ADI
+// ran under: the one-time password and the claimed machine are validated as
+// a pair, and a claim that does not match the server's /v3/client_info
+// answer -- however plausible on its own -- reads as fraud and draws the
+// -22410 "could not be completed" refusals. The server vouches for itself,
+// so the request quotes it back, and `gsa_anisette` is a plain copy that
+// keeps that answer intact.
 static gsa_anisette_t gsa_anisette(const gsa_anisette_t *src) {
-	gsa_anisette_t copy = *src;
-	for (int i = 0; i < copy.count; i++) {
-		if (strcmp(copy.kv[i].key, "X-Mme-Client-Info") == 0) {
-			snprintf(copy.kv[i].value, sizeof(copy.kv[i].value), "%s", GSA_CLIENT_INFO);
-		}
-	}
-	return copy;
+	return *src;
 }
 
 static void anisette_to_plist(plistw_t *w, const gsa_anisette_t *an) {
@@ -303,9 +294,10 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 	req.want_error_body = true; // the Status/ec/em of a refusal is the useful part
 	// The request line and its headers are part of what Apple's edge reads:
 	// every client that signs accounts in today speaks HTTP/1.1 and carries
-	// its identity in one User-Agent, so the request does both.
+	// its identity in one User-Agent, so the request does both. The agent
+	// is the server's own: the OTP was minted under that client.
 	req.http_11 = true;
-	req.user_agent = GSA_USER_AGENT;
+	req.user_agent = anisette && anisette->user_agent[0] ? anisette->user_agent : GSA_USER_AGENT;
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
@@ -323,55 +315,11 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 			// 3 s, then 10 s; a 429 cools down longer
 			sleep(status == 429 ? 30 : attempt == 1 ? 3 : 10);
 		}
-		// The claim cycles iTunes -> Windows -> Mac: the edge's verdict
-		// differs by client identity, and only the device knows which one
-		// its route accepts -- since October the akd identities draw
-		// refusals the iTunes one answers (see the SideStore write-up and
-		// the macro above). The header and the cpd must say the same, so
-		// the whole request body is rebuilt per attempt, and the user
-		// agent follows the claim: the iTunes client speaks an older
-		// CFNetwork, and the pair is what gets checked.
-		static const char *const CLAIMS[] = {GSA_CLIENT_INFO_ITUNES, GSA_CLIENT_INFO,
-						     GSA_CLIENT_INFO_MAC};
-		static const char *const UAS[] = {GSA_USER_AGENT_ITUNES, GSA_USER_AGENT, GSA_USER_AGENT};
-		const char *claim = CLAIMS[attempt % 3];
-		const char *ua = UAS[attempt % 3];
-		{
-			// Rebuild the wrapped XML body with the claim swapped inside the
-			// raw plist dict. The swap is done on the original `body` so every
-			// attempt is self-contained, and the result is re-wrapped in the
-			// XML envelope the endpoint expects (a bare dict is rejected).
-			const char *body_src = body;
-			char *rebuilt = malloc(strlen(body) + 256);
-			if (rebuilt) {
-				const char *from = NULL;
-				for (size_t c = 0; c < sizeof(CLAIMS) / sizeof(*CLAIMS); c++) {
-					if (CLAIMS[c] != claim && strstr(body, CLAIMS[c])) {
-						from = CLAIMS[c];
-						break;
-					}
-				}
-				if (from) {
-					const char *at = strstr(body, from);
-					size_t head = (size_t)(at - body);
-					snprintf(rebuilt, strlen(body) + 256, "%.*s%s%s", (int)head, body,
-						 claim, at + strlen(from));
-					body_src = rebuilt;
-				}
-				snprintf(full, full_cap,
-					 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-					 "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-					 "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-					 "<plist version=\"1.0\">\n%s</plist>",
-					 body_src);
-				free(rebuilt);
-			}
-			// the HTTP anisette headers follow the claim too
-			gsa_build_extra(extra, sizeof(extra), anisette, claim);
-			req.user_agent = ua;
-			req.body = full;
-			req.body_len = strlen(full);
-		}
+		// The identity is the server's own, and stays the same across the
+		// retries: only the edge-shaped refusals (a 503, a bare 404) are
+		// worth re-asking, and a real answer -- the -22410 and -80045
+		// refusals among them -- arrives as a 200 with a Status plist that
+		// says what was wrong.
 		if (out) {
 			free(out);
 			out = NULL;
