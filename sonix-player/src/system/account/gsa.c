@@ -235,33 +235,64 @@ static void anisette_to_plist(plistw_t *w, const gsa_anisette_t *an) {
 	plistw_dict_end(w);
 }
 
+// The anisette HTTP headers GrandSlam expects alongside the cpd body. The
+// client-info header must match the claim the cpd/body carries for this
+// attempt, so it is taken from `claim` rather than the anisette set.
+static void gsa_build_extra(char *extra, size_t extra_size, const gsa_anisette_t *an,
+			    const char *claim) {
+	size_t off = 0;
+	bool have_client_info = false;
+	if (!extra || !extra_size) {
+		return;
+	}
+	extra[0] = '\0';
+	for (int i = 0; an && i < an->count && off + 4 < extra_size; i++) {
+		const char *key = an->kv[i].key;
+		const char *val = an->kv[i].value;
+		if (strcmp(key, "X-Mme-Client-Info") == 0) {
+			val = claim;
+			have_client_info = true;
+		}
+		int n = snprintf(extra + off, extra_size - off, "%s: %s\r\n", key, val);
+		if (n <= 0) {
+			break;
+		}
+		off += (size_t)n < extra_size - off ? (size_t)n : extra_size - off - 1;
+	}
+	if (!have_client_info && off + 4 < extra_size) {
+		snprintf(extra + off, extra_size - off, "X-Mme-Client-Info: %s\r\n", claim);
+	}
+}
+
 static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const char *body,
 					 plist_t *reply, char *error, size_t error_size) {
 	// The XML declaration and the doctype go on the front: the plist the
 	// writer emits is the bare dict, and Apple's parsers are particular.
-	char *full = malloc(strlen(body) + 256);
+	size_t full_cap = strlen(body) + 512;
+	char *full = malloc(full_cap);
 	if (!full) {
 		snprintf(error, error_size, "gsa_memory");
 		return false;
 	}
-	snprintf(full, strlen(body) + 256,
-			 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-			 "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-			 "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-			 "<plist version=\"1.0\">\n%s</plist>",
-			 body);
+	snprintf(full, full_cap,
+		 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+		 "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+		 "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+		 "<plist version=\"1.0\">\n%s</plist>",
+		 body);
 	// The client info in the header must be the one the cpd carries: the
-	// edge cross-checks the pair, and a mismatch draws its refusals.
-	const char *client_info = "";
+	// edge cross-checks the pair, and a mismatch draws its refusals. The
+	// full anisette header set is sent (as gsa_2fa_totp does) because the
+	// edge validates the machine data on the request headers as well.
+	const char *client_info = GSA_CLIENT_INFO;
 	for (int i = 0; anisette && i < anisette->count; i++) {
-		if (strcmp(anisette->kv[i].key, "X-Mme-Client-Info") == 0) {
+		if (strcmp(anisette->kv[i].key, "X-Mme-Client-Info") == 0 &&
+		    anisette->kv[i].value[0]) {
 			client_info = anisette->kv[i].value;
 		}
 	}
-	char extra[2048];
-	snprintf(extra, sizeof(extra),
-			 "X-MMe-Client-Info: %s\r\n",
-			 client_info);
+	char extra[8192];
+	gsa_build_extra(extra, sizeof(extra), anisette, client_info);
 	http_req_t req;
 	memset(&req, 0, sizeof(req));
 	req.method = "POST";
@@ -292,7 +323,7 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 			// 3 s, then 10 s; a 429 cools down longer
 			sleep(status == 429 ? 30 : attempt == 1 ? 3 : 10);
 		}
-		// The claim cycles Windows -> Mac -> iTunes: the edge's verdict
+		// The claim cycles iTunes -> Windows -> Mac: the edge's verdict
 		// differs by client identity, and only the device knows which one
 		// its route accepts -- since October the akd identities draw
 		// refusals the iTunes one answers (see the SideStore write-up and
@@ -301,11 +332,16 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 		// agent follows the claim: the iTunes client speaks an older
 		// CFNetwork, and the pair is what gets checked.
 		static const char *const CLAIMS[] = {GSA_CLIENT_INFO_ITUNES, GSA_CLIENT_INFO,
-											 GSA_CLIENT_INFO_MAC};
+						     GSA_CLIENT_INFO_MAC};
 		static const char *const UAS[] = {GSA_USER_AGENT_ITUNES, GSA_USER_AGENT, GSA_USER_AGENT};
 		const char *claim = CLAIMS[attempt % 3];
 		const char *ua = UAS[attempt % 3];
 		{
+			// Rebuild the wrapped XML body with the claim swapped inside the
+			// raw plist dict. The swap is done on the original `body` so every
+			// attempt is self-contained, and the result is re-wrapped in the
+			// XML envelope the endpoint expects (a bare dict is rejected).
+			const char *body_src = body;
 			char *rebuilt = malloc(strlen(body) + 256);
 			if (rebuilt) {
 				const char *from = NULL;
@@ -319,21 +355,19 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 					const char *at = strstr(body, from);
 					size_t head = (size_t)(at - body);
 					snprintf(rebuilt, strlen(body) + 256, "%.*s%s%s", (int)head, body,
-							 claim, at + strlen(from));
-					snprintf(full, strlen(body) + 512, "%s", rebuilt);
+						 claim, at + strlen(from));
+					body_src = rebuilt;
 				}
+				snprintf(full, full_cap,
+					 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+					 "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+					 "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+					 "<plist version=\"1.0\">\n%s</plist>",
+					 body_src);
 				free(rebuilt);
 			}
-			// the header's client info follows the claim
-			char *ci_at = strstr(extra, "X-MMe-Client-Info: ");
-			if (ci_at) {
-				ci_at += strlen("X-MMe-Client-Info: ");
-				size_t room = strlen(claim);
-				memset(ci_at, ' ', strlen(ci_at) > room ? strlen(ci_at) : room);
-				memcpy(ci_at, claim, room);
-			}
-			// and the single user agent rides on the template, which the
-			// claim swap points at the same identity
+			// the HTTP anisette headers follow the claim too
+			gsa_build_extra(extra, sizeof(extra), anisette, claim);
 			req.user_agent = ua;
 			req.body = full;
 			req.body_len = strlen(full);
@@ -703,19 +737,20 @@ bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, cons
 	}
 	char extra[4096];
 	snprintf(extra, sizeof(extra),
-			 "User-Agent: %s\r\n"
-			 "Accept: text/x-xml-plist\r\n"
-			 "security-code: %s\r\n"
-			 "X-Apple-Identity-Token: %s\r\n"
-			 "Accept-Language: en-us\r\n"
-			 "Loc: en_US\r\n"
-			 "%s",
-			 GSA_USER_AGENT, code, ident_b64, anisette_h);
+		 "Accept: text/x-xml-plist\r\n"
+		 "security-code: %s\r\n"
+		 "X-Apple-Identity-Token: %s\r\n"
+		 "Accept-Language: en-us\r\n"
+		 "Loc: en_US\r\n"
+		 "%s",
+		 code, ident_b64, anisette_h);
 	http_req_t req;
 	memset(&req, 0, sizeof(req));
 	req.method = "GET";
 	req.extra_headers = extra;
 	req.want_error_body = true;
+	req.http_11 = true;
+	req.user_agent = GSA_USER_AGENT;
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
