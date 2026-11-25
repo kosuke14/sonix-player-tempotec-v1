@@ -1107,7 +1107,8 @@ printf-flag:
 # Optional headless LVGL layout regression tests. Reuse the production config,
 # disabling SDL, FreeType and device drivers; no audio service is linked.
 UI_SRC = $(ROOT)/tests/ui/test_main_menu.c $(ROOT)/src/gui/shell/main_menu.c \
-         $(ROOT)/src/gui/library/music.c $(ROOT)/src/gui/shell/popover.c \
+         $(ROOT)/src/gui/library/music.c $(ROOT)/src/gui/shell/scrolltext.c \
+         $(ROOT)/src/gui/shell/popover.c \
          $(ROOT)/src/gui/shell/gridpage.c $(ROOT)/src/gui/pet/peticon.c \
          $(ROOT)/src/gui/streaming/soundcloud_icon.c \
          $(ROOT)/src/gui/streaming/jellyfin_icon.c \
@@ -1373,7 +1374,8 @@ PEQPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(PEQPAGE_SRC)) \
 # The Albums list toggled between its 2x2 grid and its original single-column
 # list on the V1 panel.
 ALBUMGRID_UI_SRC = $(ROOT)/tests/ui/test_albumgrid_ui.c $(ROOT)/src/gui/library/medialist.c \
-                   $(ROOT)/src/gui/library/albumgrid.c $(ROOT)/src/gui/shell/settingsrow.c \
+                   $(ROOT)/src/gui/library/albumgrid.c $(ROOT)/src/gui/shell/scrolltext.c \
+                   $(ROOT)/src/gui/shell/settingsrow.c \
                    $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/board_profile.c \
                    $(ROOT)/src/system/core/config.c
 ALBUMGRID_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(ALBUMGRID_UI_SRC)) \
@@ -2225,7 +2227,8 @@ $(BUILD)/test_sleeve_hold: $(SLEEVEHOLD_OBJ)
 -include $(SLEEVEHOLD_OBJ:.o=.d)
 
 # Browser's recycled grid/list rows on the real LVGL layout engine.
-BROWSER_GRID_UI_OBJ = $(BUILD)/ui/tests/ui/test_browser_grid.o $(BUILD)/ui/src/gui/library/albumgrid.o $(UI_LVGL_OBJ)
+BROWSER_GRID_UI_OBJ = $(BUILD)/ui/tests/ui/test_browser_grid.o $(BUILD)/ui/src/gui/library/albumgrid.o \
+                      $(BUILD)/ui/src/gui/shell/scrolltext.o $(UI_LVGL_OBJ)
 .PHONY: browser-grid-ui
 browser-grid-ui: $(BUILD)/test_browser_grid
 	$(BUILD)/test_browser_grid

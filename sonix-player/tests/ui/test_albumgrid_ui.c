@@ -103,7 +103,6 @@ void gui_notify_no_card(void) {}
 void gui_notify_popup(const char *text) { (void)text; }
 void toast_success(const char *text) { (void)text; }
 void toast_error(const char *text) { (void)text; }
-void scrolltext_apply(lv_obj_t *label) { (void)label; }
 void power_pause_in_standby(lv_timer_t *timer) { (void)timer; }
 bool musicsettings_allow_delete(void) { return false; }
 bool musicsettings_endless_shuffle(void) { return false; }

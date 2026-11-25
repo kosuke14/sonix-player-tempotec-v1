@@ -45,6 +45,12 @@
 
 /* ---- fonts: every face is LVGL's built-in one ---------------------------- */
 
+// The video player the screensaver defers to is not part of this suite: the
+// visualizer never suspends it, and the three questions answer themselves.
+void videoplayer_ui_suspend(void) {}
+void videoplayer_ui_resume(void) {}
+bool videoplayer_ui_is_suspended(void) { return false; }
+
 lv_font_t font_ui_14, font_ui_16, font_ui_18, font_ui_20, font_ui_20_bold;
 lv_font_t font_ui_22, font_ui_22_bold, font_ui_24, font_ui_24_bold;
 lv_font_t font_ui_26, font_ui_28, font_ui_32, font_ui_72;
