@@ -298,6 +298,10 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 	// is the server's own: the OTP was minted under that client.
 	req.http_11 = true;
 	req.user_agent = anisette && anisette->user_agent[0] ? anisette->user_agent : GSA_USER_AGENT;
+	// What the request actually rode on, for the log: the pairing of the OTP
+	// and this identity is the whole game, and the log is the only place the
+	// pair is visible after the fact.
+	fprintf(stderr, "gsa: POST %s as %s (ua %s)\n", endpoint, client_info, req.user_agent);
 	char *out = NULL;
 	size_t out_len = 0;
 	int status = 0;
