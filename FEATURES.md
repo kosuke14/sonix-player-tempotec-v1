@@ -70,7 +70,14 @@
   Control Centre remains available for EQ, PEQ, MSEB, gain and output controls;
   the graphic EQ, PEQ and MSEB process incoming PCM, while DSD passes through
   untouched.
-- **USB audio out** - a DAC or USB-C headphones driven with the player as host.
+- **USB audio out** - a DAC or USB-C headphones driven with the player as host,
+  announced with the card's own name when it is plugged in and again when it
+  goes. A desktop DAC on a Type-C adapter that accepts only one format is
+  handled by **48 kHz compatibility** (Developer options, or switched on by
+  itself when a card refuses the track's own format): every track is converted
+  to 48 kHz / 16 bit before it leaves the port, DSD included -- through a
+  conversion rather than as DoP, because a resampled DoP bitstream is noise.
+  Off by default, and only in force while a card is really the output.
 - **External USB DAC** - a switch under Developer options that keeps the
   USB-C port supplying power and acting as host, for a dongle that the
   default dual-role setting never brings up. It is what made a JCally and
@@ -105,6 +112,7 @@
 - **Browse covers** - under **Music → Settings → Library**, enable **Browse folder covers** to replace folder icons with cover art in the list, or **Browse cover grid** for a 2×2 cover grid on the V1. The grid includes both folders and tracks and shows covers even if the list option is off. Folders use their cover file or the first track’s embedded art; entries without art get a neutral placeholder. Both options apply only inside the card’s Music folder and its subfolders, and are off by default. The grid distinguishes loading from missing art, keeps recently viewed covers in memory, and prepares nearby covers after the visible ones.
 - **Years, Playlists and Most played** - tiles on the Music page alongside All tracks, Albums, Artists, Album artists, Genres and Browse. Every local track play is counted in the library database, and Most played lists your most-listened tracks in descending play-count order. The Music page tiles can be reordered or hidden via **Music → Settings → Library → Rearrange main page**.
 - **Picture viewer** - JPEG (`.jpg`, `.jpeg`) and PNG (`.png`) images can be opened directly from the File Manager.
+- **Video player** - `.mpg`, `.mpeg`, `.mpe`, `.mpv` and `.m1v` files open from the File Manager and play on the panel. MPEG-1 video with MP2 audio in an MPEG-PS container is decoded in software and blitted straight to the framebuffer, bypassing LVGL while it runs. Frames are rotated 90° clockwise into the 240×320 portrait panel and cropped to fill it, and a double-tap switches between landscape and portrait. A tap brings up a control strip along the panel edge with elapsed and remaining time, play/pause and a progress bar; it hides after three seconds, and a tap on a hidden one only brings it back. With it showing, a tap on the picture pauses or resumes, a tap on the bar jumps there, and pressing and sliding on the picture scrubs. Next and Previous seek ±30 seconds and Play/Pause pauses, while the volume keys keep their usual job. Audio is the master clock: the position comes from the samples written to ALSA less what the card reports as still queued, frames more than 100 ms behind are dropped rather than queued, and ALSA write backpressure paces the decode, so a file too heavy for the CPU loses frames instead of drifting out of sync. Starting a video stops local music and waits for the audio device. Letting the screen go dark pauses the video and hands the panel back; waking resumes it, waiting for the screensaver to be dismissed when one is up. The picture needs the real framebuffer, so this is a V1 feature and not an emulator or desktop one.
 - **Playlists** - create, rename, reorder, delete. A long press on a row of All tracks, Albums, Artists or Album artists starts a selection, and the chosen tracks, albums or artists go into the queue, the favourites or a playlist together. Inside a playlist or the favourites the selection also takes the chosen tracks out, after asking. In the file browser the same works on tracks and folders, a folder bringing everything under it. A backup writes an extended M3U to the card that other players can read; import reads one back, resolves missing entries by file name, and reports what it found.
 - **Deleting tracks from the card** - with **Music → Settings → Library → Allow deleting tracks** on, a selection on a track list offers a trash button, and the chosen files are deleted from the microSD card after a confirmation that names how many there are. The index, the favourites and the play counts let go of them at once instead of waiting for the next scan.
 - **Playback modes** - normal, repeat all, repeat one, shuffle, and a continuous shuffle that deals a fresh order each round.
@@ -164,6 +172,18 @@ A–Z and Z–A beside it under Podcast settings → Order; the chart and a podc
 episodes are kept on the card, so a tab opens on the names it showed last time.
 A row's menu has **Select**: tick several podcasts and follow or unfollow them
 as a group from the corner.
+- **Offline podcast catcher (opt-in)** - a `feeds.txt` in the root of the
+card, one feed address a line, read whenever Wi-Fi joins a network and once at
+start-up if the radio is already up. New episodes are downloaded into the same
+`Podcast` folder as the Podcasts page uses, so they appear under Saved
+podcasts and play with the podcast controls. Each episode is bookmarked as it
+plays, per file, so opening it again carries on where it was left; hearing it
+to the end clears the mark and ticks it heard like any other episode. The
+first check of a feed takes its newest `max_episodes` (default 3) and records
+the rest as seen, so a feed with years of back catalogue cannot fill the card;
+a failed download is retried on the next connection, up to three times. Under
+**Settings → Plugins**, and never switched on by an update. See
+[docs/ADDONS.md](docs/ADDONS.md).
 - **Episodes heard and unheard** - an episode played to its end wears a ticked
 badge on its cover in the list and its text steps back, kept in `podcast.db` by
 episode id, so it reads the same whether it was streamed or downloaded. A long press marks one heard (or heard
@@ -360,9 +380,11 @@ a self-signed certificate), and HLS.
   indicator and voice memos saved as mono WAVs in `Recordings/` on the microSD.
   A capture-capable ALSA input is required; the headset remote ADC is not a
   microphone. The 16-pad sampler can play the factory drums without a mic or
-  card, import drums and long vocal WAVs, and overdub a 16-step loop. Save and
-  reopen editable sequences, toggle filter/echo/drive during playback, and
-  record the wet stereo mix directly to microSD. See the
+  card, import drums and long vocal WAVs, and overdub a 16-step loop. Trim or
+  slice WAVs across pads, play one sample chromatically in 16 Levels with
+  linear/cubic resampling, and use one-way choke groups for open/closed hats.
+  Save and reopen editable sequences, toggle filter/echo/drive during playback,
+  and record the wet stereo mix directly to microSD. See the
   [Tape Deck guide](docs/tape-deck.md) for setup.
 
 - **Pet** - a small creature fed by the music it can actually be heard by: a
@@ -521,8 +543,11 @@ a self-signed certificate), and HLS.
 - **Screen → Control centre slider** - what the single slider under the control centre's round buttons does, chosen with three pills: **Brightness** (the default, exactly where the stock firmware has it), **Volume** (the sun becomes a speaker that changes with the level, silent, quiet or loud, and the bar turns red past 55%, the warning colour the volume pill over the player uses), or **Soundfield** (the sun becomes the Soundfield glyph and the bar sets its stereo width from mono to 2.00 on the same 0.05 steps as the full page; moving it switches Soundfield on the first time). With **Both sliders** on, the same pills choose a pair instead: **Bright + vol**, **Bright + SF** or **Vol + SF**. A player that only ever used the old **Volume in control centre** switch comes back with Volume selected. Soundfield options are greyed out when its module is switched off in Plugins. The choice takes effect at the next pull, with no restart.
 - **Screen → Volume as voltage** - shows the volume as what the headphone socket puts out instead of its place on the 0–100 scale: `502mV` where the status bar and the volume pill over the player read `88` (3.5 mm jack, low gain). Off by default, and off, nothing changes. On, the reading is in volts RMS to three figures, in `V`, `mV` or `µV` as the level calls for: on the 3.5 mm jack in low gain it runs from `39.9µV` at 1 to `1.00V` at 100, and in high gain to `2.00V`. It follows the gain switch and, while a DSD track plays as DoP, the DSD gain compensation, so one figure means one level whichever of them is in force. The player cannot tell its two sockets apart, so the socket the figure is for is picked with two pills under the switch: **3.5 mm**, the default, or **4.4 mm**, which reads twice as high. Bluetooth headphones and a USB-C DAC set the level themselves and keep the 0–100; the reading goes back to volts when the sound comes back to a socket. Everything else still goes by the scale: the keys and the slider move it one step at a time, the speaker glyph changes at the same levels, the pill's reading turns red past 55, and the volume limit is still set on the scale. A voltage is about twice as wide as the number, so the pill's scale is about a quarter shorter, and a centred clock steps aside for it in the status bar. Both settings take effect at once, with no restart.
   > The figure is **nominal: worked out, not measured**. It is the most TempoTec publishes for each socket (2 Vrms on 3.5 mm, 4 Vrms on 4.4 mm), taken to be the top of the high-gain scale, less the attenuation the DAC has been given: the level of a full-scale sine with nothing plugged in. Music sits below it by however far the recording does, and so does anything done to the samples on the way (ReplayGain, the equaliser's preamp, channel balance). A low-impedance load pulls the top of the balanced scale down as well: the 215 mW published for 32 Ω is 2.6 V across it, not 4. It has not been checked against a meter, so read it as a guide to how levels compare rather than as a measurement.
-- **Screensaver visualizer** - in Settings → Screen, enable Screensaver visualizer to replace Album artwork with a live spectrum. Two styles, picked with pills under the switch: **Neon** draws eight wide segmented bars in the theme’s accent colour on black over a matching rail; **LED** draws the classic bench analyzer — sixteen narrower bars of horizontal segments on a dark red field that glows toward the floor. Every slot of every bar is drawn all the time: unlit ones as dark red ghosts of the segment to come, lit ones blazing orange, the bottom few brightening to white where the light pools at the floor, with a warm glow behind each lit stack that shows in the gaps between its segments and a bright cap riding each bar’s peak and falling behind it as the music moves on. The bars are weighted perceptually, so the bass end keeps the movement the treble has, however the mix leans. The track information and clock remain visible. Pictures mode is unchanged. The bars rest when audio is paused or silent, and while nothing is playing the rail is replaced by a musical note in the theme's accent colour, centred in the field — the line comes back when playback resumes.
+- **Screensaver visualizer** - in **Settings → Screen**, enable **Screensaver**, select **Album**, and turn on **Screensaver visualizer**. **Neon** keeps the eight segmented bars in the theme’s accent colour. **LED** keeps the sixteen-bar bench analyzer with its warm glow and falling peak caps. **iTunes**, adapted from [Joseph Malam’s Sonix Visualiser fork](https://github.com/josephmalam/sonix-visualiser/tree/052863c6ef4f549bc21d2a12354739aa179ccb6f), adds music-reactive sharp ribbons, soft ribbons, sparks and a tunnel. The layers can be mixed or used individually.
+  > **Full screen** works with all three styles. It hides the track details and clock; leave it off to keep them visible. Swipe up to dismiss the screensaver as before. The option is saved and does not change the screen-off timeout or the **Pictures** source. While paused or stopped, the visualizer shows a centered music note. On the V1 the iTunes effect draws at up to 20 fps into one 120×160 RGB565 buffer in full screen and stops rendering when the display goes dark.
 - **Screensaver** - choose to show the cover of the current playing track or pictures from the `Screensaver` folder. On the V1's Tokyo Night, Amber on Black and OLED themes the artwork fills the whole panel and the title, artist and clock are read on a translucent field of the palette's own colour over its foot; Dark and Light keep the blurred strip. Under **Album art**, **Fill** keeps that full-bleed look (the default). **Framed** shows the whole cover instead, at its own resolution, in a rounded frame with margins round it, above the title, artist and clock. That frame is 160 px on the V1. The cover is decoded for exactly that size and never enlarged, so it never turns into blocks.
+  > Turn off **Show swipe-up arrow** in **Settings → Screen** to hide the bottom chevron in any screensaver mode, including full-screen visualizers. Swipe up still dismisses the screensaver. The arrow is shown by default.
+  >
   > Pictures must be baseline (not progressive) JPEGs, portrait, and no larger than 480x800. The V1 crops and scales them to fill its 240x320 screen. For the sharpest result with nothing cropped, make them 240x320 or 480x640, the screen's own 3:4 shape.
 
 - **Power** - standby, LED behaviour, automatic power-off from thirty seconds to
@@ -554,6 +579,7 @@ a self-signed certificate), and HLS.
 - **System → About** - scroll to **Forked by** and scan the QR code with your phone to open the [TempoTec V1 fork on GitHub](https://github.com/mr-f0xx/sonix-player-tempotec-v1). The code uses dark accent-colored squares on a light background tinted by the theme and accent, including the clear border needed for scanning. The player displays it without Wi-Fi.
 - **Battery history (Settings → System → Battery profiler)** - below the live battery readings, the profiler shows the last charge point and the player-on time since it. A charge point is either the moment a connected battery first reaches the configured target (100 %, or 80 % when the cap is on) or when the cable is unplugged; the page says which one. The timestamp and accumulated duration are checkpointed every five minutes and on a clean shutdown. Duration uses the boot-time clock, including standby but excluding all time while the player is switched off, so it can be used to compare screen, radio, gain and output choices without an overnight power-off inflating the figure. A newly updated player deliberately shows “Not recorded yet” until it sees a real cable/target transition rather than inventing a historical date.
 - **Battery profiler (Settings → System)** - live AXP2101 voltage and its programmed charge-current limit, plus estimated runtime and draw. Save an unplugged baseline, change the output, gain, PEQ or Wi-Fi, and compare estimated draw in mA and percent. The V1 does not report live charge current or battery wear. See [Battery profiler](docs/battery-profiler.md) for a repeatable A/B test.
+- **SD card health (Settings → System → SD card health)** - a five-second, read-only benchmark that splits 4K reads equally between sequential and pseudo-random blocks spread across the whole card, with sparse probes near its beginning, middle and last block. It reports sequential MB/s, random MB/s and IOPS, the slowest read, the first read-error/250 ms stall/repeated-data byte offsets, and a verdict against explicit *diagnostic references* of 10 MB/s sequential and 1500 random 4K IOPS — not a speed-class certification (Class 10/U1/V10 rates and A1 application-class requirements involve writes, and this test never writes). `O_DIRECT` bypasses the page cache where available; a full or read-only card can still be checked. The job runs on a background `SCHED_IDLE` thread with a progress bar, cancellation, USB/card guards and a 15-second watchdog for a read that never returns, so a failing card cannot freeze the interface being used to measure it. Read errors and repeated data at distant offsets are called out before they turn into corrupted music; the page says plainly that a short sample is not a full surface scan, a write test or a remaining-life measurement. See [SD card health](docs/sd-card-health.md).
 - **Charging with the player off** - a player that was switched off and is then
   put on a charger comes up on a battery screen rather than the library: the
   level as a filling battery, the percentage, and whether the charger is still
@@ -613,7 +639,8 @@ a self-signed certificate), and HLS.
 - **Screenshots** - under More: volume up and the power key save the screen to
   the card.
 - **System** - device, DAC, serial number, card space, OS version, firmware
-  update from a `.upt` on the card, and factory reset.
+  update from a `.upt` on the card, factory reset, battery profiler and the
+  read-only SD card health benchmark.
 - **Developer options** - unlocked by tapping the build number: ADB, **External
   USB DAC** (see *USB audio out* above) with the timed trial under it, log to
   the card, database log, disabling the software volume attenuation, and a

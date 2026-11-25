@@ -6,6 +6,8 @@ The firmware builder starts with an official V1 1.3 update package, replaces the
 
 You can now try Sonix in the **[Tempotec V1](https://mr-f0xx.github.io/sonix-player-tempotec-v1/)** browser emulator I made (PC & Mobile compatible)
 
+The web workbench also has a [Live USB tab](tools/v1-emulator/README.md#live-usb-connect-a-physical-v1) for editing PEQ presets, Tape Deck kits, and playlists on a physical V1 and downloading its debug log.
+
 ## Previews
 
 Expand a theme to see its screenshots. Select a screenshot to view it full size.
@@ -208,6 +210,7 @@ Showcase of **OLED** appearance: true black backgrounds with white as the accent
   - [Amber on Black theme](#amber-on-black-theme)
   - [OLED theme](#oled-theme)
 - [Custom theme](#custom-theme)
+- [Video](#video)
 - [Music pet](#music-pet)
 - [Tag Manager](#tag-manager)
 - [Tape Deck](#tape-deck)
@@ -249,19 +252,23 @@ This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-
 ### 🌟 New in this fork
 
 - 🔀 **Equal-power crossfade** - under **Settings → Music → Playback options → Fade & Crossfade**, overlap automatic track transitions by 1 to 10 seconds with an equal-power curve — resampling, mapping mono/stereo and applying per-track ReplayGain across mixed-format queues — or choose sequential **Fade out / in**. Manual skips still cut cleanly.
-- 📊 **Listening statistics** - open **Music → Stats** to see how long you listened and which tracks, albums and artists you played most. Switch between week, month, year and all time. The seven-day chart is Monday-first with today highlighted (later weekdays are from the previous week). The current calendar month highlights today and shows each numbered day in a compact horizontally scrollable chart; the current year shows one bar per month and all time shows one bar per year.
+- 📊 **Listening statistics** - open **Music → Stats** to see how long you listened and which tracks, albums and artists you played most. Switch between week, month, year and all time. The seven-day chart is Monday-first with today highlighted (later weekdays are from the previous week). The current calendar month highlights today and shows each numbered day in a compact horizontally scrollable chart; the current year shows one bar per month and all time shows one bar per year. A play is counted once half the track — or four minutes of a longer one — has actually been heard, so skipping through a queue no longer inflates the numbers on this page or in **Most played**.
 - 🖼️ **2×2 album & browser cover grids** - browse albums by cover art four at a time, and optionally show folder artwork (**Browse folder covers**) or a 2×2 cover grid for folders and tracks (**Browse cover grid**) inside `Music` under **Settings → Music → Library**.
 - 📺 **DLNA casting** - cast local tracks from the V1 to TVs and speakers on the same Wi-Fi, alongside acting as a DLNA renderer. Pick a target from the cast overlay on **Wireless → DLNA** or cast in one tap from the Now Playing menu (**Cast to a DLNA renderer**); streams are served directly from microSD with HTTP byte-range seeking, renderer-matched DLNA profiles, and automatic FLAC-to-WAV fallback for TVs that refuse native FLAC.
+- 🎬 **MPEG-1 video player** - open a `.mpg`, `.mpeg`, `.mpe`, `.mpv` or `.m1v` file in **Files** and watch it on the V1 itself. The X1600 has no hardware H.264/HEVC decoder, so MPEG-1 video with MP2 audio is decoded in software and blitted straight to the framebuffer, rotated to the panel and played landscape by default. A scrub bar on the panel edge appears with the remaining time, play/pause state and dragging to seek, then hides after three seconds; tap the picture to pause, double-tap to switch between landscape and portrait, and use the side keys for **Next/Previous ±30 s** and play/pause, with the volume keys keeping their usual job. Audio is clocked from ALSA, so a slow decode drops frames instead of letting the sound drift. The emulator workbench's **Video** tab carries ffmpeg presets that turn any file into a V1-friendly `.mpg` (320×240, 24 fps, moderate bitrate).
+- 🔧 **Live USB workbench** - connect a physical V1 to a desktop or Android browser over **WebUSB** (with **ADB** on under Settings → Developer options) and work on the card directly from the [workbench](https://mr-f0xx.github.io/sonix-player-tempotec-v1/)'s **Live USB** tab: draw a **PEQ** curve with draggable bands or import/export an APO preset, lay WAVs out across the **Tape Deck**'s sixteen pads into a new `Drum Kits/` folder, edit and reorder **M3U** playlists, and download the player's debug log. Saves always use a new name, so an existing preset, kit or playlist is never replaced by accident, and nothing is uploaded to a server. See the [Live USB guide](tools/v1-emulator/README.md#live-usb-connect-a-physical-v1).
 - 🎧 **Listen Together** - open **Streaming → Listen Together** on two V1s on the same Wi-Fi. Tap **Start Hosting** on the one playing music and **Join Stream** on the other to listen in sync.
-- 📼 **Tape Deck** - the optional [More → Tape Deck](docs/tape-deck.md) sampler has 16 pads for factory drums or your own WAVs. Overdub a one-bar loop, save the editable sequence or record the stereo mix to microSD with live filter, echo and drive. Add a compatible capture input to record WAV voice memos.
+- 📼 **Tape Deck** - the optional [More → Tape Deck](docs/tape-deck.md) sampler has 16 pads for factory drums or your own WAVs. Trim and slice samples, play chromatic 16-Levels with linear/cubic resampling, and use choke groups. Overdub a one-bar loop, save the editable sequence or record the stereo mix to microSD with live filter, echo and drive. Add a compatible capture input to record WAV voice memos.
 - 🔁 **A-B loop and Now Playing actions** - mark two points in the track menu to repeat a passage on a seekable track; both marks appear on the progress bar. Hold the album sleeve for half a second to open the playback queue directly without opening the menu, use **Back** to return to the previous screen, cast the current track over DLNA, or — with **Allow deleting tracks** enabled — **Delete track** from microSD after confirmation.
 - 🎤 **Lyrics overlay, text size, timing offset & title-only search** - swipe left on the artwork for a full-height lyrics overlay that follows your player status bar setting, choose **Small**, **Normal** or **Large** lyrics text (**Aa**) independently of the UI font size, nudge synced lyrics earlier or later in `0.1s` steps per track without editing the `.lrc` file, and search LRCLIB by title alone (with preview) when artist lookup finds no match or the artist tag is missing.
 - 📲 **Wi-Fi folder uploads** - pair a browser with [Wireless → Transfer](docs/wi-fi-transfer.md) by QR or session code on trusted Wi-Fi, then drop whole album folders onto microSD with their paths intact.
+- 🎙️ **Offline podcast catcher** - an opt-in module (`podcastcatcher` under **Settings → Plugins**) that reads a `feeds.txt` from the card root, one feed per line, and downloads each show's newest episodes into the `Podcast` folder as ordinary files whenever Wi-Fi joins a network — and once at start-up if the radio is already up. The first check of a feed takes only its newest few episodes and records the rest as seen, so a years-old back catalogue cannot fill the card; later checks take only what is genuinely new, a failed download is retried on the next connection, and a `min_free_mb` floor stops it before the card is full. Each episode is bookmarked as it plays, so opening it again carries on where it was left. It is never switched on by a firmware update, because it fetches and writes on its own. See [Offline podcast catcher](#offline-podcast-catcher).
 - 🗂️ **WebDAV and FTP downloads** - in [Streaming → Network folders](docs/network-folders.md), browse a server and save a track or the current folder's music to `Music/Network Downloads` on microSD. **Save and play** opens the local file once the download finishes. Optionally, **Remember password** keeps the password across reboots — unencrypted, in a private device-local file — or leaves it off so it stays in memory until restart.
 - 💡 **Smart LED and Stealth mode** - choose Bass Pulse, Energy Glow or Rainbow Breath, 10 brightness steps and transition speed under [Settings → Power](docs/sgm31324-led-control.md#smart-led-and-stealth-mode). Three red blinks warn at 5% battery; green blinks confirm Wi-Fi uploads and newly found OTA releases. Stealth keeps the light off even while charging.
 - 🔋 **Battery profiler and charge history** - in [Settings → System → Battery profiler](docs/battery-profiler.md), check voltage and estimated runtime or compare estimated draw against a saved baseline. Charge history shows when the battery reached its target or was unplugged, and how long the player has been on since.
+- 💾 **SD card health benchmark** - [Settings → System → SD card health](docs/sd-card-health.md) runs a five-second, read-only 4K sequential/random read test with sparse beginning/middle/end probes, reporting MB/s, IOPS, slow blocks and read errors before a cheap, worn or counterfeit card starts corrupting music. It runs off the UI thread, writes nothing, and refuses to start during USB sharing.
 - 🔌 **Themed charging screen** - the off-state battery screen uses your theme and checks for a connected cable even when the 80% charge limit has paused charging.
-- 🖥️ **V1 browser emulator** - [try Sonix on a phone or computer](https://mr-f0xx.github.io/sonix-player-tempotec-v1/) without flashing a player. Use the touchscreen and side buttons, or load your own music onto the virtual microSD. It follows the latest published web firmware. To test your changes, drop the `sonix-v1-web-wasm` Actions artifact ZIP for your commit into **Firmware Builds**, or use **Rebuild & boot local** in the native bridge. See the [emulator guide](tools/v1-emulator/README.md#testing-a-firmware-change).
+- 🖥️ **V1 browser emulator** - [try Sonix on a phone or computer](https://mr-f0xx.github.io/sonix-player-tempotec-v1/) without flashing a player. Use the touchscreen and side buttons, or load your own music onto the virtual microSD. It follows the latest published web firmware. To test your changes, drop the `sonix-v1-web-wasm` Actions artifact ZIP for your commit into **Firmware Builds**, or use **Rebuild & boot local** in the native bridge. See the [emulator guide](tools/v1-emulator/README.md#testing-a-firmware-change). A **Video** tab also carries copyable ffmpeg presets for the MPEG-1 video player above, so a file dropped onto the card plays on the V1 rather than only on a computer.
 - 🔗 **Fork QR code** - scan the code under **Settings → System → About → Forked by** to open this repository on your phone. The V1 can display the code offline.
 - 🐾 **Music pet** - a Pikachu that grows from the music you hear. See [Music pet](#music-pet).
 - 🧮 **Calculator, Notes, Metronome** - a pocket calculator, text notes from the card, and a metronome with tap tempo, all under More.
@@ -288,8 +295,8 @@ This fork builds on the upstream [Sonix Player](https://github.com/Jepl4r/sonix-
 - 🎵 **Smart Mix playlists** - start from one track to build a playlist of similar songs from the tags on the card, with no network needed. [Smart Mix indexing](FEATURES.md#smart-mix) supports libraries of tens of thousands of tracks without loading the whole library into RAM.
 - 💿 **Multi-file CUE sheets & Opus R128 ReplayGain** - a `.cue` can reference several audio files (finding each referenced file by stem even when its extension differs from the `FILE` line), and ReplayGain supports Opus `R128_TRACK_GAIN` / `R128_ALBUM_GAIN` tags alongside FLAC/MP3/Vorbis tags. See [FEATURES.md](FEATURES.md#supported-audio-formats).
 - 📁 **Remembered file browser** - Browse reopens the last folder and scroll position after a restart, and can replace the Music tile on the home screen under Settings → Appearance.
-- 🎆 **Screensaver visualizer** - a live spectrum in place of the album art: **Neon** (eight wide segmented bars in the theme's accent colour) or **LED** (a sixteen-bar bench analyzer with glowing segments); the track info and clock stay on screen, and an accent-coloured note stands in when nothing is playing.
-- 🔌 **External USB-C DACs** - a switch under Developer options keeps the USB-C port supplying power and acting as host, so dongles the default dual-role setting never brought up (a JCally, an ESR) work; the dongle's own volume control is measured so the knob stays smooth down to zero, and a silent dongle is never routed around.
+- 🎆 **Screensaver visualizer** - a live spectrum in place of the album art: **Neon** (eight wide segmented bars in the theme's accent colour), **LED** (a sixteen-bar bench analyzer with glowing segments), or **iTunes** — music-reactive sharp ribbons, soft ribbons, sparks and a tunnel, adapted from [Joseph Malam's Sonix Visualiser fork](https://github.com/josephmalam/sonix-visualiser), each layer switched on or off on its own. **Full screen** hides the track info and clock for any of the three, and **Show swipe-up arrow** (**Settings → Screen**) hides the bottom chevron without changing how the screensaver is dismissed. An accent-coloured note stands in when nothing is playing.
+- 🔌 **External USB-C DACs** - a switch under Developer options keeps the USB-C port supplying power and acting as host, so dongles the default dual-role setting never brought up (a JCally, an ESR) work; the dongle's own volume control is measured so the knob stays smooth down to zero, and a silent dongle is never routed around. Plugging one in says so by name, and a DAC that accepts only one format is handled by **48 kHz compatibility**, which converts every track to 48 kHz / 16 bit before it leaves the port -- switched on by hand, or by itself the moment a card refuses the track's own format.
 - 📶 **Bluetooth improvements** - classic BR/EDR discovery while searching, with the player discoverable, so a car head unit (like a Tesla) can pair to it; Wi-Fi/Bluetooth coexistence (AFH); the panel stays powered while a Bluetooth stream plays so waking it is silent; and the adapter is re-powered before reconnecting to the last headphones.
 - 🗣️ **Interface languages** - Ukrainian added; Japanese and Russian restored after they were dropped; a selected language that goes missing falls back to English. The player also reads Japanese MP3 tags written in Shift-JIS or EUC-JP.
 - 🖐️ **Stock gestures** - **Settings → Appearance → Stock gestures** swaps the two sheets to the edges the stock firmware uses: Cover Flow down from the top edge, control centre up from the bottom. Off by default. A separate **Swipe up to go home** switch controls the home gesture on non-scrolling screens.
@@ -335,6 +342,69 @@ Four ready-made palettes — **Gruvbox**, **Rosé Pine**, **Dracula** and **Catp
 
 Each of the four also has an **icon set** in [`sonix-player/examples/icon-sets/`](sonix-player/examples/icon-sets/): copy one to `Icons/<set>` on the card and choose it under **Settings → Appearance → Icon set**, and every glyph in the interface wears that palette — same colours, same function matching, artwork instead of tint. The sets live entirely on the card; see [docs/icon-sets.md](docs/icon-sets.md).
 
+## Video
+
+The V1 can play video on its own panel. Open a `.mpg`, `.mpeg`, `.mpe`, `.mpv` or
+`.m1v` file in **More → File manager** and it plays in place.
+
+The Ingenic X1600 has no hardware H.264 or HEVC decoder, so there is no pretending
+at modern video. What it does have is a fast MIPS core and a framebuffer, so the
+player decodes **MPEG-1 video with MP2 audio** in an **MPEG-PS** container in
+software, from the vendored [`pl_mpeg`](sonix-player/src/system/video/pl_mpeg.h)
+decoder. Frames are converted from YUV420 to RGB565, written straight to the
+panel's off-screen page and panned in — LVGL is bypassed entirely while a video
+plays, which is what makes it fast enough to be worth watching.
+
+### Turning a file into something the V1 plays
+
+The **[workbench](https://mr-f0xx.github.io/sonix-player-tempotec-v1/)** has a
+**Video** tab with copyable ffmpeg presets. The recommended one renders at the
+panel's native **320×240** landscape, 24 fps, MPEG-1 video with MP2 audio:
+
+```bash
+ffmpeg -i input.mp4 -vf "scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2,fps=24" \
+  -c:v mpeg1video -q:v 6 -c:a mp2 -b:a 128k -ar 44100 -ac 2 output.mpg
+```
+
+Copy the resulting `.mpg` to the microSD card and open it from the file manager.
+Keep video bitrates modest (**≤ 1.5 Mbps** is a safe ceiling) — the decode is
+entirely on the CPU, and a heavier file is one that stutters rather than one that
+refuses to play.
+
+### Watching
+
+- **Landscape by default.** A 320×240 frame is rotated 90° clockwise into the
+  V1's 240×320 portrait panel and cropped to fill it, so a widescreen video uses
+  the whole screen rather than sitting in a letterbox. **Double-tap** the picture
+  to switch between landscape and portrait.
+- **The overlay.** A tap brings up a control strip with the elapsed and remaining
+  time, a play/pause glyph and a progress bar along the panel edge; it hides
+  itself again after three seconds, and a tap on a hidden one only brings it
+  back. While it is showing, a tap on the picture pauses or resumes and a tap on
+  the bar jumps to that point; pressing and sliding along the picture scrubs.
+- **The side keys.** **Next** and **Previous** seek **±30 s**, and **Play/Pause**
+  pauses and resumes. The volume keys keep their usual job — they are not
+  turned into seek keys while a video plays.
+- **Sound stays in sync.** The audio clock is the master: it is derived from the
+  samples actually written to ALSA, less what the card still reports as queued.
+  A frame that falls more than **100 ms** behind the audio is dropped rather
+  than queued, and a frame that is ahead is held back by ALSA write backpressure.
+  The result is that a video too heavy for the CPU loses frames instead of
+  slowly drifting out of sync with its own soundtrack.
+- **Pausing and leaving.** Letting the screen go dark pauses the video and hands
+  the panel back; waking it picks up from the same frame, and if the screensaver
+  is holding the screen it waits for that to be dismissed. Backing out stops
+  playback and returns the panel to the interface; the player also closes itself
+  when the file ends.
+- **Music stops first.** Starting a video stops whatever is playing and waits for
+  the audio device to be released, because the player opens ALSA itself.
+
+> The video player needs the real framebuffer, so it runs on the V1 and not in the
+> [browser emulator](https://mr-f0xx.github.io/sonix-player-tempotec-v1/) or the
+> desktop build, where the display hooks report that direct video is
+> unsupported. The **Video** tab's converter is the part of it that works there,
+> and it is worth using: it is what produces a file the player can actually read.
+
 ## Music pet
 
 Open **More → Pet** to meet a small Pikachu that is fed by the music you listen to.
@@ -362,7 +432,7 @@ Open **More → Tag Manager** to view FLAC, MP3, M4A, AAC, Opus and Ogg tags and
 
 ## Tape Deck
 
-An optional More tool for WAV voice memos and 16 playable pads with custom WAV kits, one-bar overdubbing and live filter, echo and drive. Save editable sequences and record the stereo sampler mix to microSD. A compatible capture input is needed for voice memos only. See the [Tape Deck guide](docs/tape-deck.md).
+An optional More tool for WAV voice memos and 16 playable pads with custom WAV kits, one-bar overdubbing and live filter, echo and drive. Add trim/slice markers, chromatic 16-Levels pitch resampling and one-way choke groups. Save editable sequences and record the stereo sampler mix to microSD. A compatible capture input is needed for voice memos only. See the [Tape Deck guide](docs/tape-deck.md).
 
 ## Wi-Fi file transfer
 
@@ -408,6 +478,7 @@ Instead, Sonix speaks the exact same authentication flows as the stock TempoTec 
 - **SoundCloud**, **Internet Radio**, **Subsonic / Gonic**, **Jellyfin** and **Podcasts** require no API keys.
 - **SoundCloud** searches and streams public tracks out of the box (automatically discovering and rotating a public web `client_id`), and optionally accepts a profile URL / `username` or session `oauth_token` on-device or under `[soundcloud]` in `streaming-keys.ini` — see [SoundCloud](#soundcloud).
 - **Podcasts** search, chart, play and download from Apple's public podcast directory, which asks for nothing: no signup, no key, no account. It works out of the box on any install, including a published image that ships without keys. Podcast Index remains available for anyone who has a pair -- see below.
+- **Podcast catcher** (opt-in under **Settings → Plugins**) reads `feeds.txt` on the card whenever Wi-Fi connects, downloads new episodes into the `Podcast` folder, and bookmarks each one as it plays -- see [Offline podcast catcher](#offline-podcast-catcher).
 - **ListenBrainz** requires no key in `streaming-keys.ini`: request a personal user token at `listenbrainz.org/settings` and paste it into **Settings → Music → ListenBrainz**. Scrobbling to Last.fm and ListenBrainz are independent and can run side by side.
 - **Last.fm** uses a free personal API key (`last.fm/api`). Copy `sonix-player/streaming-keys.ini.example` to the root of the microSD card as `streaming-keys.ini` (or edit the `streaming-keys.ini` already created on the card), fill in `[lastfm]`, and restart the player. Do not commit or share this file.
 
@@ -458,6 +529,47 @@ oauth_token =
 username =
 client_id =
 ```
+
+### Offline podcast catcher
+
+An opt-in module under **Settings → Plugins** (`podcastcatcher`), for someone
+who knows which feeds they follow and would rather not look them up in a
+catalogue. It needs the **Podcasts** module on as well: the episodes it
+downloads are shown by the Podcasts page's **Saved podcasts** list.
+
+Put a `feeds.txt` in the root of the microSD card, one feed address a line:
+
+```
+# One feed per line. Blank lines and lines starting with # are ignored.
+https://feeds.example.com/show.rss
+https://example.org/other.xml
+```
+
+Whenever Wi-Fi joins a network -- and once at start-up if it is already up --
+each feed is read and its new episodes are downloaded into the `Podcast`
+folder as ordinary files, with the sidecar and cover the Podcasts page's own
+downloads get. As an episode plays its position is bookmarked per file, so
+opening it again carries on where it was left; hearing it to the end clears
+the bookmark and marks the episode heard like any other.
+
+The first check of a feed takes its newest `max_episodes` and records the rest
+as seen, so a feed with years of back catalogue cannot fill the card. Later
+checks take only what is genuinely new, and a failed download is retried on
+the next connection, up to three times. A feed removed from `feeds.txt` is
+forgotten with its episode records. The settings live in
+`[podcast_catcher]` of `device_config.ini`:
+
+```ini
+[podcast_catcher]
+feeds_file = feeds.txt      ; on the card, relative to its root
+max_episodes = 3            ; newest episodes taken per feed, per check
+auto_bookmark = true        ; remember where each episode was left
+min_free_mb = 200           ; stop rather than fill the card
+```
+
+The module is never switched on by a firmware update, even on a device that is
+seeded as an existing install: it fetches from the network and writes to the
+card on its own, so it waits to be asked for.
 
 ### Alternative PC / private-build key extraction
 
@@ -530,6 +642,7 @@ See [setup, security, quality and validation notes](docs/jellyfin.md).
 - `sonix-player/` — player sources, LVGL configuration, launcher and build system.
 - `sonix-packer/` — stock-image preparation, firmware packaging and validation scripts.
 - `docs/collecting-logs.md` — which logs to send with a bug report, and how to take them.
+- `docs/sd-card-health.md` — read-only microSD read-speed and failing-block diagnostic: how to run it, what the verdict means, and its limits.
 - `docs/custom-themes.md` — the custom SD-card theme palette (`Themes/custom.ini`), its keys, the ready-made Gruvbox / Rosé Pine / Dracula / Catppuccin Mocha palettes, and how edits are applied.
 - `docs/icon-sets.md` — the SD-card icon sets (`Icons/<set>/`): the four ready-made sets, the settings row that picks one, the `palette.ini` roles, and how to build your own.
 - `docs/qobuz-stock-firmware.md` — how stock Qobuz and Tidal authentication and local credential extraction work.

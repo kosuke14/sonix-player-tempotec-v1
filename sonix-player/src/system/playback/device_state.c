@@ -14,6 +14,7 @@
 #include "src/system/remote/dlna.h"
 #include "src/system/streaming/jellyfincache.h"
 #include "src/system/streaming/podcast.h"
+#include "src/system/streaming/podcastbookmark.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/soundcloudcache.h"
@@ -154,10 +155,6 @@ static bool remember_worth_saving(const device_state_t *state) {
 		   !ampstream_owns(state->current_file);
 }
 
-// True when the current track was restored paused at boot and has not yet
-// been started in this session.
-static bool restored_uncounted;
-
 static void record_current_track_play(void) {
 	if (!current_metadata_file[0] || audiobook_is_playing() || podcastcache_is_episode(current_metadata_file) ||
 		qobuzcache_owns(current_metadata_file) || tidalcache_owns(current_metadata_file) ||
@@ -176,16 +173,64 @@ static void record_current_track_play(void) {
 	stats_note_play(current_metadata_file);
 }
 
-void device_state_remember_restored(const char *path, double position) {
-	snprintf(remember.file, sizeof(remember.file), "%s", path ? path : "");
-	remember.status = AUDIO_STATUS_PAUSED;
-	remember.pos = position;
-	remember.saved_ms = remember_now_ms();
-	remember.have = true;
-	remember.restore_pos = position;
-	remember.restore_ms = remember.saved_ms;
-	restored_uncounted = path && path[0];
-}
+	static bool current_track_counted = false;
+	static double current_track_listened_secs = 0.0;
+	static double last_poll_progress = 0.0;
+	static char current_track_counted_file[512] = "";
+
+	void device_state_poll(void) {
+		device_state_remember_note();
+
+		device_state_t state;
+		device_state_get(&state);
+
+		if (!state.current_file[0] || state.live) {
+			return;
+		}
+
+		if (strcmp(state.current_file, current_track_counted_file) != 0) {
+			snprintf(current_track_counted_file, sizeof(current_track_counted_file), "%s", state.current_file);
+			current_track_counted = false;
+			current_track_listened_secs = 0.0;
+			last_poll_progress = state.progress_current_secs;
+		}
+
+		if (state.progress_current_secs < last_poll_progress) {
+			if (state.progress_current_secs < 5.0 && current_track_counted) {
+				current_track_counted = false;
+				current_track_listened_secs = 0.0;
+			}
+		}
+
+		if (state.status == AUDIO_STATUS_PLAYING && !device_state_scrub_active(NULL)) {
+			double moved = state.progress_current_secs - last_poll_progress;
+			if (moved > 0.0 && moved < 5.0) {
+				current_track_listened_secs += moved;
+			}
+		}
+		last_poll_progress = state.progress_current_secs;
+
+		if (!current_track_counted && state.progress_total_secs > 0) {
+			double threshold = state.progress_total_secs / 2.0;
+			if (threshold > 240.0) {
+				threshold = 240.0;
+			}
+			if (current_track_listened_secs >= threshold) {
+				current_track_counted = true;
+				record_current_track_play();
+			}
+		}
+	}
+
+	void device_state_remember_restored(const char *path, double position) {
+		snprintf(remember.file, sizeof(remember.file), "%s", path ? path : "");
+		remember.status = AUDIO_STATUS_PAUSED;
+		remember.pos = position;
+		remember.saved_ms = remember_now_ms();
+		remember.have = true;
+		remember.restore_pos = position;
+		remember.restore_ms = remember.saved_ms;
+	}
 
 void device_state_remember_note(void) {
 	if (!remember_enabled()) {
@@ -199,6 +244,10 @@ void device_state_remember_note(void) {
 	if (remember_should_write(&remember, state.current_file, state.status, state.progress_current_secs,
 							  remember_now_ms())) {
 		library_playback_state_save(state.current_file, state.progress_current_secs);
+		// The same checkpoint, per episode: "remember track" keeps one track
+		// for the whole player, which is not what coming back to a podcast
+		// means. No-op outside the podcast folder and with the catcher off.
+		podcastbookmark_note(state.current_file, state.progress_current_secs, state.progress_total_secs);
 	}
 }
 
@@ -238,6 +287,7 @@ void device_state_remember_flush(void) {
 	}
 	remember.restore_pos = -1.0;
 	library_playback_state_save(state.current_file, state.progress_current_secs);
+	podcastbookmark_note(state.current_file, state.progress_current_secs, state.progress_total_secs);
 	snprintf(remember.file, sizeof(remember.file), "%s", state.current_file);
 	remember.status = state.status;
 	remember.pos = state.progress_current_secs;
@@ -503,6 +553,9 @@ void device_state_note_storage_gone(void) {
 	device_state_get(&state);
 	// The databases on the card close right after this.
 	flush_book_position(&state);
+	// And the podcast's own place: the same checkpoint the ten-second timer
+	// would have written, on the way out while the card is still there.
+	podcastbookmark_note(state.current_file, state.progress_current_secs, state.progress_total_secs);
 	// A second in is not a position worth coming back to, and a live stream has
 	// none at all.
 	if (state.live || !state.current_file[0] || state.progress_current_secs <= 1.0) {
@@ -584,13 +637,26 @@ static void load_and_play_at(const char *filepath, double position) {
 		apply_track_speed();
 	}
 
+	// Where an episode in the podcast folder was left. Below zero means "the
+	// beginning", which for an episode is wherever it was paused last time;
+	// an explicit zero means "from the start", and the old place is forgotten
+	// rather than left to catch the next open. A file that is not a podcast
+	// episode, or a player with the catcher switched off, answers false and
+	// starts where it always did.
+	if (position < 0) {
+		double bookmark = 0.0;
+		if (podcastbookmark_get(current_metadata_file, &bookmark)) {
+			position = bookmark;
+		}
+	} else if (position == 0.0) {
+		podcastbookmark_clear(current_metadata_file);
+	}
+
 	if (position > 0) {
 		audio_play_at(current_metadata_file, position);
 	} else {
 		audio_play(current_metadata_file);
-		record_current_track_play();
 	}
-	restored_uncounted = false;
 
 	// Any track load supersedes the note: it belongs to the one press that
 	// follows the storage coming back.
@@ -1784,8 +1850,6 @@ bool device_state_take_crossfade_handoff(void) {
 		podcastcache_note_played(current_metadata_file);
 	}
 
-	record_current_track_play();
-	restored_uncounted = false;
 	interrupted_file[0] = '\0';
 	interrupted_pos = -1.0;
 	queue_persist();
@@ -1830,13 +1894,9 @@ audio_status_t device_state_toggle_play_pause(void) {
 			audio_get_progress(&current, &total);
 			double back = current - (double)audiobook_rewind_seconds();
 			audio_seek(back > 0 ? back : 0);
-		}
-		audio_resume();
-		if (restored_uncounted) {
-			restored_uncounted = false;
-			record_current_track_play();
-		}
-		return AUDIO_STATUS_PLAYING;
+			}
+			audio_resume();
+			return AUDIO_STATUS_PLAYING;
 	case AUDIO_STATUS_STOPPED:
 	default:
 		// Playback ended (or was stopped): restart the currently-loaded track

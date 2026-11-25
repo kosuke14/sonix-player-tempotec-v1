@@ -25,7 +25,7 @@ CORE = $(ROOT)/src/system/streaming/subsonic.c \
        $(ROOT)/src/system/core/json.c $(ROOT)/src/system/core/md5.c \
        $(ROOT)/src/system/core/config.c $(ROOT)/src/system/playback/playlist.c
 
-.PHONY: test sanitize clean extractkeys qobuz gbdb
+.PHONY: test sanitize clean extractkeys qobuz gbdb sdhealth sdhealth-keys
 
 test: $(BUILD)/test_subsonic
 	python3 run_subsonic_tests.py $(BUILD)/test_subsonic
@@ -148,7 +148,7 @@ $(BUILD)/test_subsonic: test_subsonic.c support.c $(CORE) $(shell find $(ROOT)/s
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_subsonic.c support.c $(CORE) $(LDFLAGS) $(LDLIBS)
 
 sanitize:
-	$(MAKE) BUILD=.build/sanitize CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' test soundcloud jellyfin tapedeck
+	$(MAKE) BUILD=.build/sanitize CFLAGS='-O1 -g -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-Wl,--gc-sections -fsanitize=address,undefined' test soundcloud jellyfin tapedeck sdbench
 
 # The same for the ampstream suite: the pipeline allocates through every step
 # (fragments, batches, plaintexts), which is exactly where a slip hides.
@@ -200,6 +200,27 @@ $(BUILD)/test_batteryprofile: $(BATTERYPROFILE_SRC) $(ROOT)/src/system/device/ba
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(BATTERYPROFILE_SRC) $(LDFLAGS) $(LDLIBS) \
 		-Wl,--wrap=open,--wrap=open64,--wrap=ioctl,--wrap=close
+
+# The read-only SD-card health benchmark: deterministic fake 4K reads plus the
+# real O_DIRECT/buffered file path. No LVGL or card hardware required.
+SDBENCH_SRC = test_sdbench.c $(ROOT)/src/system/device/sdbench.c
+.PHONY: sdbench
+sdbench: $(BUILD)/test_sdbench
+	$(BUILD)/test_sdbench
+
+$(BUILD)/test_sdbench: $(SDBENCH_SRC) $(ROOT)/src/system/device/sdbench.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SDBENCH_SRC) $(LDFLAGS) $(LDLIBS)
+
+# Every sd_health_* literal used by the page must be present, with a value, in
+# all eleven shipped language files; no stale keys and no silent truncation at
+# lang.c's MAX_ENTRIES. The rest of the INIs have historical language-specific
+# keys, so this check is deliberately scoped to the new page.
+sdhealth-keys:
+	python3 check_sdhealth_language_keys.py
+
+.PHONY: sdhealth
+sdhealth: sdbench sdhealth-keys sdhealth-ui
 
 # Exact percentage cutoff and hysteresis used by both charger paths.
 .PHONY: chargelimit
@@ -303,7 +324,7 @@ $(BUILD)/test_crossfade: $(XFADE_SRC) $(ROOT)/src/system/audio/crossfade.h $(ROO
 # The explicit V1 external-DAC host trial against a private fake sysfs tree.
 # Exercises the real role writes, bounded wait, rollback and crash recovery.
 .PHONY: usbhost
-usbhost: $(BUILD)/test_usbhostprobe $(BUILD)/test_usbhost_reset $(BUILD)/test_usb_ownership $(BUILD)/test_usbexport $(BUILD)/test_usb_storage $(BUILD)/test_usbaudio_arbitration $(BUILD)/test_usbaudio_volume $(BUILD)/test_usbhostmode $(BUILD)/test_card_release
+usbhost: $(BUILD)/test_usbhostprobe $(BUILD)/test_usbhost_reset $(BUILD)/test_usb_ownership $(BUILD)/test_usbexport $(BUILD)/test_usb_storage $(BUILD)/test_usbaudio_arbitration $(BUILD)/test_usbaudio_volume $(BUILD)/test_usbaudio_compat $(BUILD)/test_usbhostmode $(BUILD)/test_card_release
 	$(BUILD)/test_usbhostprobe
 	$(BUILD)/test_usbhost_reset
 	$(BUILD)/test_usb_ownership
@@ -311,6 +332,7 @@ usbhost: $(BUILD)/test_usbhostprobe $(BUILD)/test_usbhost_reset $(BUILD)/test_us
 	$(BUILD)/test_usb_storage
 	$(BUILD)/test_usbaudio_arbitration
 	$(BUILD)/test_usbaudio_volume
+	$(BUILD)/test_usbaudio_compat
 	$(BUILD)/test_usbhostmode
 	$(BUILD)/test_card_release
 
@@ -337,6 +359,17 @@ $(BUILD)/test_usbaudio_arbitration: test_usbaudio_arbitration.c $(ROOT)/src/syst
                                    stubs/lvgl/lvgl.h stubs/alsa/asoundlib.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usbaudio_arbitration.c $(LDFLAGS) $(LDLIBS)
+
+# The 48 kHz/16 bit compatibility setting for a USB DAC that presents one
+# format and refuses the rest: where it is stored, that it is off until asked
+# for, that a change off the playback thread is saved by the poll rather than
+# there, that it is in force only while a card is really the output, and what
+# the attach notice says. The config is a two-cell fake; everything from the
+# setting to the notice is the real usbaudio.c.
+$(BUILD)/test_usbaudio_compat: test_usbaudio_compat.c $(ROOT)/src/system/audio/usbaudio.c \
+                               $(ROOT)/src/system/audio/usbaudio.h stubs/lvgl/lvgl.h stubs/alsa/asoundlib.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -Istubs $(CFLAGS) -o $@ test_usbaudio_compat.c $(LDFLAGS) $(LDLIBS)
 
 # Where the level physically happens on a USB DAC: the device's own control by
 # default, the samples the remainder, and the samples the whole of it when the
@@ -916,6 +949,32 @@ $(BUILD)/test_podcastplayed: test_podcastplayed.c $(ROOT)/src/system/streaming/p
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_podcastplayed.c \
 		$(ROOT)/src/system/streaming/podcastplayed.c $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
 
+# The offline catcher's decisions with no network: feeds.txt is read the way a
+# hand-written file is, and the new-episode decision is the one that can fill
+# a card if it is wrong. The state is the real SQLite on a temporary card.
+.PHONY: podcastcatcher
+podcastcatcher: $(BUILD)/test_podcastcatcher
+	$(BUILD)/test_podcastcatcher
+
+$(BUILD)/test_podcastcatcher: test_podcastcatcher.c $(ROOT)/src/system/streaming/podcastcatcher.c \
+                              $(ROOT)/src/system/streaming/podcastcatcher_internal.h \
+                              $(ROOT)/src/system/streaming/podcastcatcher.h $(BUILD)/sqlite3_impl.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_podcastcatcher.c \
+		$(ROOT)/src/system/streaming/podcastcatcher.c $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
+# Per-episode playback bookmarks against the real SQLite. The module switch,
+# the config key and the podcast-folder test are stubbed; the store is real.
+.PHONY: podcastbookmark
+podcastbookmark: $(BUILD)/test_podcastbookmark
+	$(BUILD)/test_podcastbookmark
+
+$(BUILD)/test_podcastbookmark: test_podcastbookmark.c $(ROOT)/src/system/streaming/podcastbookmark.c \
+                               $(ROOT)/src/system/streaming/podcastbookmark.h $(BUILD)/sqlite3_impl.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_podcastbookmark.c \
+		$(ROOT)/src/system/streaming/podcastbookmark.c $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
 # The podcast catalogue on both of the directories it can use, which is to say
 # the requests each one builds and the structs each one fills. The real
 # podcast.c, JSON parser, settings, region list and SHA-1 are linked; the
@@ -1200,6 +1259,7 @@ TIDALPAGE_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(TIDALPAGE_SRC)) \
             $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 
 SAVER_SRC = $(ROOT)/tests/ui/test_screensaver.c $(ROOT)/src/gui/settings/screensaver.c $(ROOT)/src/system/audio/visualizer.c \
+            $(ROOT)/src/gui/settings/screensaver_filaments.c \
             $(ROOT)/src/gui/shell/scrolltext.c $(ROOT)/src/gui/shell/settingsrow.c \
             $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/shell/icons.c \
             $(ROOT)/src/gui/board_profile.c \
@@ -1425,6 +1485,32 @@ MUSICROWS_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(MUSICROWS_SRC)) \
 musicsettings-rows: $(BUILD)/test_musicsettings_rows
 	$(BUILD)/test_musicsettings_rows ../../sonix-packer/assets/V1/usr/resource/sonix/language
 
+# Developer options: the USB 48 kHz compatibility row. The page is built by the
+# real devoptions_init(), so the row under test is the one the player draws, in
+# the place it draws it; what is checked is its position (under the External USB
+# DAC row), that its switch opens showing the setting, that a tap writes it, and
+# that a change made by audio.c -- which can switch it on by itself -- is what
+# the page shows when it is next opened.
+# devoptions.c is included by the test rather than compiled beside it: the page's
+# own static rows are what the checks look at, and they are only visible there.
+DEVOPTIONS_SRC = $(ROOT)/tests/ui/test_devoptions_usbcompat.c \
+                 $(ROOT)/src/gui/shell/settingsrow.c $(ROOT)/src/gui/shell/theme.c \
+                 $(ROOT)/src/gui/shell/icons.c $(ROOT)/src/gui/board_profile.c \
+                 $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/lang.c
+DEVOPTIONS_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(DEVOPTIONS_SRC)) \
+                 $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
+
+.PHONY: devoptions
+devoptions: $(BUILD)/test_devoptions_usbcompat
+	$(BUILD)/test_devoptions_usbcompat ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+# devoptions.c is listed again as a prerequisite because the test includes it:
+# the object rule cannot see through the #include, and without this an edit to
+# the page would leave this test running the binary from before it.
+$(BUILD)/test_devoptions_usbcompat: $(DEVOPTIONS_OBJ) $(ROOT)/src/gui/settings/devoptions.c
+	$(CC) $(LDFLAGS) -o $@ $(DEVOPTIONS_OBJ) -lpthread -lm -ldl
+
+
 $(BUILD)/test_musicsettings_rows: $(MUSICROWS_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -1443,6 +1529,24 @@ $(BUILD)/test_batteryprofile_ui: $(BATTERYPROFILE_UI_OBJ) $(UI_LVGL_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=clock_gettime,--wrap=batteryprofile_read
 
 -include $(BATTERYPROFILE_UI_OBJ:.o=.d)
+
+# The SD card health page on the V1 panel. The benchmark worker is wrapped to
+# run synchronously with a fake result: running/progress, every verdict, USB
+# and card guards, the stalled-read watchdog, theme refresh and all languages.
+SDHEALTH_UI_SRC = $(ROOT)/tests/ui/test_sdhealthpage.c \
+                  $(ROOT)/src/gui/settings/sdhealthpage.c \
+                  $(ROOT)/src/system/device/sdbench.c \
+                  $(ROOT)/src/system/core/lang.c
+SDHEALTH_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(SDHEALTH_UI_SRC)) $(UI_LVGL_OBJ)
+.PHONY: sdhealth-ui
+sdhealth-ui: $(BUILD)/test_sdhealth_ui
+	$(BUILD)/test_sdhealth_ui ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+$(BUILD)/test_sdhealth_ui: $(SDHEALTH_UI_OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS) \
+		-Wl,--wrap=sdbench_run,--wrap=pthread_create,--wrap=pthread_detach
+
+-include $(SDHEALTH_UI_OBJ:.o=.d)
 
 # The volume pill with the level read as a voltage: the production overlay and
 # reading on the V1 layout, with the audio side reduced to what the test sets.
@@ -1507,7 +1611,7 @@ $(BUILD)/test_stockkeys_ui: $(ROOT)/build_gen/streamkeys_key.h $(STOCKKEYS_UI_OB
 	$(CC) -o $@ $(STOCKKEYS_UI_OBJ) $(LDFLAGS) $(LDLIBS)
 
 .PHONY: ui
-ui: wifitransfer-ui batteryprofile-ui
+ui: wifitransfer-ui batteryprofile-ui sdhealth-ui sdhealth-keys
 ui: $(BUILD)/test_sleeve_hold
 # The PEQ profiles suite waits out of the run: upstream's Automatic Level
 # commit (40580ed4) left its band-entry assertions failing against its own
@@ -1613,7 +1717,7 @@ $(BUILD)/ui/lvgl/%.o: $(ROOT)/lvgl/%.c ui/lv_conf.h $(ROOT)/lv_conf.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UI_CPPFLAGS) $(filter-out -Werror,$(UI_CFLAGS)) -c $< -o $@
 
--include $(sort $(QOBUZGENRE_UI_OBJ:.o=.d) $(PEQPAGE_OBJ:.o=.d) $(UI_OBJ:.o=.d) $(SAVER_OBJ:.o=.d) $(CHARGE_OBJ:.o=.d) $(WIFIPAGE_OBJ:.o=.d) $(LYRICSEARCH_OBJ:.o=.d) $(GAMES_OBJ:.o=.d) $(CORNERS_OBJ:.o=.d) $(STATS_UI_OBJ:.o=.d) $(PLAYBUTTON_OBJ:.o=.d) $(MUSICROWS_OBJ:.o=.d) $(VOLUMEOVERLAY_OBJ:.o=.d) $(PLAYERDECK_OBJ:.o=.d) $(VINYLLAYOUT_OBJ:.o=.d) $(STICKERLAYOUT_OBJ:.o=.d) $(WAVEOVERLAY_OBJ:.o=.d) $(HIRESBADGE_UI_OBJ:.o=.d) $(STOCKKEYS_UI_OBJ:.o=.d) $(TIDALPAGE_OBJ:.o=.d))
+-include $(sort $(QOBUZGENRE_UI_OBJ:.o=.d) $(PEQPAGE_OBJ:.o=.d) $(UI_OBJ:.o=.d) $(SAVER_OBJ:.o=.d) $(CHARGE_OBJ:.o=.d) $(WIFIPAGE_OBJ:.o=.d) $(LYRICSEARCH_OBJ:.o=.d) $(GAMES_OBJ:.o=.d) $(CORNERS_OBJ:.o=.d) $(STATS_UI_OBJ:.o=.d) $(PLAYBUTTON_OBJ:.o=.d) $(MUSICROWS_OBJ:.o=.d) $(VOLUMEOVERLAY_OBJ:.o=.d) $(PLAYERDECK_OBJ:.o=.d) $(VINYLLAYOUT_OBJ:.o=.d) $(STICKERLAYOUT_OBJ:.o=.d) $(WAVEOVERLAY_OBJ:.o=.d) $(HIRESBADGE_UI_OBJ:.o=.d) $(STOCKKEYS_UI_OBJ:.o=.d) $(TIDALPAGE_OBJ:.o=.d) $(DEVOPTIONS_OBJ:.o=.d))
 
 # Smart Mix track-count limits and traversal, with a memory-only graph fixture.
 GENIUS_SRC = test_genius.c $(ROOT)/src/system/library/genius.c
