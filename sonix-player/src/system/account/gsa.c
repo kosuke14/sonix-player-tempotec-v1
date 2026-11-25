@@ -563,7 +563,7 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 		sha256_final_raw(&c, hpw);
 	}
 	uint8_t pbk[32];
-	pbkdf2_hmac_sha256(hpw, 32, out->salt, (size_t)out->salt_len,
+	pbkdf2_hmac_sha256_gsa(hpw, 32, out->salt, (size_t)out->salt_len,
 					   (unsigned)(out->iters > 0 ? out->iters : 2048), pbk, 32);
 
 	srp_session_t srp;

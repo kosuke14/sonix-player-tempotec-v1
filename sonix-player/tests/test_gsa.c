@@ -42,7 +42,7 @@ int main(void) {
 
 	// 2) PBKDF2-HMAC-SHA256 against RFC 6070's SHA-256 cousin
 	uint8_t out[32];
-	pbkdf2_hmac_sha256((const uint8_t *)"password", 8, (const uint8_t *)"salt", 4, 4096, out, 32);
+	pbkdf2_hmac_sha256_gsa((const uint8_t *)"password", 8, (const uint8_t *)"salt", 4, 4096, out, 32);
 	printf("pbkdf2: %s\n", out[0] == 0xc5 && out[1] == 0xe4 ? "PASS" : "FAIL"); // known vector prefix
 
 	// 3) SRP: a complete exchange against a python-derived vector

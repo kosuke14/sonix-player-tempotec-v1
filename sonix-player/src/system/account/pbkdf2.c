@@ -35,7 +35,7 @@ static void hmac_sha256(const uint8_t *key, size_t key_len, const void *msg, siz
 	memset(pad, 0, sizeof(pad));
 }
 
-void pbkdf2_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *salt, size_t salt_len,
+void pbkdf2_hmac_sha256_gsa(const uint8_t *key, size_t key_len, const uint8_t *salt, size_t salt_len,
 						unsigned iterations, uint8_t *out, size_t out_len) {
 	uint8_t block[4]; // big-endian block index, 1-based
 	uint8_t msg[SRP_SALT_MAX + 4];
