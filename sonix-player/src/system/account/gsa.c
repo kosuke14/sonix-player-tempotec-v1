@@ -460,6 +460,7 @@ bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const 
 	int s_node = resp_get(&reply, "s");
 	int b_node = resp_get(&reply, "B");
 	int i_node = resp_get(&reply, "i");
+	int sp_node = resp_get(&reply, "sp");
 	if (c_node < 0 || s_node < 0 || b_node < 0 || !plist_str(&reply, c_node)) {
 		snprintf(out->error, sizeof(out->error), "gsa_init_missing_fields");
 		out->result = GSA_FAILED;
@@ -467,6 +468,14 @@ bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const 
 		return false;
 	}
 	snprintf(out->session, sizeof(out->session), "%s", plist_str(&reply, c_node));
+	// The password protocol the server picked. "s2k_fo" feeds PBKDF2 the
+	// lowercase hex expansion of the password hash instead of the hash
+	// itself -- ignoring the choice poisons x and the M1 check answers
+	// "M1 is invalid" (see AltSign's ALTPBKDF2SRP).
+	memset(out->sp, 0, sizeof(out->sp));
+	if (sp_node >= 0 && plist_str(&reply, sp_node)) {
+		snprintf(out->sp, sizeof(out->sp), "%s", plist_str(&reply, sp_node));
+	}
 	size_t len = 0;
 	const uint8_t *salt = plist_data(&reply, s_node, &len);
 	if (salt && len && len <= sizeof(out->salt)) {
@@ -479,6 +488,8 @@ bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const 
 		out->b_len = (int)len;
 	}
 	out->iters = i_node >= 0 ? plist_int(&reply, i_node) : 2048;
+	fprintf(stderr, "gsa: init accepted (sp %s, i %lld, salt %d, B %d)\n",
+			out->sp[0] ? out->sp : "s2k", out->iters, (int)out->salt_len, (int)out->b_len);
 	plist_free(&reply);
 	if (!out->salt_len || !out->b_len) {
 		snprintf(out->error, sizeof(out->error), "gsa_init_bad_fields");
@@ -506,7 +517,11 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 		return false;
 	}
 
-	// the verifier password: PBKDF2-HMAC-SHA256 over SHA-256(password)
+	// the verifier password: PBKDF2-HMAC-SHA256 over the s2k digest -- and
+	// the s2k family has two members the server picks between in the init:
+	// "s2k" feeds it the SHA-256(password) as-is; "s2k_fo" feeds the
+	// lowercase hex expansion of the same hash (64 ASCII bytes). Choosing
+	// wrong poisons x, and the M1 check answers "M1 is invalid".
 	uint8_t hpw[32];
 	{
 		sha256_ctx c;
@@ -515,8 +530,22 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 		sha256_final_raw(&c, hpw);
 	}
 	uint8_t pbk[32];
-	pbkdf2_hmac_sha256_gsa(hpw, 32, out->salt, (size_t)out->salt_len,
-					   (unsigned)(out->iters > 0 ? out->iters : 2048), pbk, 32);
+	{
+		const uint8_t *key_material = hpw;
+		size_t key_len = 32;
+		static const char HEX[] = "0123456789abcdef";
+		uint8_t hexbuf[64];
+		if (strcmp(out->sp, "s2k_fo") == 0) {
+			for (int i = 0; i < 32; i++) {
+				hexbuf[i * 2 + 0] = (uint8_t)HEX[(hpw[i] >> 4) & 0xF];
+				hexbuf[i * 2 + 1] = (uint8_t)HEX[hpw[i] & 0xF];
+			}
+			key_material = hexbuf;
+			key_len = sizeof(hexbuf);
+		}
+		pbkdf2_hmac_sha256_gsa(key_material, key_len, out->salt, (size_t)out->salt_len,
+						   (unsigned)(out->iters > 0 ? out->iters : 2048), pbk, 32);
+	}
 
 	srp_session_t srp;
 	memset(&srp, 0, sizeof(srp));

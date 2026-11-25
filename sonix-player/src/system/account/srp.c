@@ -66,10 +66,13 @@ static void compute_k(bn_t *k) {
 }
 
 // M1 = H(H(g_pad) XOR H(N) | H(username) | salt | A | B | K) -- the proof
-// binds the account name, even though the key derivation does not.
-static void compute_m1(const uint8_t *a_pub, const uint8_t *b_pub, const uint8_t *key,
-					   const char *username, const uint8_t *salt, size_t salt_len,
-					   uint8_t m1[32]) {
+// binds the account name, even though the key derivation does not. A and B
+// enter as their MINIMAL big-endian encodings (pysrp's long_to_bytes, the
+// convention AltSign's corecrypto flow is validated against) -- the padded
+// forms belong to u and k only.
+static void compute_m1(const uint8_t *a_min, size_t a_min_len, const uint8_t *b_min,
+					   size_t b_min_len, const uint8_t *key, const char *username,
+					   const uint8_t *salt, size_t salt_len, uint8_t m1[32]) {
 	uint8_t g_pad[256], gh[32], nh[32];
 	memset(g_pad, 0, sizeof(g_pad));
 	g_pad[255] = 2;
@@ -90,17 +93,17 @@ static void compute_m1(const uint8_t *a_pub, const uint8_t *b_pub, const uint8_t
 	}
 	sha256_update(&c, user_hash, 32);
 	sha256_update(&c, salt, salt_len);
-	sha256_update(&c, a_pub, 256);
-	sha256_update(&c, b_pub, 256);
+	sha256_update(&c, a_min, a_min_len);
+	sha256_update(&c, b_min, b_min_len);
 	sha256_update(&c, key, 32);
 	sha256_final_raw(&c, m1);
 }
 
-static void compute_m2(const uint8_t *a_pub, const uint8_t m1[32], const uint8_t *key,
-					   uint8_t m2[32]) {
+static void compute_m2(const uint8_t *a_min, size_t a_min_len, const uint8_t m1[32],
+					   const uint8_t *key, uint8_t m2[32]) {
 	sha256_ctx c;
 	sha256_init(&c);
-	sha256_update(&c, a_pub, 256);
+	sha256_update(&c, a_min, a_min_len);
 	sha256_update(&c, m1, 32);
 	sha256_update(&c, key, 32);
 	sha256_final_raw(&c, m2);
@@ -272,7 +275,19 @@ bool srp_process_reply(const uint8_t *a, size_t a_len, const char *username,
 	sha256_final_raw(&c, key);
 	memcpy(out->key, key, 32);
 
-	compute_m1(a_pub, b_pub, key, username, salt, salt_len, out->m1);
-	compute_m2(a_pub, out->m1, key, out->m2);
+	// A and B re-enter the proof as their minimal encodings: a leading zero
+	// byte in the padded form is not part of the number the server hashed.
+	size_t a_first = 0;
+	while (a_first < 255 && a_pub[a_first] == 0) {
+		a_first++;
+	}
+	size_t b_first = 0;
+	while (b_first < 255 && b_pub[b_first] == 0) {
+		b_first++;
+	}
+
+	compute_m1(a_pub + a_first, 256 - a_first, b_pub + b_first, 256 - b_first, key,
+			   username, salt, salt_len, out->m1);
+	compute_m2(a_pub + a_first, 256 - a_first, out->m1, key, out->m2);
 	return true;
 }

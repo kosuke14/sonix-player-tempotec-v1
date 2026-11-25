@@ -72,6 +72,7 @@ typedef struct {
 	uint8_t b_pub[256];
 	int b_len;
 	long long iters;
+	char sp[16]; // the password protocol the server picked: s2k or s2k_fo
 	// The session's own keys from the spd, what the app-token requests sign
 	// with. Zeroed after use by the caller that is done with them.
 	uint8_t sk[64];
