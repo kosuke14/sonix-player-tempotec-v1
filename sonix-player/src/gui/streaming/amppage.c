@@ -25,6 +25,7 @@
 #include "src/system/streaming/amplocal.h"
 #include "src/system/streaming/ampnative.h"
 #include "src/system/streaming/streamturn.h"
+#include "src/system/net/http.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -377,6 +378,22 @@ static char draft_anisette[192]; // the anisette server the sign-in rides on
 static char draft_user[128], draft_pass[128]; // the login screen's fields
 static char creds_path[600];
 
+// The anisette servers SideStore's catalog lists, fetched on the device when
+// the picker opens: twenty-odd community servers, each a name and a URL, and
+// the one that pairs with the account's route is a choice only the device
+// can make -- the same catalog the SideStore app's "Available Servers" page
+// reads.
+#define AMP_SERVERS_URL "https://servers.sidestore.io/servers.json"
+#define AMP_SERVERS_MAX 24
+typedef struct {
+	char name[96];
+	char address[160];
+} amp_server_t;
+static amp_server_t amp_servers[AMP_SERVERS_MAX];
+static int amp_servers_n;
+static bool amp_servers_fetching;
+static unsigned amp_servers_done; // increments when the fetch lands
+
 // The remembered password lives beside the config as a 0600 JSON file, the
 // subsonic page's pattern: a private file the user opted into, never a config
 // key, written through a .tmp and renamed so a half-write reads as nothing.
@@ -596,6 +613,154 @@ static void apply_state(result_t *result) {
 
 static void run_search(const char *term);
 static void poll_cb(lv_timer_t *timer);
+static void servers_rebuild(void);
+
+// ---------------------------------------------------------------------------
+// the anisette server picker: SideStore's catalog, fetched on the device
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *servers_screen, *servers_container;
+
+// One fetch of the catalog on a thread of its own; the picker's poll tick
+// collects the answer. A failure leaves the list empty -- the picker then
+// offers the default and the custom URL, which is the old behaviour.
+static void *servers_fetch(void *arg) {
+	(void)arg;
+	char *body = NULL;
+	size_t len = 0;
+	if (!http_get(AMP_SERVERS_URL, &body, &len, 256 * 1024, 20) || !body) {
+		fprintf(stderr, "amppage: the anisette server catalog did not load\n");
+		amp_servers_done++;
+		return NULL;
+	}
+	json_doc_t doc;
+	if (!json_parse(body, &doc)) {
+		free(body);
+		amp_servers_done++;
+		return NULL;
+	}
+	int root = json_root(&doc);
+	int servers = json_get(&doc, root, "servers");
+	int n = 0;
+	if (servers >= 0) {
+		int count = json_len(&doc, servers);
+		for (int i = 0; i < count && n < AMP_SERVERS_MAX; i++) {
+			int entry = json_at(&doc, servers, i);
+			char name[96] = "", address[160] = "";
+			if (entry < 0 || !json_obj_str(&doc, entry, "name", name, sizeof(name)) ||
+				!json_obj_str(&doc, entry, "address", address, sizeof(address)) ||
+				!name[0] || !address[0]) {
+				continue;
+			}
+			snprintf(amp_servers[n].name, sizeof(amp_servers[n].name), "%s", name);
+			snprintf(amp_servers[n].address, sizeof(amp_servers[n].address), "%s", address);
+			n++;
+		}
+	}
+	json_free(&doc);
+	free(body);
+	amp_servers_n = n;
+	amp_servers_fetching = false;
+	amp_servers_done++;
+	return NULL;
+}
+
+static void servers_fetch_kick(void) {
+	if (amp_servers_fetching) {
+		return;
+	}
+	amp_servers_fetching = true;
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, servers_fetch, NULL) == 0) {
+		pthread_detach(thread);
+	} else {
+		amp_servers_fetching = false;
+	}
+}
+
+// Choosing a row is the whole settings dance in one tap: the draft, the
+// config, the live module, and the row's own readout. The provisioned
+// identity that belonged to the old server is dropped by the module itself,
+// which re-provisions on the first OTP the new server refuses.
+static void anisette_apply(const char *url) {
+	snprintf(draft_anisette, sizeof(draft_anisette), "%s", url ? url : "");
+	config_set("applemusic", "anisette_url", draft_anisette);
+	config_save();
+	anisette_set_server(draft_anisette);
+	anisette_set_root(storage_sd_root());
+	settings_refresh();
+}
+
+static void pick_server_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	int index = (int)(intptr_t)lv_event_get_user_data(e);
+	if (index < 0 || index >= amp_servers_n) {
+		return;
+	}
+	anisette_apply(amp_servers[index].address);
+	toast_success("amp_connected");
+	switch_screen_return_to(settings_screen);
+}
+
+static void pick_server_default_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	anisette_apply("");
+	toast_success("amp_connected");
+	switch_screen_return_to(settings_screen);
+}
+
+static void pick_server_custom_cb(lv_event_t *e) {
+	(void)e;
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	searching = false;
+	editing = 2;
+	lv_label_set_text(edit_title, tr("amp_anisette"));
+	lv_textarea_set_accepted_chars(edit_field, NULL);
+	lv_textarea_set_max_length(edit_field, 127);
+	lv_textarea_set_text(edit_field, draft_anisette);
+	lv_textarea_set_password_mode(edit_field, false);
+	lv_textarea_set_placeholder_text(edit_field, tr("amp_anisette"));
+	keyboard_reset(keyboard);
+	keyboard_set_visible(keyboard, true);
+	switch_screen(edit_screen);
+}
+
+static void servers_rebuild(void) {
+	if (!servers_container) {
+		return;
+	}
+	lv_obj_clean(servers_container);
+	// the SideStore default, first and named as the row beside it reads
+	settingsrow_add(servers_container, "amp_anisette_default", NULL,
+					pick_server_default_cb, NULL);
+	for (int i = 0; i < amp_servers_n; i++) {
+		lv_obj_t *row = settingsrow_add(servers_container, amp_servers[i].name, NULL,
+										pick_server_cb, (void *)(intptr_t)i);
+		lv_obj_t *value = lv_label_create(row);
+		lv_label_set_text(value, amp_servers[i].address);
+		lv_obj_add_style(value, &theme_style_text_dim, 0);
+		lv_obj_align(value, LV_ALIGN_RIGHT_MID, -8, 0);
+		lv_label_set_long_mode(value, LV_LABEL_LONG_CLIP);
+		lv_obj_set_width(value, lv_obj_get_width(row) / 2);
+	}
+	settingsrow_add(servers_container, "amp_anisette_custom", NULL,
+					pick_server_custom_cb, NULL);
+}
+
+static void open_servers_cb(lv_event_t *e) {
+	if (busy || switcher_back_drag_active()) {
+		return;
+	}
+	servers_rebuild();
+	servers_fetch_kick();
+	switch_screen(servers_screen);
+}
 
 static void edit_cb(lv_event_t *e) {
 	if (busy || switcher_back_drag_active()) {
@@ -1047,8 +1212,8 @@ void amppage_init(gui_config_t *cfg) {
 	settingsrow_add_icon(login_row, &icon_check, THEME_SEMANTIC_GREEN);
 	store_row = settingsrow_add(container, "amp_storefront", &store_value, edit_cb, (void *)(intptr_t)0);
 	settingsrow_add_icon(store_row, &icon_music_note, THEME_SEMANTIC_CYAN);
-	anisette_row = settingsrow_add(container, "amp_anisette", &anisette_value, edit_cb,
-								  (void *)(intptr_t)2);
+	anisette_row = settingsrow_add(container, "amp_anisette", &anisette_value, open_servers_cb,
+								   NULL);
 	settingsrow_add_icon(anisette_row, &icon_wifi_high, THEME_SEMANTIC_CYAN);
 	account_row = settingsrow_add(container, "amp_account", &account_value, NULL, NULL);
 	settingsrow_add_icon(account_row, &icon_artist, THEME_SEMANTIC_GREEN);
@@ -1119,6 +1284,13 @@ void amppage_init(gui_config_t *cfg) {
 							   edit_field, NULL, "ok", accept_cb, NULL);
 	lv_obj_add_event_cb(edit_screen, edit_left_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
+	// The anisette server picker: SideStore's catalog fetched on the device,
+	// a row per community server, the default first and a hand-typed URL
+	// last.
+	servers_screen = screen();
+	servers_container = settingsrow_page(servers_screen, cfg, "amp_anisette");
+	player_sheet_attach_drag(servers_container, true);
+
 	// Piggybacks on LVGL's existing event loop. The fetch worker sleeps on a
 	// condition; this tiny two-Hz check does no REST/socket I/O.
 	lv_timer_create(poll_cb, 500, NULL);
@@ -1126,6 +1298,13 @@ void amppage_init(gui_config_t *cfg) {
 
 static void poll_cb(lv_timer_t *timer) {
 	(void)timer;
+	// The anisette catalog's answer, whenever it lands: the picker refills
+	// itself, whether it is on screen or waiting to be opened again.
+	static unsigned servers_seen;
+	if (amp_servers_done != servers_seen) {
+		servers_seen = amp_servers_done;
+		servers_rebuild();
+	}
 	pthread_mutex_lock(&job_lock);
 	result_t *result = mail;
 	mail = NULL;
