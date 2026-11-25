@@ -564,7 +564,7 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 	plistw_string(&w, "Version", "1.0.1");
 	plistw_dict_end(&w);
 	plistw_dict_begin(&w, "Request");
-	plistw_data(&w, "m", srp.m1, 32);
+	plistw_data(&w, "M1", srp.m1, 32);
 	plistw_string(&w, "c", out->session);
 	anisette_to_plist(&w, anisette);
 	plistw_string(&w, "o", "complete");
