@@ -651,18 +651,37 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 	snprintf(out->adsid, sizeof(out->adsid), "%s", adsid);
 	snprintf(out->idms_token, sizeof(out->idms_token), "%s", idms);
 
+	// The second-factor ask lives in Status.au -- the 2FA-pending answer
+	// carries no spd or identity at all, and missing the ask here would
+	// read as a signed-in session whose every field is empty.
 	int au = resp_get(&reply, "au");
+	if (au < 0) {
+		int status = resp_get(&reply, "Status");
+		au = status >= 0 ? plist_get_in(&reply, status, "au") : -1;
+	}
 	const char *au_str = au >= 0 ? plist_str(&reply, au) : NULL;
 
 	if (au_str && strcmp(au_str, "trustedDeviceSecondaryAuth") == 0) {
 		out->result = GSA_NEEDS_2FA_TOTP;
+		fprintf(stderr, "gsa: the server asks for a trusted-device code\n");
 		plist_free(&reply);
 		return true;
 	}
 	if (au_str && strcmp(au_str, "secondaryAuth") == 0) {
 		out->result = GSA_NEEDS_2FA_SMS;
+		fprintf(stderr, "gsa: the server asks for an SMS code\n");
 		plist_free(&reply);
 		return true;
+	}
+	if (!out->adsid[0] || !out->idms_token[0]) {
+		// A complete that neither asked for the second factor nor handed
+		// over an identity is not a sign-in; treating it as one would save
+		// an empty session and call it success.
+		fprintf(stderr, "gsa: complete answered without an identity or a second factor\n");
+		out->result = GSA_FAILED;
+		snprintf(error, error_size, "gsa_no_identity");
+		plist_free(&reply);
+		return false;
 	}
 	out->result = GSA_OK;
 	plist_free(&reply);
@@ -684,9 +703,13 @@ bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, cons
 		snprintf(anisette_h + len, sizeof(anisette_h) - len, "%s: %s\r\n",
 				 anisette->kv[i].key, anisette->kv[i].value);
 	}
-	// the identity token is the adsid and the GsIdmsToken as one base64 pair
+	// the identity token is the adsid and the GsIdmsToken as one base64 pair.
+	// The native pre-2FA validate carries no identity yet -- Apple's own
+	// client asks with the security code and the machine data alone -- so
+	// the token header is written only when the pair exists.
 	char ident_pair[1280];
 	snprintf(ident_pair, sizeof(ident_pair), "%s:%s", login->adsid, login->idms_token);
+	bool have_ident = login->adsid[0] && login->idms_token[0];
 	char ident_b64[1792];
 	{
 		static const char alphabet[] =
@@ -717,14 +740,24 @@ bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, cons
 		ident_b64[o] = '\0';
 	}
 	char extra[4096];
-	snprintf(extra, sizeof(extra),
-		 "Accept: text/x-xml-plist\r\n"
-		 "security-code: %s\r\n"
-		 "X-Apple-Identity-Token: %s\r\n"
-		 "Accept-Language: en-us\r\n"
-		 "Loc: en_US\r\n"
-		 "%s",
-		 code, ident_b64, anisette_h);
+	if (have_ident) {
+		snprintf(extra, sizeof(extra),
+			 "Accept: text/x-xml-plist\r\n"
+			 "security-code: %s\r\n"
+			 "X-Apple-Identity-Token: %s\r\n"
+			 "Accept-Language: en-us\r\n"
+			 "Loc: en_US\r\n"
+			 "%s",
+			 code, ident_b64, anisette_h);
+	} else {
+		snprintf(extra, sizeof(extra),
+			 "Accept: text/x-xml-plist\r\n"
+			 "security-code: %s\r\n"
+			 "Accept-Language: en-us\r\n"
+			 "Loc: en_US\r\n"
+			 "%s",
+			 code, anisette_h);
+	}
 	http_req_t req;
 	memset(&req, 0, sizeof(req));
 	req.method = "GET";
