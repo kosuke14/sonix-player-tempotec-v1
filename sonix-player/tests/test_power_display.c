@@ -134,12 +134,6 @@ static uint32_t display_tick(void) { return test_ms; }
 
 static long saved_brightness = -1;
 
-/* The screensaver defers to the video player around its screen-off walk; the
- * player is not part of this fixture, and its three questions answer
- * themselves: nothing is suspended here. */
-void videoplayer_ui_suspend(void) {}
-void videoplayer_ui_resume(void) {}
-bool videoplayer_ui_is_suspended(void) { return false; }
 static long wake_hold;
 static bool bt_tx, bt_rx, credible_vsync;
 static bool waveform_lit, led_dark;

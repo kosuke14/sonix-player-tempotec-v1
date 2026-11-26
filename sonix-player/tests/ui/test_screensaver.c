@@ -147,10 +147,6 @@ bool screensaverpics_pick(const char *current, int max_w, int max_h, char *out, 
 	return false;
 }
 const char *metadata_shown_artist(const song_metadata_t *m) { return m->artist; }
-// The video player resumes itself when the screensaver goes away; the test
-// never suspends one, so these never have anything to do.
-bool videoplayer_ui_is_suspended(void) { return false; }
-void videoplayer_ui_resume(void) {}
 
 /* ---- pictures, and the bookkeeping that catches a leak or a double free --- */
 
