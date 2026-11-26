@@ -910,6 +910,19 @@ $(BUILD)/test_mostplayed: $(MOSTPLAYED_SRC) $(BUILD)/sqlite3_impl.o \
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(MOSTPLAYED_SRC) $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
 
+# The explicit marker: real library.c and SQLite, no LVGL. The advisory's
+# own parsing is exercised with real M4A fixtures by `make tags`.
+EXPLICIT_SRC = test_explicit.c $(ROOT)/src/system/library/library.c \
+               $(ROOT)/src/system/core/config.c $(ROOT)/src/system/core/utils.c
+.PHONY: explicit
+explicit: $(BUILD)/test_explicit
+	$(BUILD)/test_explicit
+
+$(BUILD)/test_explicit: $(EXPLICIT_SRC) $(BUILD)/sqlite3_impl.o \
+                        $(ROOT)/src/system/library/library.h $(ROOT)/src/gui/library/explicitmark.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(EXPLICIT_SRC) $(BUILD)/sqlite3_impl.o $(LDFLAGS) $(LDLIBS)
+
 # The album grid's arithmetic: the four covers that fill the V1's 240x320
 # panel, and the same rules on the wide boards. No LVGL, no library: plain C.
 .PHONY: albumgrid
@@ -1379,6 +1392,7 @@ ALBUMGRID_UI_SRC = $(ROOT)/tests/ui/test_albumgrid_ui.c $(ROOT)/src/gui/library/
                    $(ROOT)/src/gui/shell/theme.c $(ROOT)/src/gui/board_profile.c \
                    $(ROOT)/src/system/core/config.c
 ALBUMGRID_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(ALBUMGRID_UI_SRC)) \
+                   $(BUILD)/ui/src/gui/shell/scrolltext.o \
                    $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(UI_LVGL_SRC))
 
 .PHONY: albumgrid-ui
@@ -1398,7 +1412,7 @@ STATS_UI_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(STATS_UI_SRC)) \
 
 .PHONY: stats-ui
 stats-ui: $(BUILD)/test_stats
-	$(BUILD)/test_stats
+	$(BUILD)/test_stats ../../sonix-packer/assets/V1/usr/resource/sonix/language
 
 $(BUILD)/test_stats: $(STATS_UI_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -1507,6 +1521,18 @@ MUSICROWS_OBJ = $(patsubst $(ROOT)/%.c,$(BUILD)/ui/%.o,$(MUSICROWS_SRC)) \
 .PHONY: musicsettings-rows
 musicsettings-rows: $(BUILD)/test_musicsettings_rows
 	$(BUILD)/test_musicsettings_rows ../../sonix-packer/assets/V1/usr/resource/sonix/language
+
+# The Music page's tile arrangement, without LVGL: the rule album/artist/... tiles
+# are read and written by, and what happens to the "Most played" tile issue #494
+# took off the page. The real config.c is the store it reads.
+MUSICTILES_SRC = test_musictiles.c $(ROOT)/src/gui/settings/tilelayout.c $(ROOT)/src/system/core/config.c
+
+.PHONY: musictiles
+musictiles: $(BUILD)/test_musictiles
+	$(BUILD)/test_musictiles
+
+$(BUILD)/test_musictiles: $(MUSICTILES_SRC) $(ROOT)/src/gui/settings/tilelayout.h $(ROOT)/src/gui/library/music_tiles.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(MUSICTILES_SRC) $(LDFLAGS) $(LDLIBS)
 
 # Developer options: the USB 48 kHz compatibility row. The page is built by the
 # real devoptions_init(), so the row under test is the one the player draws, in
@@ -1634,7 +1660,7 @@ $(BUILD)/test_stockkeys_ui: $(ROOT)/build_gen/streamkeys_key.h $(STOCKKEYS_UI_OB
 	$(CC) -o $@ $(STOCKKEYS_UI_OBJ) $(LDFLAGS) $(LDLIBS)
 
 .PHONY: ui
-ui: wifitransfer-ui batteryprofile-ui sdhealth-ui sdhealth-keys
+ui: wifitransfer-ui batteryprofile-ui sdhealth-ui sdhealth-keys musictiles
 ui: $(BUILD)/test_sleeve_hold
 # The PEQ profiles suite waits out of the run: upstream's Automatic Level
 # commit (40580ed4) left its band-entry assertions failing against its own
@@ -1664,7 +1690,8 @@ ui: $(BUILD)/test_browser_grid $(BUILD)/test_qobuzgenregrid $(BUILD)/test_main_m
 	$(BUILD)/test_musicsettings_rows ../../sonix-packer/assets/V1/usr/resource/sonix/language
 	$(BUILD)/test_browser_grid
 	$(BUILD)/test_albumgrid_ui
-	$(BUILD)/test_stats
+	$(BUILD)/test_stats ../../sonix-packer/assets/V1/usr/resource/sonix/language
+	$(BUILD)/test_musictiles
 	$(BUILD)/test_volume_overlay
 	$(BUILD)/test_playerdeck
 	$(BUILD)/test_vinylayout

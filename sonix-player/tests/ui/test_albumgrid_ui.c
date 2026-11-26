@@ -103,6 +103,8 @@ void gui_notify_no_card(void) {}
 void gui_notify_popup(const char *text) { (void)text; }
 void toast_success(const char *text) { (void)text; }
 void toast_error(const char *text) { (void)text; }
+// The real scrolltext.c is linked (medialist's rows ask it to scroll), so
+// scrolltext_apply() is not stubbed here: it is the real binding.
 void power_pause_in_standby(lv_timer_t *timer) { (void)timer; }
 bool musicsettings_allow_delete(void) { return false; }
 bool musicsettings_endless_shuffle(void) { return false; }
@@ -264,6 +266,10 @@ void library_album_title(const char *value, char *out, size_t size) {
 	snprintf(out, size, "%s", value ? value : "");
 }
 bool library_album_same(const char *a, const char *b) { return a && b && strcmp(a, b) == 0; }
+// The advisory flag comes from the database in the player; these rows are
+// synthetic, so none of them is explicit.
+bool library_track_explicit(const char *path) { (void)path; return false; }
+bool library_album_explicit(const char *value) { (void)value; return false; }
 bool library_album_artist(const char *album, char *out, size_t size) {
 	(void)album;
 	if (out && size) {

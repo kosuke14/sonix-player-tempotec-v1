@@ -9,6 +9,7 @@
 
 #include "src/gui/library/browser.h"
 #include "src/gui/library/audiobookextras.h"
+#include "src/gui/library/explicitmark.h"
 #include "src/gui/nowplaying/chapters.h"
 #include "src/gui/nowplaying/aamlayout.h"
 #include "src/gui/nowplaying/cover.h"
@@ -449,6 +450,7 @@ static bool layout_poster_now;	  // and for the fifth: the sleeve at the width o
 static int player_screen_height, player_status_height;
 static bool player_status_bar;
 static bool player_status_color;
+static bool player_aam_blur;
 static bool layout_aam_now;		  // and for the sixth: the sleeve over the page, the media controls traded for it
 static bool layout_sticker_now;
 static int player_content_top(void) {
@@ -1922,10 +1924,12 @@ static bool backdrop_blur_wanted(void) { return !theme_is_oled(); }
 // whether album-colored icons are enabled.
 static void player_status_background_apply(void) {
 	bool visible = sheet_open && (player_status_bar || layout_aam_now);
-	bool layout_blur = visible && statusbarlayout_uses_blur(
-		layout_poster_now, layout_vinyl_now, layout_sticker_now,
-		layout_studio_now, layout_immersive_now,
-		theme_is_oled(), backdrop_is_full, backdrop_is_band);
+	bool layout_blur = visible && (layout_aam_now
+		? statusbarlayout_aam_uses_blur(player_aam_blur, backdrop_is_full)
+		: statusbarlayout_uses_blur(
+			layout_poster_now, layout_vinyl_now, layout_sticker_now,
+			layout_studio_now, layout_immersive_now,
+			theme_is_oled(), backdrop_is_full, backdrop_is_band));
 	bool use_blur = current_backdrop.pixels && layout_blur;
 	// Vinyl's page is deliberately solid black, independently of the theme;
 	// Sticker uses its deep violet-black ground; Poster and the missing-art
@@ -1947,7 +1951,9 @@ static void full_backdrop_apply(void) {
 	if (!backdrop_full || !studio_bg || layout_studio_now || lyrics_look_on) {
 		return;
 	}
-	bool have = !layout_vinyl_now && !layout_sticker_now && backdrop_blur_wanted() && current_backdrop.pixels != NULL && backdrop_is_full;
+	bool blur_wanted = layout_aam_now ? player_aam_blur : backdrop_blur_wanted();
+	bool have = !layout_vinyl_now && !layout_sticker_now && blur_wanted &&
+		current_backdrop.pixels != NULL && backdrop_is_full;
 	lv_image_set_src(studio_bg, have ? &current_backdrop.dsc : NULL);
 	lv_obj_set_hidden(studio_bg, !have);
 	if (have) {
@@ -5543,7 +5549,9 @@ static void refresh_now_playing(void) {
 	if (state.live) {
 		// The station on top, what it says is on air underneath -- the same
 		// two lines as a track, carrying the two things a radio knows.
-		scrolltext_set(song_title_label, state.metadata.title);
+		char shown[sizeof(state.metadata.title) + sizeof(EXPLICIT_MARK)];
+		explicit_decorate(shown, sizeof(shown), state.metadata.title, state.metadata.is_explicit);
+		scrolltext_set(song_title_label, shown);
 		scrolltext_set(song_artist_label, state.metadata.artist);
 		sticker_album_sync(&state);
 		lyrics_head_sync();
@@ -5560,7 +5568,10 @@ static void refresh_now_playing(void) {
 
 	const char *file = state.current_file;
 	const char *slash = strrchr(file, '/');
-	scrolltext_set(song_title_label, state.metadata.title[0] ? state.metadata.title : (slash ? slash + 1 : file));
+	const char *base_title = state.metadata.title[0] ? state.metadata.title : (slash ? slash + 1 : file);
+	char shown[sizeof(state.metadata.title) + sizeof(EXPLICIT_MARK)];
+	explicit_decorate(shown, sizeof(shown), base_title, state.metadata.is_explicit);
+	scrolltext_set(song_title_label, shown);
 	aam_strip_fit(); // the strip shares its row by what the two names now say
 
 	// Whose name goes under the title: a podcast episode names its show's
@@ -5616,7 +5627,9 @@ static void refresh_now_playing(void) {
 // refresh_now_playing(): that throws the decoded cover away and asks for it
 // again, which for a station whose icon has not changed is work for nothing.
 static void refresh_live_texts(const device_state_t *state) {
-	scrolltext_set(song_title_label, state->metadata.title);
+	char shown[sizeof(state->metadata.title) + sizeof(EXPLICIT_MARK)];
+	explicit_decorate(shown, sizeof(shown), state->metadata.title, state->metadata.is_explicit);
+	scrolltext_set(song_title_label, shown);
 	scrolltext_set(song_artist_label, state->metadata.artist);
 	sticker_album_sync(state);
 	lyrics_head_sync();
@@ -7212,6 +7225,17 @@ void player_status_color_set(bool enabled) {
 	player_status_color_apply();
 }
 
+bool player_aam_blur_get(void) { return player_aam_blur; }
+
+void player_aam_blur_set(bool enabled) {
+	if (!bp_is_tempotec_v1() || player_aam_blur == enabled) return;
+	player_aam_blur = enabled;
+	config_set_bool("screen", "player_aam_blur", enabled);
+	config_save();
+	full_backdrop_apply();
+	player_status_background_apply();
+}
+
 bool player_status_bar_get(void) { return player_status_bar; }
 
 void player_status_bar_set(bool enabled) {
@@ -7919,7 +7943,14 @@ static void sticker_album_sync(const device_state_t *state) {
 	if (state->live && (!album || !album[0])) {
 		album = state->metadata.genre;
 	}
-	lv_label_set_text(sticker_view.album_label, album ? album : "");
+	char shown[sizeof(state->metadata.album) + sizeof(EXPLICIT_MARK)];
+	// An album value is its name and its key: 300 bytes in the public API.
+	char value[300];
+	if (!library_track_album_value(state->current_file, value, sizeof(value))) {
+		snprintf(value, sizeof(value), "%s", album ? album : "");
+	}
+	explicit_decorate(shown, sizeof(shown), album, library_album_explicit(value));
+	lv_label_set_text(sticker_view.album_label, shown);
 	sticker_pills_sync();
 }
 
@@ -8477,6 +8508,9 @@ void player_init(gui_config_t *cfg) {
 	player_status_height = cfg->top_bar_height;
 	player_status_bar = bp_is_tempotec_v1() && config_get_bool("screen", "player_status_bar", false);
 	player_status_color = bp_is_tempotec_v1() && config_get_bool("screen", "player_status_color", false);
+	// Match the existing theme default until the user chooses an explicit value.
+	player_aam_blur = bp_is_tempotec_v1() &&
+		config_get_bool("screen", "player_aam_blur", !theme_is_oled());
 
 	// Geometry first, because everything else hangs off it. The V1 gets a
 	// deck exactly as tall as its four rows need (compact_deck_height()), a
