@@ -688,6 +688,7 @@ static void anisette_apply(const char *url) {
 	config_save();
 	anisette_set_server(draft_anisette);
 	anisette_set_root(storage_sd_root());
+	ampnative_set_root(storage_sd_root());
 	settings_refresh();
 }
 
@@ -835,6 +836,7 @@ static void accept_cb(lv_event_t *e) {
 		config_save();
 		anisette_set_server(draft_anisette);
 		anisette_set_root(storage_sd_root());
+		ampnative_set_root(storage_sd_root());
 	} else if (editing == 1) {
 		snprintf(draft_user, sizeof(draft_user), "%s", value);
 	} else {
@@ -1190,6 +1192,7 @@ void amppage_init(gui_config_t *cfg) {
 	streamturn_register_abandon(ampstream_cancel);
 	ampitunes_set_root(storage_sd_root());
 	anisette_set_root(storage_sd_root());
+	ampnative_set_root(storage_sd_root());
 	anisette_set_server(config_get("applemusic", "anisette_url", ""));
 
 	amp_screen = screen();
