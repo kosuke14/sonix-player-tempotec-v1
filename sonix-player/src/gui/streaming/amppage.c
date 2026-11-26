@@ -204,13 +204,13 @@ static void *worker_main(void *arg) {
 				}
 			}
 		} else {
-			amplocal_me_t me;
-			// The tokens rotate whenever the daemon re-authenticates, so
-			// every job reads them fresh; they are wiped before the result
-			// is sent. The daemon may be missing altogether -- that is the
-			// not-signed-in case, and the search still answers from the
-			// token-free catalog.
-			bool have_me = amplocal_me(&me, result->error, sizeof(result->error));
+			ampnative_me_t me;
+			// The tokens are minted fresh on every job, from the card's own
+			// session: the media API rotates them, and the device needs no
+			// daemon to hold a stale copy. Not signed in is the missing
+			// session, and the search still answers from the token-free
+			// catalog.
+			bool have_me = ampnative_me(&me, result->error, sizeof(result->error));
 if (job.kind == JOB_SEARCH) {
 				char storefront[32];
 				snprintf(storefront, sizeof(storefront), "%.20s",
@@ -280,20 +280,15 @@ if (job.kind == JOB_SEARCH) {
 			}
 			if (have_me) {
 				result->signed_in = me.authenticated;
-				snprintf(result->apple_id, sizeof(result->apple_id), "%s", me.apple_id);
-				memset(&me, 0, sizeof(me));
 			}
 		}
 		// A sign-in hop changes the session behind the flow, so the
 		// account row is refreshed from a fresh snapshot inside the job.
 			if (job.kind == JOB_LOGIN || job.kind == JOB_2FA || job.kind == JOB_LOGOUT) {
 				if (result->count >= 0) {
-					amplocal_me_t me;
-					if (amplocal_me(&me, result->error, sizeof(result->error))) {
-						result->signed_in = me.authenticated;
-						snprintf(result->apple_id, sizeof(result->apple_id), "%s", me.apple_id);
-						memset(&me, 0, sizeof(me));
-					}
+					result->signed_in = ampnative_signed_in();
+					snprintf(result->apple_id, sizeof(result->apple_id), "%s",
+							 config_get("applemusic", "last_apple_id", ""));
 				}
 			}
 			if (result->count < 0 && !result->error[0]) {
@@ -935,6 +930,12 @@ static void login_field_focus_cb(lv_event_t *e) {
 }
 
 static void remember_maybe_save(void) {
+	// The account name rides the config either way: the account row and the
+	// library's greeting read it, and it is not a secret.
+	if (pending_user[0]) {
+		config_set("applemusic", "last_apple_id", pending_user);
+		config_save();
+	}
 	if (!remember_checked) {
 		return;
 	}

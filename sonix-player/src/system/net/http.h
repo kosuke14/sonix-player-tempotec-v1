@@ -123,6 +123,14 @@ typedef struct {
 	// Optional User-Agent override; NULL sends HTTP_USER_AGENT.
 	const char *user_agent;
 
+	// Ask the call to collect the response's Set-Cookie pairs (name=value,
+	// joined with "; ") into the caller's buffer: the login flow's session
+	// cookies ride the answers of both GrandSlam POSTs, and the token
+	// service that follows them wants the jar back verbatim. The buffer is
+	// only appended to when the call succeeds.
+	char *collect_cookies;
+	size_t collect_cookies_size;
+
 	// Speak HTTP/1.1 on the wire instead of the 1.0 the template sends. The
 	// reply still ends by Content-Length or connection close, and chunked
 	// bodies are handled either way; a caller whose peer cares about the

@@ -43,4 +43,16 @@ bool ampnative_music_token(char *out, size_t out_size, char *error, size_t error
 // Forgets the session on the card.
 void ampnative_logout(void);
 
+// The per-account catalog's two tokens, minted on demand from the card's
+// session cookies: the developer ("media API") token and the music user
+// token that rides beside it. False when there is no session or the
+// minting fails; `error` says which.
+typedef struct {
+	char dev_token[2048];
+	char music_user_token[2048];
+	char dsid[64];
+	bool authenticated;
+} ampnative_me_t;
+bool ampnative_me(ampnative_me_t *out, char *error, size_t error_size);
+
 #endif // AMPNATIVE_H

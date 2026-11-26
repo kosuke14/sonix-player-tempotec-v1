@@ -73,6 +73,9 @@ typedef struct {
 	int b_len;
 	long long iters;
 	char sp[16]; // the password protocol the server picked: s2k or s2k_fo
+	// The session cookies both GrandSlam POSTs set: the media API's token
+	// service wants this jar back verbatim on its two calls.
+	char cookies[3072];
 	// The session's own keys from the spd, what the app-token requests sign
 	// with. Zeroed after use by the caller that is done with them.
 	uint8_t sk[64];
@@ -102,5 +105,14 @@ bool gsa_2fa_totp(const gsa_anisette_t *anisette, const gsa_login_t *login, cons
 bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
 				   const char *app_name, char *out, size_t out_size, char *error,
 				   size_t error_size);
+
+// The media API's two tokens, minted from the login's cookie jar exactly the
+// way the Android client's own request context does it: the developer
+// ("media API") token from sf-api-token-service, then the per-account music
+// user token asserted against it. `guid` is the device id the anisette set
+// already carries.
+bool gsa_media_tokens(const gsa_anisette_t *anisette, const char *cookies,
+					  const char *guid, char *dev, size_t dev_size, char *mus,
+					  size_t mus_size, char *error, size_t error_size);
 
 #endif /* GSA_H */

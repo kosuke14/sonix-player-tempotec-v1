@@ -1027,6 +1027,38 @@ static bool get_once(const url_t *u, const http_req_t *req, char **out, size_t *
 	                          timeout_secs);
 	*status_out = status;
 
+	// The session cookies a login flow is building its jar from: every
+	// Set-Cookie's name=value pair, joined so the next request can say
+	// "Cookie: ..." with the whole thing.
+	if (req->collect_cookies && req->collect_cookies_size > 0) {
+		const char *line = headers;
+		while (line && *line) {
+			if (strncasecmp(line, "Set-Cookie:", 11) == 0) {
+				const char *v = line + 11;
+				while (*v == ' ' || *v == '\t') {
+					v++;
+				}
+				size_t pair = strcspn(v, ";");
+				if (pair > 0) {
+					size_t used = strlen(req->collect_cookies);
+					if (used + 3 < req->collect_cookies_size) {
+						if (used) {
+							strncat(req->collect_cookies, "; ", 2);
+							used += 2;
+						}
+						size_t room = req->collect_cookies_size - used - 1;
+						size_t take = pair < room ? pair : room;
+						strncat(req->collect_cookies, v, take);
+					}
+				}
+			}
+			line = strchr(line, '\n');
+			if (line) {
+				line++;
+			}
+		}
+	}
+
 	if (status >= 300 && status < 400) {
 		location[0] = '\0';
 		header_value(headers, "Location", location, location_size);

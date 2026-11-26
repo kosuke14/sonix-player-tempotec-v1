@@ -46,6 +46,7 @@ typedef struct {
 	int sk_len;
 	uint8_t c[64];
 	int c_len;
+	char cookies[3072];
 } native_session_t;
 
 static void hex_encode(const uint8_t *in, size_t len, char *out, size_t out_size) {
@@ -109,6 +110,7 @@ static bool session_save(const native_session_t *s) {
 	hex_encode(s->c, (size_t)s->c_len, c_hex, sizeof(c_hex));
 	fprintf(f, "adsid=%s\nidms=%s\npt=%s\nmusic=%s\nsk=%s\nc=%s\n", s->adsid, s->idms, s->pt,
 			s->music, sk_hex, c_hex);
+	fprintf(f, "cookies=%s\n", s->cookies);
 	bool ok = fclose(f) == 0;
 	if (ok) {
 		ok = rename(tmp, path) == 0;
@@ -155,6 +157,8 @@ static bool session_load(native_session_t *s) {
 			size_t len = 0;
 			hex_decode(value, s->c, sizeof(s->c), &len);
 			s->c_len = (int)len;
+		} else if (strcmp(line, "cookies") == 0) {
+			snprintf(s->cookies, sizeof(s->cookies), "%s", value);
 		}
 	}
 	fclose(f);
@@ -175,6 +179,7 @@ static void login_to_session(const gsa_login_t *login, native_session_t *s) {
 		memcpy(s->c, login->c, (size_t)login->c_len);
 		s->c_len = login->c_len;
 	}
+	snprintf(s->cookies, sizeof(s->cookies), "%s", login->cookies);
 }
 
 // The machine data, provisioned on demand: the first sign-in on a card
@@ -319,4 +324,44 @@ void ampnative_logout(void) {
 	char path[768];
 	session_path(path, sizeof(path));
 	remove(path);
+}
+
+// ---------------------------------------------------------------------------
+// the media API's two tokens, minted from the card's own session
+// ---------------------------------------------------------------------------
+
+bool ampnative_me(ampnative_me_t *out, char *error, size_t error_size) {
+	if (error && error_size) {
+		error[0] = '\0';
+	}
+	if (!out) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+	native_session_t s;
+	if (!session_load(&s) || !s.adsid[0] || !s.cookies[0]) {
+		snprintf(error, error_size, "ampnative_no_session");
+		return false;
+	}
+	gsa_anisette_t anisette;
+	if (!anisette_ready(&anisette, error, error_size)) {
+		return false;
+	}
+	// the guid the token service keys the device by: the same device id the
+	// anisette set already carries
+	const char *guid = "";
+	for (int i = 0; i < anisette.count; i++) {
+		if (strcmp(anisette.kv[i].key, "X-Mme-Device-Id") == 0) {
+			guid = anisette.kv[i].value;
+			break;
+		}
+	}
+	if (!gsa_media_tokens(&anisette, s.cookies, guid, out->dev_token, sizeof(out->dev_token),
+						  out->music_user_token, sizeof(out->music_user_token), error,
+						  error_size)) {
+		return false;
+	}
+	snprintf(out->dsid, sizeof(out->dsid), "%s", s.adsid);
+	out->authenticated = true;
+	return true;
 }

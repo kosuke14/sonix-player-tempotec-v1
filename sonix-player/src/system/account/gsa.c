@@ -256,7 +256,8 @@ static void gsa_build_extra(char *extra, size_t extra_size, const gsa_anisette_t
 }
 
 static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const char *body,
-					 plist_t *reply, char *error, size_t error_size) {
+					 plist_t *reply, char *error, size_t error_size, char *collect_cookies,
+					 size_t collect_cookies_size) {
 	// The XML declaration and the doctype go on the front: the plist the
 	// writer emits is the bare dict, and Apple's parsers are particular.
 	size_t full_cap = strlen(body) + 512;
@@ -298,6 +299,11 @@ static bool gsa_post(const gsa_anisette_t *anisette, const char *endpoint, const
 	// is the server's own: the OTP was minted under that client.
 	req.http_11 = true;
 	req.user_agent = anisette && anisette->user_agent[0] ? anisette->user_agent : GSA_USER_AGENT;
+	// The login's session cookies ride both answers; the media API's token
+	// service wants the jar back on its own two calls. The jar accumulates
+	// across the caller's requests: init starts it, the complete appends.
+	req.collect_cookies = collect_cookies;
+	req.collect_cookies_size = collect_cookies_size;
 	// What the request actually rode on, for the log: the pairing of the OTP
 	// and this identity is the whole game, and the log is the only place the
 	// pair is visible after the fact.
@@ -439,7 +445,9 @@ bool gsa_login_init(const gsa_anisette_t *anisette, const char *username, const 
 
 	plist_t reply;
 	memset(&reply, 0, sizeof(reply));
-	bool ok = gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size);
+	memset(out->cookies, 0, sizeof(out->cookies));
+	bool ok = gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size,
+					   out->cookies, sizeof(out->cookies));
 	plistw_free(&w);
 	if (!ok) {
 		snprintf(out->error, sizeof(out->error), "%s", error);
@@ -574,7 +582,8 @@ bool gsa_login_complete(const gsa_anisette_t *anisette, const char *username,
 
 	plist_t reply;
 	memset(&reply, 0, sizeof(reply));
-	bool ok = gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size);
+	bool ok = gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size,
+					   out->cookies, sizeof(out->cookies));
 	plistw_free(&w);
 	if (!ok) {
 		snprintf(out->error, sizeof(out->error), "%s", error);
@@ -880,7 +889,7 @@ bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
 
 	plist_t reply;
 	memset(&reply, 0, sizeof(reply));
-	if (!gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size)) {
+	if (!gsa_post(anisette, GSA_ENDPOINT, w.buf, &reply, error, error_size, NULL, 0)) {
 		plistw_free(&w);
 		return false;
 	}
@@ -910,4 +919,122 @@ bool gsa_app_token(const gsa_anisette_t *anisette, const gsa_login_t *login,
 	}
 	plist_free(&reply);
 	return ok;
+}
+
+// ---------------------------------------------------------------------------
+// the media API's own two tokens, minted natively
+// ---------------------------------------------------------------------------
+//
+// The Android client reaches the catalog through two plain HTTPS calls that
+// ride the login's cookie jar: sf-api-token-service hands out the developer
+// ("media API") JWT, and MZPlay's createMusicToken asserts it into the
+// per-account music user token. The wrapper ran both inside the Android
+// libraries' request context; the requests themselves are ordinary HTTP the
+// player's own stack speaks.
+bool gsa_media_tokens(const gsa_anisette_t *anisette, const char *cookies,
+					  const char *guid, char *dev, size_t dev_size, char *mus,
+					  size_t mus_size, char *error, size_t error_size) {
+	if (error && error_size) {
+		error[0] = '\0';
+	}
+	if (!cookies || !cookies[0] || !guid || !guid[0] || !dev || !mus) {
+		snprintf(error, error_size, "gsa_media_bad_args");
+		return false;
+	}
+	dev[0] = mus[0] = '\0';
+
+	// the request context's own headers: the login's cookie jar, the device
+	// id, and the anisette set the OTP rides in
+	char anisette_h[2048] = "";
+	for (int i = 0; anisette && i < anisette->count; i++) {
+		size_t len = strlen(anisette_h);
+		snprintf(anisette_h + len, sizeof(anisette_h) - len, "%s: %s\r\n",
+				 anisette->kv[i].key, anisette->kv[i].value);
+	}
+
+	char headers[6144];
+	snprintf(headers, sizeof(headers),
+			 "Cookie: %s\r\n"
+			 "guid: %s\r\n"
+			 "Accept: */*\r\n"
+			 "%s",
+			 cookies, guid, anisette_h);
+
+	char *body = NULL;
+	size_t len = 0;
+	int status = 0;
+	http_req_t req;
+	memset(&req, 0, sizeof(req));
+	req.extra_headers = headers;
+	req.want_error_body = true;
+	req.allow_empty_body = true;
+	req.http_11 = true;
+	req.user_agent = anisette && anisette->user_agent[0] ? anisette->user_agent : GSA_USER_AGENT;
+	if (!http_request("https://sf-api-token-service.itunes.apple.com/apiToken", &req, &body,
+					  &len, 256 * 1024, 20, &status) ||
+		status != 200) {
+		snprintf(error, error_size, "gsa_media_dev_%d", status);
+		free(body);
+		return false;
+	}
+	json_doc_t doc;
+	if (!json_parse(body, &doc)) {
+		free(body);
+		snprintf(error, error_size, "gsa_media_bad_json");
+		return false;
+	}
+	json_obj_str(&doc, json_root(&doc), "token", dev, dev_size);
+	json_free(&doc);
+	free(body);
+	if (!dev[0]) {
+		snprintf(error, error_size, "gsa_media_no_dev");
+		return false;
+	}
+	fprintf(stderr, "gsa: media dev token acquired (%zu bytes)\n", strlen(dev));
+
+	// the per-account token, asserted against the developer token
+	char post[2560];
+	snprintf(post, sizeof(post), "guid=%s&assertion=%s", guid, dev);
+	char post_headers[8192];
+	snprintf(post_headers, sizeof(post_headers),
+			 "Cookie: %s\r\n"
+			 "guid: %s\r\n"
+			 "Content-Type: application/x-www-form-urlencoded\r\n"
+			 "Accept: */*\r\n"
+			 "%s",
+			 cookies, guid, anisette_h);
+
+	body = NULL;
+	len = 0;
+	status = 0;
+	memset(&req, 0, sizeof(req));
+	req.method = "POST";
+	req.extra_headers = post_headers;
+	req.body = post;
+	req.body_len = strlen(post);
+	req.want_error_body = true;
+	req.allow_empty_body = true;
+	req.http_11 = true;
+	req.user_agent = anisette && anisette->user_agent[0] ? anisette->user_agent : GSA_USER_AGENT;
+	if (!http_request("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/createMusicToken",
+					  &req, &body, &len, 256 * 1024, 20, &status) ||
+		status != 200) {
+		snprintf(error, error_size, "gsa_media_mus_%d", status);
+		free(body);
+		return false;
+	}
+	if (!json_parse(body, &doc)) {
+		free(body);
+		snprintf(error, error_size, "gsa_media_bad_json");
+		return false;
+	}
+	json_obj_str(&doc, json_root(&doc), "musicToken", mus, mus_size);
+	json_free(&doc);
+	free(body);
+	if (!mus[0]) {
+		snprintf(error, error_size, "gsa_media_no_mus");
+		return false;
+	}
+	fprintf(stderr, "gsa: media music token acquired (%zu bytes)\n", strlen(mus));
+	return true;
 }
